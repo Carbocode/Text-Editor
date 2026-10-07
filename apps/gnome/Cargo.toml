@@ -1,0 +1,10 @@
+[package]
+name = "native-workspace-gnome"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-application = { path = "../../crates/application" }
+gtk = { package = "gtk4", version = "0.10" }
+adw = { package = "libadwaita", version = "0.8" }

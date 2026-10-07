@@ -2,3 +2,4 @@
 /apps/macos/.build/
 /apps/macos/generated/
 .DS_Store
+**/.qmlls.ini
