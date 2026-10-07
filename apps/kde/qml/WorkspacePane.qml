@@ -47,6 +47,27 @@ Item {
                     visible: root.enableBrowse
                     onClicked: if (root.flushEditor()) root.browseRequested()
                 }
+                ToolButton {
+                    id: recentButton
+                    text: "Recent"
+                    icon.name: "document-open-recent"
+                    display: AbstractButton.TextBesideIcon
+                    enabled: root.controller.recent_workspace_paths.length > 0
+                    onClicked: recentMenu.open()
+                    Menu {
+                        id: recentMenu
+                        y: recentButton.height
+                        Instantiator {
+                            model: root.controller.recent_workspace_paths
+                            delegate: MenuItem {
+                                text: root.controller.recent_workspace_names[index]
+                                onTriggered: if (root.flushEditor()) root.controller.open_workspace(modelData)
+                            }
+                            onObjectAdded: (index, object) => recentMenu.insertItem(index, object)
+                            onObjectRemoved: (index, object) => recentMenu.removeItem(object)
+                        }
+                    }
+                }
                 Item { Layout.fillWidth: true }
                 ToolButton {
                     text: "Save"

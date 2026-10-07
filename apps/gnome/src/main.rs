@@ -18,6 +18,8 @@ struct Ui {
     status: gtk::Label,
     counter: gtk::Label,
     save: gtk::Button,
+    recent_button: gtk::MenuButton,
+    recent_list: gtk::Box,
     updating: Rc<Cell<bool>>,
 }
 
@@ -33,6 +35,7 @@ impl Ui {
     fn render(&self, snapshot: AppSnapshot) {
         self.updating.set(true);
         let documents_changed = self.snapshot.borrow().documents != snapshot.documents;
+        let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         self.heading.set_label(
             snapshot
                 .workspace_name
@@ -54,6 +57,24 @@ impl Ui {
                 Some(_) => "Saved",
                 None => "Select a document",
             });
+        self.recent_button
+            .set_sensitive(!snapshot.recent_workspaces.is_empty());
+        if recent_changed {
+            while let Some(child) = self.recent_list.first_child() {
+                self.recent_list.remove(&child);
+            }
+            for workspace in &snapshot.recent_workspaces {
+                let button = gtk::Button::with_label(&workspace.name);
+                button.set_tooltip_text(Some(&workspace.root.to_string_lossy()));
+                button.add_css_class("flat");
+                button.set_halign(gtk::Align::Fill);
+                let ui = self.clone();
+                let path = workspace.root.clone();
+                button
+                    .connect_clicked(move |_| ui.dispatch(AppCommand::OpenWorkspace(path.clone())));
+                self.recent_list.append(&button);
+            }
+        }
         if documents_changed {
             self.files.remove_all();
             let section = adw::SidebarSection::new();
@@ -122,7 +143,16 @@ fn main() {
 }
 
 fn build_window(app: &adw::Application) {
-    let core = Application::new();
+    let mut core = Application::new();
+    let persistence_error = if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_none()
+        && std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE").is_none()
+    {
+        core.enable_persistence_default()
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
     let snapshot = core.snapshot();
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -144,6 +174,19 @@ fn build_window(app: &adw::Application) {
     save.set_child(Some(&save_content));
     save.set_sensitive(false);
     sidebar_header.pack_start(&open);
+    let recent_button = gtk::MenuButton::new();
+    recent_button.set_icon_name("document-open-recent-symbolic");
+    recent_button.set_tooltip_text(Some("Recent Workspaces"));
+    recent_button.set_sensitive(false);
+    let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    recent_list.set_margin_top(6);
+    recent_list.set_margin_bottom(6);
+    recent_list.set_margin_start(6);
+    recent_list.set_margin_end(6);
+    let recent_popover = gtk::Popover::new();
+    recent_popover.set_child(Some(&recent_list));
+    recent_button.set_popover(Some(&recent_popover));
+    sidebar_header.pack_start(&recent_button);
     content_header.pack_end(&save);
     let heading = gtk::Label::new(Some("Open a workspace"));
     content_header.set_title_widget(Some(&heading));
@@ -200,7 +243,7 @@ fn build_window(app: &adw::Application) {
 
     let ui = Ui {
         core: Rc::new(RefCell::new(core)),
-        snapshot: Rc::new(RefCell::new(snapshot)),
+        snapshot: Rc::new(RefCell::new(Application::new().snapshot())),
         files,
         editor,
         buffer,
@@ -208,8 +251,14 @@ fn build_window(app: &adw::Application) {
         status,
         counter,
         save,
+        recent_button,
+        recent_list,
         updating: Rc::new(Cell::new(false)),
     };
+    ui.render(snapshot);
+    if let Some(error) = persistence_error {
+        ui.status.set_label(&error);
+    }
     {
         let ui = ui.clone();
         let window = window.clone();

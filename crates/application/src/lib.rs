@@ -2,6 +2,8 @@
 
 use native_workspace_domain::{DiagnosticState, DocumentId, Workspace};
 use native_workspace_filesystem::{FilesystemError, RealFilesystem, WorkspaceFilesystem};
+pub use native_workspace_storage::RecentWorkspace;
+use native_workspace_storage::{MemoryStorage, MetadataStorage, SqliteStorage, StorageError};
 use std::path::PathBuf;
 
 /// An intention requested by a frontend.
@@ -22,6 +24,7 @@ pub enum AppEvent {
     WorkspaceOpened {
         workspace: Workspace,
         documents: Vec<DocumentId>,
+        recent_workspaces: Vec<RecentWorkspace>,
     },
     DocumentLoaded {
         id: DocumentId,
@@ -63,6 +66,7 @@ pub struct AppSnapshot {
     pub diagnostic_counter: u64,
     pub workspace_name: Option<String>,
     pub workspace_root: Option<PathBuf>,
+    pub recent_workspaces: Vec<RecentWorkspace>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
 }
@@ -89,6 +93,8 @@ pub enum AppError {
     RevisionOverflow,
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
+    #[error(transparent)]
+    Storage(#[from] StorageError),
 }
 
 #[derive(Debug)]
@@ -110,6 +116,7 @@ pub struct AppState {
     revision: u64,
     diagnostic: DiagnosticState,
     workspace: Option<Workspace>,
+    recent_workspaces: Vec<RecentWorkspace>,
     documents: Vec<DocumentEntry>,
     active_document: Option<DocumentId>,
 }
@@ -140,6 +147,7 @@ impl AppState {
                 .workspace
                 .as_ref()
                 .map(|workspace| workspace.root.clone()),
+            recent_workspaces: self.recent_workspaces.clone(),
             documents: self
                 .documents
                 .iter()
@@ -163,8 +171,10 @@ impl AppState {
             AppEvent::WorkspaceOpened {
                 workspace,
                 documents,
+                recent_workspaces,
             } => {
                 self.workspace = Some(workspace.clone());
+                self.recent_workspaces = recent_workspaces.clone();
                 self.documents = documents
                     .iter()
                     .cloned()
@@ -207,6 +217,7 @@ impl AppState {
 pub struct Application {
     state: AppState,
     filesystem: Box<dyn WorkspaceFilesystem>,
+    storage: Box<dyn MetadataStorage>,
 }
 
 impl Application {
@@ -218,7 +229,20 @@ impl Application {
         Self {
             state: AppState::default(),
             filesystem,
+            storage: Box::new(MemoryStorage::default()),
         }
+    }
+
+    /// Attach the user's SQLite metadata database before processing commands.
+    pub fn enable_persistence_default(&mut self) -> Result<AppSnapshot, AppError> {
+        self.enable_persistence(SqliteStorage::open_default()?)
+    }
+
+    pub fn enable_persistence(&mut self, storage: SqliteStorage) -> Result<AppSnapshot, AppError> {
+        let recent = storage.recent_workspaces()?;
+        self.storage = Box::new(storage);
+        self.state.recent_workspaces = recent;
+        Ok(self.snapshot())
     }
 
     pub fn state(&self) -> &AppState {
@@ -256,7 +280,7 @@ impl Application {
         })
     }
 
-    fn resolve(&self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
+    fn resolve(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
         let events = match command {
             AppCommand::IncrementDiagnostic => {
                 self.state
@@ -271,9 +295,11 @@ impl Application {
                     return Err(AppError::UnsavedChanges);
                 }
                 let (workspace, documents) = self.filesystem.open_workspace(&path)?;
+                let recent_workspaces = self.storage.record_workspace(&workspace)?;
                 vec![AppEvent::WorkspaceOpened {
                     workspace,
                     documents,
+                    recent_workspaces,
                 }]
             }
             AppCommand::OpenDocument(id) => {
@@ -461,6 +487,42 @@ mod tests {
             Err(AppError::WorkspaceNotOpen)
         ));
         assert_eq!(app.snapshot().revision, 0);
+    }
+
+    #[test]
+    fn recent_workspaces_survive_application_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("metadata.sqlite3");
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let mut app = Application::new();
+        let initial = app
+            .enable_persistence(SqliteStorage::open(&db).unwrap())
+            .unwrap();
+        assert_eq!(initial.revision, 0);
+        app.dispatch(AppCommand::OpenWorkspace(first.clone()))
+            .unwrap();
+        app.dispatch(AppCommand::OpenWorkspace(second.clone()))
+            .unwrap();
+        let snapshot = app
+            .dispatch(AppCommand::OpenWorkspace(first.clone()))
+            .unwrap();
+        assert_eq!(snapshot.recent_workspaces.len(), 2);
+        assert_eq!(
+            snapshot.recent_workspaces[0].root,
+            fs::canonicalize(first).unwrap()
+        );
+        drop(app);
+
+        let mut reopened = Application::new();
+        let restored = reopened
+            .enable_persistence(SqliteStorage::open(&db).unwrap())
+            .unwrap();
+        assert_eq!(restored.revision, 0);
+        assert!(restored.workspace_name.is_none());
+        assert_eq!(restored.recent_workspaces, snapshot.recent_workspaces);
     }
 
     #[test]

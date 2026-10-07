@@ -22,11 +22,18 @@ pub struct DocumentSnapshot {
 }
 
 #[derive(Clone, uniffi::Record)]
+pub struct RecentWorkspace {
+    pub root: String,
+    pub name: String,
+}
+
+#[derive(Clone, uniffi::Record)]
 pub struct WorkspaceSnapshot {
     pub revision: u64,
     pub counter: u64,
     pub workspace_name: Option<String>,
     pub workspace_root: Option<String>,
+    pub recent_workspaces: Vec<RecentWorkspace>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
 }
@@ -40,6 +47,14 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
             workspace_root: snapshot
                 .workspace_root
                 .map(|root| root.to_string_lossy().into_owned()),
+            recent_workspaces: snapshot
+                .recent_workspaces
+                .into_iter()
+                .map(|item| RecentWorkspace {
+                    root: item.root.to_string_lossy().into_owned(),
+                    name: item.name,
+                })
+                .collect(),
             documents: snapshot
                 .documents
                 .into_iter()
@@ -73,6 +88,8 @@ pub enum WorkspaceError {
     InvalidDocumentId,
     #[error("filesystem error: {0}")]
     Filesystem(String),
+    #[error("metadata storage error: {0}")]
+    Storage(String),
     #[error("diagnostic counter overflow")]
     CounterOverflow,
     #[error("application revision overflow")]
@@ -89,6 +106,7 @@ impl From<AppError> for WorkspaceError {
             AppError::DocumentNotOpen(id) => Self::DocumentNotOpen(id),
             AppError::UnsavedChanges => Self::UnsavedChanges,
             AppError::Filesystem(error) => Self::Filesystem(error.to_string()),
+            AppError::Storage(error) => Self::Storage(error.to_string()),
             AppError::CounterOverflow => Self::CounterOverflow,
             AppError::RevisionOverflow => Self::RevisionOverflow,
         }
@@ -115,6 +133,16 @@ impl WorkspaceApplication {
             .lock()
             .map_err(|_| WorkspaceError::LockPoisoned)?;
         Ok(app.snapshot().into())
+    }
+
+    pub fn enable_persistence(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        let mut app = self
+            .inner
+            .lock()
+            .map_err(|_| WorkspaceError::LockPoisoned)?;
+        app.enable_persistence_default()
+            .map(Into::into)
+            .map_err(Into::into)
     }
 
     pub fn increment(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {

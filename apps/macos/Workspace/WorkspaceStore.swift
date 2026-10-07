@@ -5,6 +5,7 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var counter: UInt64 = 0
     @Published private(set) var revision: UInt64 = 0
     @Published private(set) var workspaceName: String?
+    @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
     @Published private(set) var documents: [DocumentSummary] = []
     @Published private(set) var activeDocument: DocumentSnapshot?
     @Published private(set) var editorText = ""
@@ -14,9 +15,10 @@ final class WorkspaceStore: ObservableObject {
 
     init() {
         do {
-            apply(try core.snapshot())
+            apply(try core.enablePersistence())
         } catch {
             errorMessage = error.localizedDescription
+            if let snapshot = try? core.snapshot() { apply(snapshot) }
         }
     }
 
@@ -85,6 +87,7 @@ final class WorkspaceStore: ObservableObject {
         revision = snapshot.revision
         counter = snapshot.counter
         workspaceName = snapshot.workspaceName
+        recentWorkspaces = snapshot.recentWorkspaces
         documents = snapshot.documents
         activeDocument = snapshot.activeDocument
         editorText = snapshot.activeDocument?.content ?? ""

@@ -1,0 +1,14 @@
+[package]
+name = "native-workspace-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-domain = { path = "../domain" }
+rusqlite = { version = "0.40", default-features = false, features = ["bundled"] }
+directories = "6"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

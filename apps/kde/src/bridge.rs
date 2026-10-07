@@ -21,6 +21,8 @@ pub mod qobject {
         #[qproperty(QString, workspace_name)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
+        #[qproperty(QStringList, recent_workspace_paths)]
+        #[qproperty(QStringList, recent_workspace_names)]
         #[qproperty(QString, active_document_id)]
         #[qproperty(QString, active_document_text)]
         #[qproperty(bool, active_document_dirty)]
@@ -29,6 +31,8 @@ pub mod qobject {
 
         #[qinvokable]
         fn increment(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn initialize_persistence(self: Pin<&mut Self>);
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
@@ -47,6 +51,8 @@ pub struct AppControllerRust {
     workspace_name: QString,
     document_ids: QStringList,
     dirty_document_ids: QStringList,
+    recent_workspace_paths: QStringList,
+    recent_workspace_names: QStringList,
     active_document_id: QString,
     active_document_text: QString,
     active_document_dirty: bool,
@@ -69,6 +75,20 @@ impl qobject::AppController {
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
         self.as_mut().set_revision(snapshot.revision);
         self.as_mut().set_counter(snapshot.diagnostic_counter);
+        self.as_mut().set_recent_workspace_paths(
+            snapshot
+                .recent_workspaces
+                .iter()
+                .map(|item| QString::from(item.root.to_string_lossy().as_ref()))
+                .collect(),
+        );
+        self.as_mut().set_recent_workspace_names(
+            snapshot
+                .recent_workspaces
+                .iter()
+                .map(|item| QString::from(item.name.as_str()))
+                .collect(),
+        );
         self.as_mut()
             .set_workspace_name(QString::from(snapshot.workspace_name.unwrap_or_default()));
         self.as_mut().set_document_ids(
@@ -104,6 +124,18 @@ impl qobject::AppController {
 
     pub fn increment(self: Pin<&mut Self>) {
         self.dispatch(AppCommand::IncrementDiagnostic);
+    }
+
+    pub fn initialize_persistence(mut self: Pin<&mut Self>) {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .enable_persistence_default();
+        match result {
+            Ok(snapshot) => self.update_snapshot(snapshot),
+            Err(error) => self.set_error_message(QString::from(error.to_string())),
+        }
     }
 
     pub fn open_workspace(self: Pin<&mut Self>, input: &QString) {

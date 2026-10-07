@@ -15,6 +15,8 @@ struct BridgeSmoke {
         try "before".write(to: file, atomically: true, encoding: .utf8)
         let listed = try app.openWorkspace(path: directory.path)
         precondition(listed.documents.count == 1 && listed.documents[0].id == "README.md")
+        precondition(listed.recentWorkspaces.count == 1)
+        precondition(URL(fileURLWithPath: listed.recentWorkspaces[0].root).lastPathComponent == directory.lastPathComponent)
         let opened = try app.openDocument(id: "README.md")
         precondition(opened.activeDocument?.content == "before")
         let changed = try app.changeDocument(id: "README.md", content: "after")

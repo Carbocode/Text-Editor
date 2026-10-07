@@ -25,6 +25,8 @@ Kirigami.ApplicationWindow {
     }
 
     Component.onCompleted: {
+        if (Qt.application.arguments.indexOf("--smoke") === -1 && !Qt.application.arguments.some(argument => argument.startsWith("--smoke-workspace=")))
+            controller.initialize_persistence()
         if (Qt.application.arguments.indexOf("--smoke") !== -1) {
             controller.increment()
             if (controller.counter !== 1 || controller.revision !== 1)

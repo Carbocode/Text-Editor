@@ -36,6 +36,17 @@ struct ContentView: View {
                 Button("Open Workspace", systemImage: "folder") {
                     choosingWorkspace = true
                 }
+                Menu {
+                    ForEach(store.recentWorkspaces, id: \.root) { workspace in
+                        Button(workspace.name) {
+                            store.openWorkspace(URL(fileURLWithPath: workspace.root, isDirectory: true))
+                        }
+                        .help(workspace.root)
+                    }
+                } label: {
+                    Label("Recent Workspaces", systemImage: "clock.arrow.circlepath")
+                }
+                .disabled(store.recentWorkspaces.isEmpty)
             }
         } detail: {
             VStack(spacing: 0) {

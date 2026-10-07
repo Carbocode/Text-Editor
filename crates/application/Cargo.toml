@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 native-workspace-domain = { path = "../domain" }
 native-workspace-filesystem = { path = "../filesystem" }
+native-workspace-storage = { path = "../storage" }
 thiserror = "2"
 
 [dev-dependencies]
