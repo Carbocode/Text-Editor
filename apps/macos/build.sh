@@ -23,3 +23,8 @@ swiftc -I apps/macos/generated \
   target/debug/libnative_workspace_ffi_swift.a \
   -o apps/macos/.build/BridgeSmoke
 apps/macos/.build/BridgeSmoke
+swiftc -parse-as-library \
+  apps/macos/Workspace/NoWrapTextEditor.swift \
+  apps/macos/WorkspaceTests/EditorLayoutSmoke.swift \
+  -o apps/macos/.build/EditorLayoutSmoke
+apps/macos/.build/EditorLayoutSmoke

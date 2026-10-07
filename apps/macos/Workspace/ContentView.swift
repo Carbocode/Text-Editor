@@ -40,11 +40,10 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 if let active = store.activeDocument {
-                    TextEditor(text: Binding(
+                    NoWrapTextEditor(documentID: active.id, text: Binding(
                         get: { store.editorText },
                         set: { store.changeDocument($0) }
                     ))
-                    .font(.system(.body, design: .monospaced))
                     .navigationTitle(active.title)
                 } else {
                     VStack(spacing: 16) {

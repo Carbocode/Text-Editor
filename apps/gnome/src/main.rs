@@ -161,12 +161,13 @@ fn build_window(app: &adw::Application) {
     let editor = gtk::TextView::new();
     editor.set_monospace(true);
     editor.set_editable(false);
-    editor.set_wrap_mode(gtk::WrapMode::WordChar);
+    editor.set_wrap_mode(gtk::WrapMode::None);
     editor.set_top_margin(16);
     editor.set_left_margin(16);
     editor.set_right_margin(16);
     let buffer = editor.buffer();
     let editor_scroll = gtk::ScrolledWindow::new();
+    editor_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     editor_scroll.set_child(Some(&editor));
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&sidebar_header);
@@ -316,6 +317,15 @@ fn build_window(app: &adw::Application) {
                     .map(|doc| &doc.id),
                 Some(&id)
             );
+            ui.buffer.set_text(&"M".repeat(500));
+            let horizontal = editor_scroll.hadjustment();
+            for _ in 0..100 {
+                glib::MainContext::default().iteration(false);
+                if horizontal.upper() > horizontal.page_size() {
+                    break;
+                }
+            }
+            assert!(horizontal.upper() > horizontal.page_size());
             ui.buffer.set_text("GTK Phase 1 smoke content");
             ui.save.emit_clicked();
             assert_eq!(ui.status.text(), "Saved");
