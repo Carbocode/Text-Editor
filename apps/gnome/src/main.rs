@@ -135,8 +135,13 @@ fn build_window(app: &adw::Application) {
     sidebar_header.set_title_widget(Some(&gtk::Label::new(Some("Files"))));
     let content_header = adw::HeaderBar::new();
     content_header.set_show_start_title_buttons(false);
-    let open = gtk::Button::with_label("Open Workspace");
-    let save = gtk::Button::with_label("Save");
+    let open = gtk::Button::from_icon_name("document-open-symbolic");
+    open.set_tooltip_text(Some("Open Workspace"));
+    let save = gtk::Button::new();
+    let save_content = adw::ButtonContent::new();
+    save_content.set_icon_name("document-save-symbolic");
+    save_content.set_label("Save");
+    save.set_child(Some(&save_content));
     save.set_sensitive(false);
     sidebar_header.pack_start(&open);
     content_header.pack_end(&save);
@@ -285,6 +290,9 @@ fn build_window(app: &adw::Application) {
     }
     window.present();
     if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_some() {
+        let icons = gtk::IconTheme::for_display(&gtk::gdk::Display::default().unwrap());
+        assert!(icons.has_icon("document-open-symbolic"));
+        assert!(icons.has_icon("document-save-symbolic"));
         diagnostic.emit_clicked();
         assert_eq!(ui.counter.text(), "Counter: 1");
         println!("GTK → Rust smoke test passed");

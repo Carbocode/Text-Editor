@@ -39,12 +39,22 @@ Item {
                 spacing: 8
                 ToolButton {
                     text: "Open Workspace"
+                    icon.name: "document-open"
+                    icon.source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/action-open.png"
+                    icon.width: 20
+                    icon.height: 20
+                    display: AbstractButton.TextBesideIcon
                     visible: root.enableBrowse
                     onClicked: if (root.flushEditor()) root.browseRequested()
                 }
                 Item { Layout.fillWidth: true }
                 ToolButton {
                     text: "Save"
+                    icon.name: "document-save"
+                    icon.source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/action-save.png"
+                    icon.width: 20
+                    icon.height: 20
+                    display: AbstractButton.TextBesideIcon
                     enabled: root.controller.active_document_dirty
                     onClicked: root.saveActive()
                 }

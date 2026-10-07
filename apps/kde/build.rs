@@ -11,6 +11,8 @@ fn main() {
         "qml/icons/readme.png",
         "qml/icons/markdown.png",
         "qml/icons/document.png",
+        "qml/icons/action-open.png",
+        "qml/icons/action-save.png",
     ])
     .qt_module("Network")
     .files(["src/bridge.rs"])
