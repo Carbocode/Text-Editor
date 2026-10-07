@@ -1,0 +1,12 @@
+[package]
+name = "native-workspace-filesystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-domain = { path = "../domain" }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

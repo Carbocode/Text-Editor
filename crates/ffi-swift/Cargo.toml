@@ -9,6 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 native-workspace-application = { path = "../application" }
+native-workspace-domain = { path = "../domain" }
 uniffi = { version = "0.29", features = ["cli"] }
 thiserror = "2"
 

@@ -1,21 +1,96 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
+    @State private var choosingWorkspace = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            Text("Counter: \(store.counter)")
-                .font(.title2)
-            Button("Increment") { store.increment() }
-                .buttonStyle(.glassProminent)
-                .controlSize(.large)
-                .keyboardShortcut("+", modifiers: .command)
-            if let error = store.errorMessage {
-                Text(error).foregroundStyle(.red)
+        NavigationSplitView {
+            List {
+                ForEach(store.documents, id: \.id) { document in
+                    Button {
+                        store.openDocument(document.id)
+                    } label: {
+                        HStack(spacing: 8) {
+                            if let icon = WorkspaceIcons.image(for: document.id) {
+                                Image(nsImage: icon)
+                                    .resizable()
+                                    .interpolation(.high)
+                                    .frame(width: 20, height: 20)
+                            }
+                            Text(document.title)
+                            Spacer(minLength: 0)
+                            if document.dirty {
+                                Circle().fill(.secondary).frame(width: 6, height: 6)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(store.activeDocument?.id == document.id ? Color.accentColor.opacity(0.12) : Color.clear)
+                }
+            }
+            .navigationTitle(store.workspaceName ?? "Workspace")
+            .toolbar {
+                Button("Open Workspace", systemImage: "folder") {
+                    choosingWorkspace = true
+                }
+            }
+        } detail: {
+            VStack(spacing: 0) {
+                if let active = store.activeDocument {
+                    TextEditor(text: Binding(
+                        get: { store.editorText },
+                        set: { store.changeDocument($0) }
+                    ))
+                    .font(.system(.body, design: .monospaced))
+                    .navigationTitle(active.title)
+                } else {
+                    VStack(spacing: 16) {
+                        ContentUnavailableView(
+                            store.workspaceName == nil ? "Open a Workspace" : "Select a Document",
+                            systemImage: store.workspaceName == nil ? "folder" : "doc.text",
+                            description: Text(store.workspaceName == nil ? "Choose a directory containing Markdown or text files." : "Choose a file in the sidebar.")
+                        )
+                        if store.workspaceName == nil {
+                            Button("Open Workspace") { choosingWorkspace = true }
+                                .buttonStyle(.glassProminent)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                if let error = store.errorMessage {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .padding(8)
+                }
+                Divider()
+                HStack {
+                    Text(store.activeDocument?.title ?? "No document")
+                    Spacer()
+                    Text(store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved"))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+            }
+            .toolbar {
+                Button("Save", systemImage: "square.and.arrow.down") {
+                    store.saveDocument()
+                }
+                .disabled(!store.hasDirtyActiveDocument)
+                .keyboardShortcut("s", modifiers: .command)
             }
         }
-        .frame(minWidth: 320, minHeight: 180)
-        .padding()
+        .fileImporter(isPresented: $choosingWorkspace, allowedContentTypes: [.folder]) { result in
+            switch result {
+            case .success(let url): store.openWorkspace(url)
+            case .failure: break
+            }
+        }
+        .frame(minWidth: 680, minHeight: 420)
     }
 }

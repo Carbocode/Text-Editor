@@ -1,14 +1,16 @@
 # Architecture
 
 ```text
-domain (Rust values)
+domain (document IDs and workspace values)
    ↓
-application (commands, state, owned snapshots)
+filesystem (local directory and UTF-8 file I/O)
+   ↓
+application (commands, document state, snapshots)
    ├── ffi-swift (UniFFI) → SwiftUI
    ├── gnome (direct Rust) → GTK4/libadwaita
-   └── kde (direct Rust) → CXX-Qt/QML
+   └── kde (direct Rust) → CXX-Qt/QML and Kirigami
 ```
 
-`Application::dispatch(AppCommand)` owns the diagnostic state and returns a copyable `AppSnapshot`. Every frontend translates its own button click into `IncrementDiagnostic` and renders the returned counter. Revision advances once per successful command. The core has no UI, toolkit, FFI, or platform dependency. The UI layers own their platform objects and display errors; the core owns command semantics. Phase 0 deliberately contains no workspace files, storage, search, or shared widget abstraction.
+Application::dispatch(AppCommand) owns the authoritative document content, dirty state, save operation, and revision. Each frontend renders AppSnapshot and translates native UI events into commands. The Rust core has no toolkit dependency. Frontends choose their own file icons and controls.
 
-See [ADR 0001](adr/0001-native-platform-frontends.md).
+The initial file tree includes regular .md and .txt files in the workspace root. Nested directories and symlinks are skipped. External file changes are not watched yet; reopening a workspace refreshes its file list when there are no unsaved edits. Dirty documents block replacing the workspace. See [ADR 0001](adr/0001-native-platform-frontends.md).

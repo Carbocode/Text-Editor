@@ -1,5 +1,7 @@
 # GNOME development
 
-The GNOME app uses GTK4 and libadwaita. `cargo xtask doctor --strict gnome` checks for Rust, Cargo, `pkg-config`, `gtk4`, and `libadwaita-1`. Once these system libraries are discoverable, run `cargo xtask build-gnome` and `cargo xtask run-gnome`.
+The GNOME frontend uses GTK4 4.8+ and libadwaita 1.9+. Run cargo xtask doctor --strict gnome, cargo xtask build-gnome, and cargo xtask run-gnome after installing the development libraries. Linux CI uses Ubuntu 26.04, which supplies libadwaita 1.9.
 
-On the macOS 27 bootstrap host, `brew install pkgconf gtk4 libadwaita` provided `pkgconf` 3.0.7, GTK4 4.24.1, and libadwaita 1.10.0. `cargo xtask build-gnome` and `NATIVE_WORKSPACE_SMOKE=1 target/debug/native-workspace-gnome` both passed. The latter emits a button click and checks that the GTK label shows `Counter: 1`. Linux CI repeats the smoke check under Xvfb.
+The app uses AdwSidebar inside AdwOverlaySplitView. Separate AdwToolbarViews let the file sidebar occupy the full window height, including its own header. The file rows have compact spacing. The native directory picker opens from the sidebar header; Save and the project title are in the content header, with document status below the editor. The diagnostic counter is displayed only during NATIVE_WORKSPACE_SMOKE=1.
+
+On the macOS bootstrap host, Homebrew GTK4 4.24.1 and libadwaita 1.10.0 built and ran the app. Linux CI builds and checks diagnostic and document edit/save paths under Xvfb.

@@ -1,0 +1,5 @@
+sidebar.compact-files list.navigation-sidebar row {
+  min-height: 28px;
+  padding-top: 1px;
+  padding-bottom: 1px;
+}

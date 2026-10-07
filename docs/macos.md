@@ -1,9 +1,7 @@
 # macOS development
 
-Verified host: Apple Silicon macOS 27, Xcode 27.0, Swift 6.4, Rust 1.99.0. The SwiftUI app uses generated UniFFI Swift bindings and a Rust static library.
+Verified locally on Apple Silicon macOS 27, Xcode 27.0, Swift 6.4, and Rust 1.99.0. The SwiftUI frontend uses UniFFI generated bindings and the Rust static library.
 
-Run `cargo xtask build-macos`. This builds the Rust adapter, generates Swift bindings, compiles the app, and runs a Swift bridge smoke executable. Run `cargo xtask run-macos` to open the counter window. Generated files stay under `apps/macos/generated` and build output under `apps/macos/.build`.
+Run cargo xtask build-macos to build apps/macos/.build/NativeWorkspace.app and run the Swift bridge smoke test. Run cargo xtask run-macos to start the app. Generated bindings are in apps/macos/generated; build output is in apps/macos/.build.
 
-The UI uses `WorkspaceStore` on the main actor. Its only business operation calls `WorkspaceApplication.increment()` through UniFFI.
-
-The diagnostic action uses SwiftUI's native Liquid Glass button style. Content remains plain so the effect stays on the interactive control.
+The app uses a native NavigationSplitView, a directory picker, an editor, Save, and a bottom document status bar. The initial Open Workspace action uses Liquid Glass styling. WorkspaceStore holds view state on the main actor and sends operations through UniFFI.

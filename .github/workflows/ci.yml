@@ -24,19 +24,24 @@ jobs:
 
   linux-gnome:
     runs-on: ubuntu-latest
+    container: ubuntu:26.04
     steps:
+      - run: apt-get update && apt-get install -y curl ca-certificates build-essential libgtk-4-dev libadwaita-1-dev pkg-config xvfb
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update
-      - run: sudo apt-get install -y libgtk-4-dev libadwaita-1-dev pkg-config xvfb
       - run: cargo xtask build-gnome
       - run: NATIVE_WORKSPACE_SMOKE=1 xvfb-run -a target/debug/native-workspace-gnome
+      - run: |
+          workspace=$(mktemp -d)
+          printf 'before\n' > "$workspace/README.md"
+          NATIVE_WORKSPACE_SMOKE_WORKSPACE="$workspace" xvfb-run -a target/debug/native-workspace-gnome
+          grep -q 'GTK Phase 1 smoke content' "$workspace/README.md"
 
   linux-kde:
     runs-on: ubuntu-latest
     container: ubuntu:26.04
     steps:
-      - run: apt-get update && apt-get install -y git curl ca-certificates build-essential pkg-config cmake ninja-build qt6-base-dev qt6-declarative-dev libkirigami-dev qml6-module-org-kde-kirigami xvfb
+      - run: apt-get update && apt-get install -y git curl ca-certificates build-essential pkg-config cmake ninja-build qt6-base-dev qt6-declarative-dev libkirigami-dev qml6-module-org-kde-kirigami qml6-module-qtquick-dialogs xvfb
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo xtask build-kde
@@ -44,3 +49,10 @@ jobs:
           timeout 10s xvfb-run -a env NATIVE_WORKSPACE_KIRIGAMI=1 target/debug/native-workspace-kde --smoke > /tmp/kde-smoke.log 2>&1 || test "$?" -eq 124
           cat /tmp/kde-smoke.log
           grep -q 'Kirigami.*smoke test passed' /tmp/kde-smoke.log
+      - run: |
+          workspace=$(mktemp -d)
+          printf 'before\n' > "$workspace/README.md"
+          timeout 10s xvfb-run -a env NATIVE_WORKSPACE_KIRIGAMI=1 target/debug/native-workspace-kde "--smoke-workspace=$workspace" > /tmp/kde-workspace-smoke.log 2>&1 || test "$?" -eq 124
+          cat /tmp/kde-workspace-smoke.log
+          grep -q 'Kirigami workspace edit/save smoke test passed' /tmp/kde-workspace-smoke.log
+          grep -q 'Kirigami Phase 1 smoke content' "$workspace/README.md"

@@ -1,11 +1,120 @@
 use adw::prelude::*;
-use gtk::gio;
-use native_workspace_application::{AppCommand, Application};
-use std::{cell::RefCell, rc::Rc};
+use gtk::{gio, glib};
+use native_workspace_application::{AppCommand, AppSnapshot, Application};
+use std::{
+    cell::{Cell, RefCell},
+    path::PathBuf,
+    rc::Rc,
+};
+
+#[derive(Clone)]
+struct Ui {
+    core: Rc<RefCell<Application>>,
+    snapshot: Rc<RefCell<AppSnapshot>>,
+    files: adw::Sidebar,
+    editor: gtk::TextView,
+    buffer: gtk::TextBuffer,
+    heading: gtk::Label,
+    status: gtk::Label,
+    counter: gtk::Label,
+    save: gtk::Button,
+    updating: Rc<Cell<bool>>,
+}
+
+impl Ui {
+    fn dispatch(&self, command: AppCommand) {
+        let result = self.core.borrow_mut().dispatch(command);
+        match result {
+            Ok(snapshot) => self.render(snapshot),
+            Err(error) => self.status.set_label(&error.to_string()),
+        }
+    }
+
+    fn render(&self, snapshot: AppSnapshot) {
+        self.updating.set(true);
+        let documents_changed = self.snapshot.borrow().documents != snapshot.documents;
+        self.heading.set_label(
+            snapshot
+                .workspace_name
+                .as_deref()
+                .unwrap_or("Open a workspace"),
+        );
+        self.counter
+            .set_label(&format!("Counter: {}", snapshot.diagnostic_counter));
+        self.save.set_sensitive(
+            snapshot
+                .active_document
+                .as_ref()
+                .is_some_and(|doc| doc.dirty),
+        );
+        self.editor.set_editable(snapshot.active_document.is_some());
+        self.status
+            .set_label(match snapshot.active_document.as_ref() {
+                Some(doc) if doc.dirty => "Modified",
+                Some(_) => "Saved",
+                None => "Select a document",
+            });
+        if documents_changed {
+            self.files.remove_all();
+            let section = adw::SidebarSection::new();
+            for document in &snapshot.documents {
+                let item = adw::SidebarItem::new(&document.title);
+                item.set_icon_paintable(Some(&icon_for(document.id.as_str())));
+                if document.dirty {
+                    item.set_suffix(Some(&gtk::Label::new(Some("●"))));
+                }
+                section.append(item);
+            }
+            self.files.append(section);
+        }
+        if let Some(active) = snapshot.active_document.as_ref() {
+            if let Some(index) = snapshot
+                .documents
+                .iter()
+                .position(|doc| doc.id == active.id)
+            {
+                self.files.set_selected(index as u32);
+            }
+        } else {
+            self.files.set_selected(u32::MAX);
+        }
+        let content = snapshot
+            .active_document
+            .as_ref()
+            .map(|doc| doc.content.as_str())
+            .unwrap_or("");
+        let (start, end) = self.buffer.bounds();
+        if self.buffer.text(&start, &end, false).as_str() != content {
+            self.buffer.set_text(content);
+        }
+        self.snapshot.replace(snapshot);
+        self.updating.set(false);
+    }
+}
+
+fn icon_for(name: &str) -> gtk::gdk::Texture {
+    let bytes: &'static [u8] = if name.eq_ignore_ascii_case("readme.md") {
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/material-icon-theme/readme.png"
+        ))
+    } else if name.to_ascii_lowercase().ends_with(".md") {
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/material-icon-theme/markdown.png"
+        ))
+    } else {
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../assets/material-icon-theme/document.png"
+        ))
+    };
+    gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(bytes)).expect("bundled PNG icon")
+}
 
 fn main() {
     let app = adw::Application::builder()
-        .application_id("org.nativeworkspace.Diagnostic")
+        .application_id("org.nativeworkspace.App")
         .flags(gio::ApplicationFlags::FLAGS_NONE)
         .build();
     app.connect_activate(build_window);
@@ -13,42 +122,197 @@ fn main() {
 }
 
 fn build_window(app: &adw::Application) {
-    let core = Rc::new(RefCell::new(Application::new()));
+    let core = Application::new();
+    let snapshot = core.snapshot();
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Native Workspace")
-        .default_width(360)
-        .default_height(200)
+        .default_width(900)
+        .default_height(600)
         .build();
-    let header = adw::HeaderBar::new();
-    let label = gtk::Label::new(Some("Counter: 0"));
-    let button = gtk::Button::with_label("Increment");
-    button.add_css_class("suggested-action");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 16);
-    content.set_margin_top(24);
-    content.set_margin_bottom(24);
-    content.set_margin_start(24);
-    content.set_margin_end(24);
-    content.append(&label);
-    content.append(&button);
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.append(&header);
-    root.append(&content);
-    window.set_content(Some(&root));
-    let label_for_click = label.clone();
-    button.connect_clicked(move |_| {
-        match core.borrow_mut().dispatch(AppCommand::IncrementDiagnostic) {
-            Ok(snapshot) => {
-                label_for_click.set_label(&format!("Counter: {}", snapshot.diagnostic_counter))
+    let sidebar_header = adw::HeaderBar::new();
+    sidebar_header.set_show_end_title_buttons(false);
+    sidebar_header.set_title_widget(Some(&gtk::Label::new(Some("Files"))));
+    let content_header = adw::HeaderBar::new();
+    content_header.set_show_start_title_buttons(false);
+    let open = gtk::Button::with_label("Open Workspace");
+    let save = gtk::Button::with_label("Save");
+    save.set_sensitive(false);
+    sidebar_header.pack_start(&open);
+    content_header.pack_end(&save);
+    let heading = gtk::Label::new(Some("Open a workspace"));
+    content_header.set_title_widget(Some(&heading));
+    let files = adw::Sidebar::new();
+    files.add_css_class("compact-files");
+    files.set_size_request(220, -1);
+    files.set_placeholder(Some(&gtk::Label::new(Some("Open a workspace"))));
+    let sidebar_style = gtk::CssProvider::new();
+    sidebar_style.load_from_data(include_str!("sidebar.css"));
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().expect("GTK display"),
+        &sidebar_style,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+    let editor = gtk::TextView::new();
+    editor.set_monospace(true);
+    editor.set_editable(false);
+    editor.set_wrap_mode(gtk::WrapMode::WordChar);
+    editor.set_top_margin(16);
+    editor.set_left_margin(16);
+    editor.set_right_margin(16);
+    let buffer = editor.buffer();
+    let editor_scroll = gtk::ScrolledWindow::new();
+    editor_scroll.set_child(Some(&editor));
+    let sidebar_view = adw::ToolbarView::new();
+    sidebar_view.add_top_bar(&sidebar_header);
+    sidebar_view.set_content(Some(&files));
+    let content_view = adw::ToolbarView::new();
+    content_view.add_top_bar(&content_header);
+    content_view.set_content(Some(&editor_scroll));
+    let split = adw::OverlaySplitView::new();
+    split.set_sidebar(Some(&sidebar_view));
+    split.set_content(Some(&content_view));
+    split.set_sidebar_width_fraction(0.28);
+    split.set_vexpand(true);
+    let status = gtk::Label::new(Some("Select a document"));
+    let counter = gtk::Label::new(Some("Counter: 0"));
+    let diagnostic = gtk::Button::with_label("Increment");
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    footer.set_margin_top(8);
+    footer.set_margin_bottom(8);
+    footer.set_margin_start(12);
+    footer.set_margin_end(12);
+    status.set_hexpand(true);
+    status.set_xalign(0.0);
+    footer.append(&status);
+    if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_some() {
+        footer.append(&counter);
+        footer.append(&diagnostic);
+    }
+    content_view.add_bottom_bar(&footer);
+    window.set_content(Some(&split));
+
+    let ui = Ui {
+        core: Rc::new(RefCell::new(core)),
+        snapshot: Rc::new(RefCell::new(snapshot)),
+        files,
+        editor,
+        buffer,
+        heading,
+        status,
+        counter,
+        save,
+        updating: Rc::new(Cell::new(false)),
+    };
+    {
+        let ui = ui.clone();
+        let window = window.clone();
+        open.connect_clicked(move |_| {
+            let dialog = gtk::FileChooserNative::new(
+                Some("Open Workspace"),
+                Some(&window),
+                gtk::FileChooserAction::SelectFolder,
+                Some("Open"),
+                Some("Cancel"),
+            );
+            let ui = ui.clone();
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept
+                    && let Some(path) = dialog.file().and_then(|file| file.path())
+                {
+                    ui.dispatch(AppCommand::OpenWorkspace(path));
+                }
+                dialog.destroy();
+            });
+            dialog.show();
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.files.clone().connect_selected_notify(move |sidebar| {
+            if ui.updating.get() {
+                return;
             }
-            Err(error) => eprintln!("Increment failed: {error:?}"),
-        }
-    });
+            let id = ui
+                .snapshot
+                .borrow()
+                .documents
+                .get(sidebar.selected() as usize)
+                .map(|doc| doc.id.clone());
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::OpenDocument(id));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.buffer.clone().connect_changed(move |buffer| {
+            if ui.updating.get() {
+                return;
+            }
+            let id = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.clone());
+            if let Some(id) = id {
+                let (start, end) = buffer.bounds();
+                ui.dispatch(AppCommand::ChangeDocument {
+                    id,
+                    content: buffer.text(&start, &end, false).to_string(),
+                });
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.save.clone().connect_clicked(move |_| {
+            let id = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.clone());
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::SaveDocument(id));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        diagnostic.connect_clicked(move |_| ui.dispatch(AppCommand::IncrementDiagnostic));
+    }
     window.present();
     if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_some() {
-        button.emit_clicked();
-        assert_eq!(label.text(), "Counter: 1");
+        diagnostic.emit_clicked();
+        assert_eq!(ui.counter.text(), "Counter: 1");
         println!("GTK → Rust smoke test passed");
+        app.quit();
+    }
+    if let Some(path) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE") {
+        ui.dispatch(AppCommand::OpenWorkspace(PathBuf::from(path)));
+        let first = ui
+            .snapshot
+            .borrow()
+            .documents
+            .first()
+            .map(|doc| doc.id.clone());
+        if let Some(id) = first {
+            ui.files.set_selected(0);
+            assert_eq!(
+                ui.snapshot
+                    .borrow()
+                    .active_document
+                    .as_ref()
+                    .map(|doc| &doc.id),
+                Some(&id)
+            );
+            ui.buffer.set_text("GTK Phase 1 smoke content");
+            ui.save.emit_clicked();
+            assert_eq!(ui.status.text(), "Saved");
+            println!("GTK workspace edit/save smoke test passed");
+        }
         app.quit();
     }
 }

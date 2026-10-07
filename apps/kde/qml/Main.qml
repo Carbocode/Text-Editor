@@ -1,15 +1,26 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
+import QtQuick.Dialogs
 import org.nativeworkspace.Diagnostic
 
 ApplicationWindow {
     visible: true
-    width: 360
-    height: 200
+    width: 900
+    height: 600
     title: "Native Workspace"
 
     AppController { id: controller }
+    FolderDialog {
+        id: folderDialog
+        onAccepted: controller.open_workspace(selectedFolder.toString())
+    }
+    WorkspacePane {
+        id: workspacePane
+        anchors.fill: parent
+        controller: controller
+        enableBrowse: true
+        onBrowseRequested: folderDialog.open()
+    }
 
     Component.onCompleted: {
         if (Qt.application.arguments.indexOf("--smoke") !== -1) {
@@ -18,15 +29,21 @@ ApplicationWindow {
                 throw new Error("CXX-Qt diagnostic state did not update")
             console.log("QML → CXX-Qt → Rust smoke test passed")
         }
-    }
-
-    ColumnLayout {
-        anchors.centerIn: parent
-        spacing: 16
-        Label { text: "Counter: " + controller.counter }
-        Button {
-            text: "Increment"
-            onClicked: controller.increment()
+        for (var i = 0; i < Qt.application.arguments.length; ++i) {
+            var argument = Qt.application.arguments[i]
+            if (argument.startsWith("--smoke-workspace=")) {
+                controller.open_workspace(argument.substring("--smoke-workspace=".length))
+                if (controller.document_ids.length === 0)
+                    throw new Error("Workspace documents were not listed")
+                controller.open_document(controller.document_ids[0])
+                workspacePane.editorText = "QML Phase 1 smoke content"
+                if (!controller.active_document_dirty)
+                    throw new Error("Document did not become dirty")
+                workspacePane.saveActive()
+                if (controller.active_document_dirty)
+                    throw new Error("Document remained dirty after save")
+                console.log("QML workspace edit/save smoke test passed")
+            }
         }
     }
 }
