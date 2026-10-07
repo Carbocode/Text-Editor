@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = ["crates/domain", "crates/application", "crates/ffi-swift", "apps/gnome", "apps/kde", "tools/xtask"]
+default-members = ["crates/domain", "crates/application"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
