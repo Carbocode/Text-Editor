@@ -13,8 +13,17 @@ Item {
     property real editorScrollY: editorScroll.contentItem.contentY
     property int searchFileCount: fileIds().length
     property var collapsedDirectories: ({})
+    property var orderedSidebarEntries: []
+    property var visibleSidebarEntries: []
+    property bool sidebarEntriesDirty: true
     property string lastWorkspaceRoot: ""
     signal browseRequested()
+
+    Timer {
+        id: sidebarUpdate
+        interval: 0
+        onTriggered: if (root.sidebarEntriesDirty) root.rebuildOrderedEntries()
+    }
 
     Connections {
         target: root.controller
@@ -23,7 +32,18 @@ Item {
                 root.lastWorkspaceRoot = root.controller.workspace_root
                 root.collapsedDirectories = ({})
             }
+            root.scheduleSidebarUpdate()
         }
+        function onDirectory_idsChanged() { root.scheduleSidebarUpdate() }
+        function onSearch_result_idsChanged() { root.scheduleSidebarUpdate() }
+        function onSearch_queryChanged() { root.scheduleSidebarUpdate() }
+    }
+
+    Component.onCompleted: scheduleSidebarUpdate()
+
+    function scheduleSidebarUpdate() {
+        sidebarEntriesDirty = true
+        sidebarUpdate.restart()
     }
 
     function flushEditor() {
@@ -77,7 +97,8 @@ Item {
         return files
     }
 
-    function sidebarEntries() {
+    function rebuildOrderedEntries() {
+        sidebarEntriesDirty = false
         var files = fileIds()
         var directories = []
         var seenDirectories = ({})
@@ -99,37 +120,58 @@ Item {
                     }
                 }
             }
+            directories.sort()
+            files.sort()
         }
-        function visible(path) {
-            if (root.controller.search_query.length > 0) return true
-            var parts = path.split("/")
-            for (var i = 1; i < parts.length; ++i) {
-                if (root.collapsedDirectories[parts.slice(0, i).join("/")] !== false) return false
-            }
-            return true
+        var foldersByParent = ({})
+        var filesByParent = ({})
+        function addChild(table, path) {
+            var separator = path.lastIndexOf("/")
+            var parent = separator < 0 ? "" : path.substring(0, separator)
+            var key = "#" + parent
+            if (!table[key]) table[key] = []
+            table[key].push(path)
         }
-        var paths = []
         for (var d = 0; d < directories.length; ++d)
-            if (visible(directories[d])) paths.push({ path: directories[d], directory: true })
+            addChild(foldersByParent, directories[d])
         for (var f = 0; f < files.length; ++f)
-            if (visible(files[f])) paths.push({ path: files[f], directory: false })
-        paths.sort(function(a, b) {
-            var aParts = a.path.split("/")
-            var bParts = b.path.split("/")
-            var aPrefix = ""
-            var bPrefix = ""
-            for (var i = 0; i < Math.min(aParts.length, bParts.length); ++i) {
-                aPrefix += (i ? "/" : "") + aParts[i]
-                bPrefix += (i ? "/" : "") + bParts[i]
-                if (aParts[i] === bParts[i]) continue
-                var aDirectory = !!seenDirectories["#" + aPrefix]
-                var bDirectory = !!seenDirectories["#" + bPrefix]
-                if (aDirectory !== bDirectory) return aDirectory ? -1 : 1
-                return aParts[i].localeCompare(bParts[i])
+            addChild(filesByParent, files[f])
+        var paths = []
+        function appendChildren(parent) {
+            var folders = foldersByParent["#" + parent] || []
+            for (var i = 0; i < folders.length; ++i) {
+                paths.push({ path: folders[i], directory: true })
+                appendChildren(folders[i])
             }
-            return aParts.length - bParts.length
-        })
-        return paths
+            var documents = filesByParent["#" + parent] || []
+            for (var j = 0; j < documents.length; ++j)
+                paths.push({ path: documents[j], directory: false })
+        }
+        appendChildren("")
+        orderedSidebarEntries = paths
+        updateVisibleEntries()
+    }
+
+    function updateVisibleEntries() {
+        var searching = root.controller.search_query.length > 0
+        var visible = []
+        var hiddenPrefix = ""
+        for (var i = 0; i < orderedSidebarEntries.length; ++i) {
+            var entry = orderedSidebarEntries[i]
+            if (hiddenPrefix !== "") {
+                if (entry.path.startsWith(hiddenPrefix)) continue
+                hiddenPrefix = ""
+            }
+            visible.push(entry)
+            if (!searching && entry.directory && collapsedDirectories[entry.path] !== false)
+                hiddenPrefix = entry.path + "/"
+        }
+        visibleSidebarEntries = visible
+    }
+
+    function sidebarEntries() {
+        if (sidebarEntriesDirty) rebuildOrderedEntries()
+        return visibleSidebarEntries
     }
 
     function toggleDirectory(path) {
@@ -137,6 +179,8 @@ Item {
         for (var key in collapsedDirectories) next[key] = collapsedDirectories[key]
         next[path] = !(collapsedDirectories[path] !== false)
         collapsedDirectories = next
+        if (sidebarEntriesDirty) rebuildOrderedEntries()
+        else updateVisibleEntries()
     }
 
     function matchIndicesForFile(id) {
@@ -236,11 +280,12 @@ Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: root.sidebarEntries()
+                        model: root.visibleSidebarEntries
+                        reuseItems: true
                         Label {
                             anchors.centerIn: parent
                             text: root.controller.search_query.length > 0 ? "No matching files" : "No files"
-                            visible: root.controller.workspace_name.length > 0 && root.sidebarEntries().length === 0 && !root.controller.search_in_progress
+                            visible: root.controller.workspace_name.length > 0 && root.visibleSidebarEntries.length === 0 && !root.controller.search_in_progress
                         }
                         delegate: Column {
                             id: fileGroup
