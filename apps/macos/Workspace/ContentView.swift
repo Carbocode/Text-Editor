@@ -61,7 +61,7 @@ struct ContentView: View {
                 .disabled(store.workspaceName == nil)
                 List {
                     ForEach(searchFileGroups, id: \.id) { group in
-                        Section {
+                        Group {
                             Button {
                                 store.openSearchFile(group.id)
                             } label: {
