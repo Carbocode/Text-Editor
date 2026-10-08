@@ -119,7 +119,19 @@ Item {
                                     Layout.preferredWidth: 20
                                     Layout.preferredHeight: 20
                                 }
-                                Label { text: modelData; Layout.fillWidth: true; elide: Text.ElideRight }
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 0
+                                    Label { text: modelData; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    Label {
+                                        text: root.controller.search_result_snippets[index] || ""
+                                        visible: text.length > 0
+                                        color: palette.placeholderText
+                                        font.pointSize: 9
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                    }
+                                }
                                 Label {
                                     text: "●"
                                     visible: root.controller.dirty_document_ids.indexOf(modelData) !== -1

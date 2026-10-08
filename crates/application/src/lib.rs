@@ -22,7 +22,10 @@ pub enum AppCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
     DiagnosticIncremented,
-    SearchQueryChanged(SearchQuery),
+    SearchQueryChanged {
+        query: SearchQuery,
+        results: Vec<SearchResult>,
+    },
     WorkspaceOpened {
         workspace: Workspace,
         documents: Vec<DocumentId>,
@@ -62,7 +65,7 @@ pub struct DocumentSnapshot {
     pub dirty: bool,
 }
 
-/// A filename query, kept as entered so frontends can render the same text.
+/// A search query, kept as entered so frontends can render the same text.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchQuery(pub String);
 
@@ -71,6 +74,52 @@ pub struct SearchResult {
     pub id: DocumentId,
     pub title: String,
     pub dirty: bool,
+    pub snippet: Option<String>,
+}
+
+fn search_result(
+    entry: &DocumentEntry,
+    needle: &str,
+    content: Option<&str>,
+) -> Option<SearchResult> {
+    let matching_line = if needle.is_empty() {
+        None
+    } else {
+        content.and_then(|content| {
+            content
+                .lines()
+                .find(|line| line.to_lowercase().contains(needle))
+        })
+    };
+    if !needle.is_empty()
+        && !entry.id.as_str().to_lowercase().contains(needle)
+        && matching_line.is_none()
+    {
+        return None;
+    }
+    let snippet = matching_line.map(|line| {
+        let line = line.trim();
+        let lowercase = line.to_lowercase();
+        let match_start = lowercase
+            .find(needle)
+            .map(|byte_index| lowercase[..byte_index].chars().count())
+            .unwrap_or(0);
+        let start = match_start.saturating_sub(40);
+        let mut chars = line.chars().skip(start);
+        let preview: String = chars.by_ref().take(160).collect();
+        format!(
+            "{}{}{}",
+            if start > 0 { "…" } else { "" },
+            preview,
+            if chars.next().is_some() { "…" } else { "" }
+        )
+    });
+    Some(SearchResult {
+        id: entry.id.clone(),
+        title: entry.id.as_str().to_owned(),
+        dirty: entry.dirty(),
+        snippet,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,6 +182,7 @@ pub struct AppState {
     workspace: Option<Workspace>,
     recent_workspaces: Vec<RecentWorkspace>,
     search_query: SearchQuery,
+    search_results: Vec<SearchResult>,
     documents: Vec<DocumentEntry>,
     active_document: Option<DocumentId>,
 }
@@ -165,7 +215,7 @@ impl AppState {
                 .map(|workspace| workspace.root.clone()),
             recent_workspaces: self.recent_workspaces.clone(),
             search_query: self.search_query.clone(),
-            search_results: self.search_results(),
+            search_results: self.search_results.clone(),
             documents: self
                 .documents
                 .iter()
@@ -179,19 +229,6 @@ impl AppState {
         }
     }
 
-    fn search_results(&self) -> Vec<SearchResult> {
-        let needle = self.search_query.0.trim().to_lowercase();
-        self.documents
-            .iter()
-            .filter(|entry| needle.is_empty() || entry.id.as_str().to_lowercase().contains(&needle))
-            .map(|entry| SearchResult {
-                id: entry.id.clone(),
-                title: entry.id.as_str().to_owned(),
-                dirty: entry.dirty(),
-            })
-            .collect()
-    }
-
     fn apply(&mut self, event: &AppEvent) {
         match event {
             AppEvent::DiagnosticIncremented => {
@@ -199,7 +236,10 @@ impl AppState {
                     .increment()
                     .expect("diagnostic overflow checked before producing event");
             }
-            AppEvent::SearchQueryChanged(query) => self.search_query = query.clone(),
+            AppEvent::SearchQueryChanged { query, results } => {
+                self.search_query = query.clone();
+                self.search_results = results.clone();
+            }
             AppEvent::WorkspaceOpened {
                 workspace,
                 documents,
@@ -217,12 +257,18 @@ impl AppState {
                         saved_content: None,
                     })
                     .collect();
+                self.search_results = self
+                    .documents
+                    .iter()
+                    .filter_map(|entry| search_result(entry, "", None))
+                    .collect();
                 self.active_document = None;
             }
             AppEvent::DocumentLoaded { id, content } => {
                 let entry = self.document_mut(id);
                 entry.content = Some(content.clone());
                 entry.saved_content = Some(content.clone());
+                self.refresh_search_result(id);
             }
             AppEvent::DocumentOpened { id } => self.active_document = Some(id.clone()),
             AppEvent::DocumentClosed { id } => {
@@ -231,10 +277,12 @@ impl AppState {
             }
             AppEvent::DocumentChanged { id, content } => {
                 self.document_mut(id).content = Some(content.clone());
+                self.refresh_search_result(id);
             }
             AppEvent::DocumentSaved { id } => {
                 let entry = self.document_mut(id);
                 entry.saved_content = entry.content.clone();
+                self.refresh_search_result(id);
             }
         }
     }
@@ -244,6 +292,27 @@ impl AppState {
             .iter_mut()
             .find(|entry| &entry.id == id)
             .expect("document validated before producing event")
+    }
+
+    fn refresh_search_result(&mut self, id: &DocumentId) {
+        let needle = self.search_query.0.trim().to_lowercase();
+        let index = self
+            .documents
+            .iter()
+            .position(|entry| &entry.id == id)
+            .expect("document validated before producing event");
+        let entry = &self.documents[index];
+        let result = search_result(entry, &needle, entry.content.as_deref());
+        self.search_results.retain(|result| &result.id != id);
+        if let Some(result) = result {
+            let position = self.search_results.partition_point(|existing| {
+                self.documents
+                    .iter()
+                    .position(|entry| entry.id == existing.id)
+                    .is_some_and(|existing_index| existing_index < index)
+            });
+            self.search_results.insert(position, result);
+        }
     }
 }
 
@@ -327,7 +396,35 @@ impl Application {
                 if self.state.search_query.0 == query {
                     Vec::new()
                 } else {
-                    vec![AppEvent::SearchQueryChanged(SearchQuery(query))]
+                    let needle = query.trim().to_lowercase();
+                    let root = self
+                        .state
+                        .workspace
+                        .as_ref()
+                        .map(|workspace| &workspace.root);
+                    let results = self
+                        .state
+                        .documents
+                        .iter()
+                        .filter_map(|entry| {
+                            let disk_content = if needle.is_empty() || entry.content.is_some() {
+                                None
+                            } else {
+                                root.and_then(|root| {
+                                    self.filesystem.read_document_for_search(root, &entry.id)
+                                })
+                            };
+                            search_result(
+                                entry,
+                                &needle,
+                                entry.content.as_deref().or(disk_content.as_deref()),
+                            )
+                        })
+                        .collect();
+                    vec![AppEvent::SearchQueryChanged {
+                        query: SearchQuery(query),
+                        results,
+                    }]
                 }
             }
             AppCommand::OpenWorkspace(path) => {
@@ -542,10 +639,11 @@ mod tests {
         let outcome = app
             .dispatch_with_events(AppCommand::SetSearchQuery("  ALP  ".into()))
             .unwrap();
-        assert_eq!(
-            outcome.events,
-            [AppEvent::SearchQueryChanged(SearchQuery("  ALP  ".into()))]
-        );
+        assert!(matches!(
+            outcome.events.as_slice(),
+            [AppEvent::SearchQueryChanged { query, results }]
+                if query.0 == "  ALP  " && results.len() == 1
+        ));
         assert_eq!(outcome.snapshot.search_results.len(), 1);
         assert_eq!(outcome.snapshot.search_results[0].id, id("Alpha.md"));
         assert_eq!(outcome.snapshot.active_document.unwrap().id, id("beta.txt"));
@@ -576,6 +674,88 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.search_query, SearchQuery::default());
         assert_eq!(snapshot.search_results[0].id, id("second.md"));
+    }
+
+    #[test]
+    fn content_search_finds_unopened_files_and_returns_matching_line() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("alpha.md"),
+            "heading\n  A Hidden Phrase here\nend",
+        )
+        .unwrap();
+        fs::write(dir.path().join("beta.txt"), "unrelated").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let found = app
+            .dispatch(AppCommand::SetSearchQuery("  hidden phrase  ".into()))
+            .unwrap();
+        assert_eq!(found.search_results.len(), 1);
+        assert_eq!(found.search_results[0].id, id("alpha.md"));
+        assert_eq!(
+            found.search_results[0].snippet.as_deref(),
+            Some("A Hidden Phrase here")
+        );
+        assert!(found.active_document.is_none());
+    }
+
+    #[test]
+    fn content_preview_keeps_match_visible_in_long_line() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("note.md"),
+            format!("{}needle", "x".repeat(300)),
+        )
+        .unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let found = app
+            .dispatch(AppCommand::SetSearchQuery("needle".into()))
+            .unwrap();
+        assert!(
+            found.search_results[0]
+                .snippet
+                .as_deref()
+                .unwrap()
+                .contains("needle")
+        );
+    }
+
+    #[test]
+    fn content_search_tracks_unsaved_edits_and_saved_state() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("note.md"), "original").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        app.dispatch(AppCommand::OpenDocument(id("note.md")))
+            .unwrap();
+        app.dispatch(AppCommand::SetSearchQuery("draft".into()))
+            .unwrap();
+        let changed = app
+            .dispatch(AppCommand::ChangeDocument {
+                id: id("note.md"),
+                content: "a draft line".into(),
+            })
+            .unwrap();
+        assert_eq!(
+            changed.search_results[0].snippet.as_deref(),
+            Some("a draft line")
+        );
+        assert!(changed.search_results[0].dirty);
+        let saved = app
+            .dispatch(AppCommand::SaveDocument(id("note.md")))
+            .unwrap();
+        assert!(!saved.search_results[0].dirty);
+        let changed_again = app
+            .dispatch(AppCommand::ChangeDocument {
+                id: id("note.md"),
+                content: "without that word".into(),
+            })
+            .unwrap();
+        assert!(changed_again.search_results.is_empty());
     }
 
     #[test]

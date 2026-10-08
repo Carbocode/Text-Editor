@@ -32,6 +32,7 @@ pub struct SearchResult {
     pub id: String,
     pub title: String,
     pub dirty: bool,
+    pub snippet: Option<String>,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -72,6 +73,7 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                     id: result.id.as_str().to_owned(),
                     title: result.title,
                     dirty: result.dirty,
+                    snippet: result.snippet,
                 })
                 .collect(),
             documents: snapshot

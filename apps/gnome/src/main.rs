@@ -99,6 +99,7 @@ impl Ui {
             for document in &snapshot.search_results {
                 let item = adw::SidebarItem::new(&document.title);
                 item.set_icon_paintable(Some(&icon_for(document.id.as_str())));
+                item.set_subtitle(document.snippet.as_deref());
                 if document.dirty {
                     item.set_suffix(Some(&gtk::Label::new(Some("●"))));
                 }
@@ -454,6 +455,12 @@ fn build_window(app: &adw::Application) {
             ui.buffer.set_text("GTK Phase 1 smoke content");
             ui.save.emit_clicked();
             assert_eq!(ui.status.text(), "Saved");
+            ui.dispatch(AppCommand::SetSearchQuery("phase 1".into()));
+            assert_eq!(ui.snapshot.borrow().search_results.len(), 1);
+            assert_eq!(
+                ui.snapshot.borrow().search_results[0].snippet.as_deref(),
+                Some("GTK Phase 1 smoke content")
+            );
             ui.dispatch(AppCommand::SetSearchQuery("unlikely-no-match".into()));
             assert!(ui.snapshot.borrow().search_results.is_empty());
             assert_eq!(ui.search.text(), "unlikely-no-match");

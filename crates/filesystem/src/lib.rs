@@ -2,7 +2,8 @@
 
 use native_workspace_domain::{DocumentId, Workspace};
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
@@ -23,6 +24,9 @@ pub enum FilesystemError {
 pub trait WorkspaceFilesystem: Send {
     fn open_workspace(&self, path: &Path) -> Result<(Workspace, Vec<DocumentId>), FilesystemError>;
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError>;
+    fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
+        self.read_document(root, id).ok()
+    }
     fn write_document(
         &self,
         root: &Path,
@@ -96,6 +100,21 @@ impl WorkspaceFilesystem for RealFilesystem {
         fs::read_to_string(&path).map_err(|source| FilesystemError::Io { path, source })
     }
 
+    fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
+        const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
+        let path = Self::document_path(root, id).ok()?;
+        let mut bytes = Vec::new();
+        fs::File::open(path)
+            .ok()?
+            .take(MAX_SEARCH_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_SEARCH_BYTES {
+            return None;
+        }
+        String::from_utf8(bytes).ok()
+    }
+
     fn write_document(
         &self,
         root: &Path,
@@ -135,6 +154,23 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("b.txt")).unwrap(),
             "after"
+        );
+    }
+
+    #[test]
+    fn content_search_skips_oversized_files_without_hiding_the_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = DocumentId::parse("large.md").unwrap();
+        fs::write(dir.path().join(id.as_str()), "x".repeat(1024 * 1024 + 1)).unwrap();
+        let filesystem = RealFilesystem;
+        assert_eq!(
+            filesystem.open_workspace(dir.path()).unwrap().1,
+            [id.clone()]
+        );
+        assert!(
+            filesystem
+                .read_document_for_search(dir.path(), &id)
+                .is_none()
         );
     }
 }

@@ -21,6 +21,7 @@ pub mod qobject {
         #[qproperty(QString, workspace_name)]
         #[qproperty(QString, search_query)]
         #[qproperty(QStringList, search_result_ids)]
+        #[qproperty(QStringList, search_result_snippets)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
         #[qproperty(QStringList, recent_workspace_paths)]
@@ -55,6 +56,7 @@ pub struct AppControllerRust {
     workspace_name: QString,
     search_query: QString,
     search_result_ids: QStringList,
+    search_result_snippets: QStringList,
     document_ids: QStringList,
     dirty_document_ids: QStringList,
     recent_workspace_paths: QStringList,
@@ -88,6 +90,13 @@ impl qobject::AppController {
                 .search_results
                 .iter()
                 .map(|result| QString::from(result.id.as_str()))
+                .collect(),
+        );
+        self.as_mut().set_search_result_snippets(
+            snapshot
+                .search_results
+                .iter()
+                .map(|result| QString::from(result.snippet.as_deref().unwrap_or("")))
                 .collect(),
         );
         self.as_mut().set_recent_workspace_paths(

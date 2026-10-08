@@ -41,7 +41,15 @@ struct ContentView: View {
                                         .interpolation(.high)
                                         .frame(width: 20, height: 20)
                                 }
-                                Text(document.title)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(document.title)
+                                    if let snippet = document.snippet {
+                                        Text(snippet)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                }
                                 Spacer(minLength: 0)
                                 if document.dirty {
                                     Circle().fill(.secondary).frame(width: 6, height: 6)

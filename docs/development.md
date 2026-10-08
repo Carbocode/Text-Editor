@@ -8,4 +8,4 @@ The Phase 1 vertical slice covers opening a directory, listing root-level .md/.t
 
 Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
 
-The sidebar search currently matches root-level filenames in memory, ignoring case and surrounding whitespace in the query. It does not read document contents or use SQLite. An empty query shows every listed document.
+The sidebar search matches root-level filenames and UTF-8 file contents, ignoring case and surrounding whitespace in the query. Content results include the first matching line as a short preview. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their names remain searchable. An empty query shows every listed document. Search does not use SQLite.

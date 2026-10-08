@@ -50,6 +50,9 @@ ApplicationWindow {
                 workspacePane.saveActive()
                 if (controller.active_document_dirty)
                     throw new Error("Document remained dirty after save")
+                controller.search_files("phase 1")
+                if (controller.search_result_ids.length !== 1 || controller.search_result_snippets[0] !== "QML Phase 1 smoke content")
+                    throw new Error("Content search did not return a matching preview")
                 console.log("QML workspace edit/save smoke test passed")
             }
         }
