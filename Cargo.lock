@@ -1740,6 +1740,7 @@ dependencies = [
  "native-workspace-domain",
  "native-workspace-filesystem",
  "native-workspace-storage",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]

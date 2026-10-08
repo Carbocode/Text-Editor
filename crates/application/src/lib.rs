@@ -1,5 +1,8 @@
 //! Shared application commands, events, state, and owned snapshots.
 
+mod icons;
+pub use icons::{file_icon_name, folder_icon_name};
+
 use native_workspace_domain::{DiagnosticState, DocumentId, Workspace};
 use native_workspace_filesystem::{
     FilesystemError, RealFilesystem, WorkspaceFilesystem, WorkspaceWatcher,

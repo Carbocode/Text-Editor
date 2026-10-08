@@ -39,6 +39,13 @@ ApplicationWindow {
                     throw new Error("Workspace documents were not listed")
                 if (title !== controller.workspace_name)
                     throw new Error("Window title did not follow the workspace")
+                if (controller.directory_ids.indexOf("src") !== -1) {
+                    if (workspacePane.sidebarEntries().some(entry => entry.path === "src/main.rs"))
+                        throw new Error("Directory contents were visible before expansion")
+                    workspacePane.toggleDirectory("src")
+                    if (!workspacePane.sidebarEntries().some(entry => entry.path === "src/main.rs"))
+                        throw new Error("Directory contents did not appear after expansion")
+                }
                 controller.search_files("unlikely-no-match")
                 if (controller.search_result_ids.length !== 0)
                     throw new Error("Filename search did not filter results")

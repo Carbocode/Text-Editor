@@ -6,7 +6,8 @@ cargo build -p native-workspace-ffi-swift
 mkdir -p apps/macos/generated apps/macos/.build/NativeWorkspace.app/Contents/MacOS
 mkdir -p apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons
 cp apps/macos/Info.plist apps/macos/.build/NativeWorkspace.app/Contents/Info.plist
-cp assets/material-icon-theme/*.png apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons/
+cp assets/material-icon-theme/png/*.png apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons/
+cp assets/material-icon-theme/manifest.json apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons/
 cargo run --quiet -p native-workspace-ffi-swift --bin uniffi-bindgen -- generate \
   --library target/debug/libnative_workspace_ffi_swift.dylib \
   --language swift --out-dir apps/macos/generated

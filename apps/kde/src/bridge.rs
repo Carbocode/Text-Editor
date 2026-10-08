@@ -1,6 +1,8 @@
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList, QUrl};
-use native_workspace_application::{AppCommand, AppSnapshot, Application};
+use native_workspace_application::{
+    AppCommand, AppSnapshot, Application, file_icon_name, folder_icon_name,
+};
 use native_workspace_domain::DocumentId;
 use std::{path::PathBuf, pin::Pin};
 
@@ -19,6 +21,7 @@ pub mod qobject {
         #[qproperty(u64, counter)]
         #[qproperty(u64, revision)]
         #[qproperty(QString, workspace_name)]
+        #[qproperty(QString, workspace_root)]
         #[qproperty(QString, search_query)]
         #[qproperty(bool, search_in_progress)]
         #[qproperty(QStringList, search_result_ids)]
@@ -47,6 +50,10 @@ pub mod qobject {
         #[qinvokable]
         fn search_files(self: Pin<&mut Self>, query: &QString);
         #[qinvokable]
+        fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString;
+        #[qinvokable]
+        fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString;
+        #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
         fn refresh_workspace(self: Pin<&mut Self>);
@@ -72,6 +79,7 @@ pub struct AppControllerRust {
     counter: u64,
     revision: u64,
     workspace_name: QString,
+    workspace_root: QString,
     search_query: QString,
     search_in_progress: bool,
     search_result_ids: QStringList,
@@ -203,6 +211,12 @@ impl qobject::AppController {
         );
         self.as_mut()
             .set_workspace_name(QString::from(snapshot.workspace_name.unwrap_or_default()));
+        self.as_mut().set_workspace_root(QString::from(
+            snapshot
+                .workspace_root
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
         self.as_mut().set_document_ids(
             snapshot
                 .documents
@@ -257,6 +271,20 @@ impl qobject::AppController {
 
     pub fn search_files(self: Pin<&mut Self>, query: &QString) {
         self.dispatch(AppCommand::QueueSearchQuery(query.to_string()));
+    }
+
+    pub fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString {
+        QString::from(format!(
+            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
+            file_icon_name(&path.to_string())
+        ))
+    }
+
+    pub fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString {
+        QString::from(format!(
+            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
+            folder_icon_name(&path.to_string(), expanded)
+        ))
     }
 
     pub fn initialize_persistence(mut self: Pin<&mut Self>) {

@@ -13,7 +13,18 @@ Item {
     property real editorScrollY: editorScroll.contentItem.contentY
     property int searchFileCount: fileIds().length
     property var collapsedDirectories: ({})
+    property string lastWorkspaceRoot: ""
     signal browseRequested()
+
+    Connections {
+        target: root.controller
+        function onWorkspace_rootChanged() {
+            if (root.lastWorkspaceRoot !== root.controller.workspace_root) {
+                root.lastWorkspaceRoot = root.controller.workspace_root
+                root.collapsedDirectories = ({})
+            }
+        }
+    }
 
     function flushEditor() {
         if (controller.active_document_id.length > 0 && editor.text !== controller.active_document_text) {
@@ -53,14 +64,6 @@ Item {
         }
     }
 
-    function iconFor(name) {
-        var lower = name.toLowerCase()
-        var base = "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/"
-        if (lower.split("/").pop() === "readme.md") return base + "readme.png"
-        if (lower.endsWith(".md")) return base + "markdown.png"
-        return base + "document.png"
-    }
-
     function fileIds() {
         var ids = controller.search_result_ids
         var files = []
@@ -77,36 +80,46 @@ Item {
     function sidebarEntries() {
         var files = fileIds()
         var directories = []
+        var seenDirectories = ({})
         if (root.controller.search_query.length === 0) {
-            for (var k = 0; k < root.controller.directory_ids.length; ++k)
-                directories.push(root.controller.directory_ids[k])
+            for (var k = 0; k < root.controller.directory_ids.length; ++k) {
+                var directory = root.controller.directory_ids[k]
+                directories.push(directory)
+            }
         }
         if (root.controller.search_query.length > 0) {
             for (var i = 0; i < files.length; ++i) {
                 var parts = files[i].split("/")
                 for (var j = 1; j < parts.length; ++j) {
                     var parent = parts.slice(0, j).join("/")
-                    if (directories.indexOf(parent) === -1) directories.push(parent)
+                    if (!seenDirectories["#" + parent]) {
+                        directories.push(parent)
+                        seenDirectories["#" + parent] = true
+                    }
                 }
             }
         }
-        var paths = []
-        for (var d = 0; d < directories.length; ++d) paths.push({ path: directories[d], directory: true })
-        for (var f = 0; f < files.length; ++f) paths.push({ path: files[f], directory: false })
-        paths.sort(function(a, b) { return a.path.localeCompare(b.path) })
-        return paths.filter(function(item) {
-            var parts = item.path.split("/")
+        function visible(path) {
+            if (root.controller.search_query.length > 0) return true
+            var parts = path.split("/")
             for (var i = 1; i < parts.length; ++i) {
-                if (root.collapsedDirectories[parts.slice(0, i).join("/")]) return false
+                if (root.collapsedDirectories[parts.slice(0, i).join("/")] !== false) return false
             }
             return true
-        })
+        }
+        var paths = []
+        for (var d = 0; d < directories.length; ++d)
+            if (visible(directories[d])) paths.push({ path: directories[d], directory: true })
+        for (var f = 0; f < files.length; ++f)
+            if (visible(files[f])) paths.push({ path: files[f], directory: false })
+        paths.sort(function(a, b) { return a.path.localeCompare(b.path) })
+        return paths
     }
 
     function toggleDirectory(path) {
         var next = ({})
         for (var key in collapsedDirectories) next[key] = collapsedDirectories[key]
-        next[path] = !next[path]
+        next[path] = !(collapsedDirectories[path] !== false)
         collapsedDirectories = next
     }
 
@@ -236,7 +249,7 @@ Item {
                                 contentItem: RowLayout {
                                     Image {
                                         visible: !fileGroup.isDirectory
-                                        source: root.iconFor(fileGroup.fileId)
+                                        source: root.controller.file_icon(fileGroup.fileId)
                                         sourceSize.width: 20
                                         sourceSize.height: 20
                                         fillMode: Image.PreserveAspectFit
@@ -245,7 +258,16 @@ Item {
                                     }
                                     Label {
                                         visible: fileGroup.isDirectory
-                                        text: root.collapsedDirectories[fileGroup.fileId] ? "▸ 📁" : "▾ 📁"
+                                        text: root.controller.search_query.length === 0 && root.collapsedDirectories[fileGroup.fileId] !== false ? "▸" : "▾"
+                                    }
+                                    Image {
+                                        visible: fileGroup.isDirectory
+                                        source: root.controller.folder_icon(fileGroup.fileId, root.controller.search_query.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false)
+                                        sourceSize.width: 20
+                                        sourceSize.height: 20
+                                        fillMode: Image.PreserveAspectFit
+                                        Layout.preferredWidth: 20
+                                        Layout.preferredHeight: 20
                                     }
                                     Label {
                                         text: fileGroup.fileId.split("/").pop()

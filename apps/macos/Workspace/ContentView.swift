@@ -6,6 +6,8 @@ struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
     @State private var choosingWorkspace = false
     @State private var resolvingExternalChange = false
+    @State private var expandedDirectories: Set<String> = []
+    @State private var currentWorkspaceRoot: String?
 
     private struct SearchMatchRow {
         let index: Int
@@ -18,7 +20,7 @@ struct ContentView: View {
         var matches: [SearchMatchRow] = []
     }
 
-    private final class SidebarTreeNode: Identifiable {
+    private struct SidebarOutlineRow: Identifiable {
         enum Kind {
             case directory(String)
             case file(SearchFileGroup)
@@ -26,25 +28,25 @@ struct ContentView: View {
         }
 
         let id: String
+        let depth: Int
         let kind: Kind
-        var children: [SidebarTreeNode]?
-
-        init(id: String, kind: Kind, children: [SidebarTreeNode]? = nil) {
-            self.id = id
-            self.kind = kind
-            self.children = children
-        }
-
-        var isDirectory: Bool {
-            if case .directory = kind { return true }
-            return false
-        }
     }
 
-    private var searchFileGroups: [SearchFileGroup] {
+    private var sidebarRows: [SidebarOutlineRow] {
+        let searching = !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        func visible(_ path: String) -> Bool {
+            if searching { return true }
+            let parts = path.split(separator: "/")
+            for count in 1..<parts.count where !expandedDirectories.contains(parts.prefix(count).joined(separator: "/")) {
+                return false
+            }
+            return true
+        }
+
         var groups: [SearchFileGroup] = []
         var indicesByID: [String: Int] = [:]
         for (index, result) in store.searchResults.enumerated() {
+            if !visible(result.id) { continue }
             if let groupIndex = indicesByID[result.id] {
                 if result.location != nil {
                     groups[groupIndex].matches.append(SearchMatchRow(index: index, result: result))
@@ -57,54 +59,63 @@ struct ContentView: View {
                 }
             }
         }
-        return groups
-    }
 
-    private var sidebarTree: [SidebarTreeNode] {
-        let root = SidebarTreeNode(id: "root", kind: .directory(""), children: [])
-        var directoryNodes: [String: SidebarTreeNode] = ["": root]
-
-        func ensureDirectory(_ path: String) -> SidebarTreeNode {
-            if let existing = directoryNodes[path] { return existing }
-            let parent = path.split(separator: "/").dropLast().joined(separator: "/")
-            let node = SidebarTreeNode(id: "directory:\(path)", kind: .directory(path), children: [])
-            ensureDirectory(parent).children?.append(node)
-            directoryNodes[path] = node
-            return node
-        }
-
-        if store.searchQuery.isEmpty {
-            for path in store.directories { _ = ensureDirectory(path) }
-        }
-        for group in searchFileGroups {
-            let parent = group.id.split(separator: "/").dropLast().joined(separator: "/")
-            let matches = group.matches.map { SidebarTreeNode(id: "match:\($0.index)", kind: .match($0)) }
-            let node = SidebarTreeNode(id: "file:\(group.id)", kind: .file(group), children: matches.isEmpty ? nil : matches)
-            ensureDirectory(parent).children?.append(node)
-        }
-
-        func sort(_ node: SidebarTreeNode) {
-            node.children?.sort {
-                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
-                return $0.id.localizedStandardCompare($1.id) == .orderedAscending
+        var directoryPaths: Set<String> = []
+        if searching {
+            for group in groups {
+                let parts = group.id.split(separator: "/")
+                for count in 1..<parts.count {
+                    directoryPaths.insert(parts.prefix(count).joined(separator: "/"))
+                }
             }
-            node.children?.forEach(sort)
+        } else {
+            directoryPaths = Set(store.directories.filter(visible))
         }
-        sort(root)
-        return root.children ?? []
+
+        var entries: [(String, SidebarOutlineRow.Kind)] = directoryPaths.map { ($0, .directory($0)) }
+        entries += groups.map { ($0.id, .file($0)) }
+        entries.sort { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+        var rows: [SidebarOutlineRow] = []
+        for (path, kind) in entries {
+            let depth = path.split(separator: "/").count - 1
+            rows.append(SidebarOutlineRow(id: "entry:\(path)", depth: depth, kind: kind))
+            if case .file(let group) = kind {
+                for match in group.matches {
+                    rows.append(SidebarOutlineRow(id: "match:\(match.index)", depth: depth + 1, kind: .match(match)))
+                }
+            }
+        }
+        return rows
     }
 
-    @ViewBuilder private func sidebarRow(_ node: SidebarTreeNode) -> some View {
-        switch node.kind {
+    @ViewBuilder private func sidebarRow(_ row: SidebarOutlineRow) -> some View {
+        switch row.kind {
         case .directory(let path):
-            Label(path.split(separator: "/").last.map(String.init) ?? path, systemImage: "folder")
+            Button {
+                if expandedDirectories.contains(path) {
+                    expandedDirectories.remove(path)
+                } else {
+                    expandedDirectories.insert(path)
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: expandedDirectories.contains(path) || !store.searchQuery.isEmpty
+                        ? "chevron.down" : "chevron.right").font(.caption)
+                    if let icon = WorkspaceIcons.image(for: path, isDirectory: true,
+                                                      expanded: expandedDirectories.contains(path) || !store.searchQuery.isEmpty) {
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
+                    }
+                    Text(path.split(separator: "/").last.map(String.init) ?? path)
+                }
+            }
+            .buttonStyle(.plain)
         case .file(let group):
             Button {
                 store.openSearchFile(group.id)
             } label: {
                 HStack(spacing: 8) {
                     if let icon = WorkspaceIcons.image(for: group.id) {
-                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 20, height: 20)
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
                     }
                     Text(group.id.split(separator: "/").last.map(String.init) ?? group.id)
                     Spacer(minLength: 0)
@@ -161,8 +172,14 @@ struct ContentView: View {
                 .padding(.top, 8)
                 .disabled(store.workspaceName == nil)
                 List {
-                    OutlineGroup(sidebarTree, children: \.children) { node in
-                        sidebarRow(node)
+                    ForEach(sidebarRows) { row in
+                        sidebarRow(row).padding(.leading, CGFloat(row.depth) * 14)
+                    }
+                }
+                .onReceive(store.$workspaceRoot) { root in
+                    if currentWorkspaceRoot != root {
+                        currentWorkspaceRoot = root
+                        expandedDirectories.removeAll()
                     }
                 }
                 .overlay {

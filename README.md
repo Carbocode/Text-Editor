@@ -2,7 +2,7 @@
 
 Three native frontends share one Rust application core: SwiftUI on macOS, GTK4/libadwaita on GNOME, and CXX-Qt/QML with a Kirigami variant on KDE.
 
-Phase 1 opens a local directory, displays its full directory tree and regular files, opens and edits UTF-8 documents, shows their modified/saved state, and saves content to disk. README.md, other .md files, and .txt files use icons from [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme); see [asset attribution](assets/material-icon-theme/ATTRIBUTION.md).
+Phase 1 opens a local directory, displays its full directory tree and regular files, opens and edits UTF-8 documents, shows their modified/saved state, and saves content to disk. The sidebar starts with folders closed and expands them on demand. File and folder icons use the bundled [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme) associations; see [asset attribution](assets/material-icon-theme/ATTRIBUTION.md).
 
 Phase 2 separates frontend commands, successful application events, authoritative state, and snapshots. The three native frontends still consume the same snapshot API.
 

@@ -5,6 +5,7 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var counter: UInt64 = 0
     @Published private(set) var revision: UInt64 = 0
     @Published private(set) var workspaceName: String?
+    @Published private(set) var workspaceRoot: String?
     @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
     @Published private(set) var searchQuery = ""
     @Published private(set) var searchResults: [SearchResult] = []
@@ -182,6 +183,7 @@ final class WorkspaceStore: ObservableObject {
         revision = snapshot.revision
         counter = snapshot.counter
         workspaceName = snapshot.workspaceName
+        workspaceRoot = snapshot.workspaceRoot
         recentWorkspaces = snapshot.recentWorkspaces
         searchQuery = snapshot.searchQuery
         searchResults = snapshot.searchResults

@@ -1,7 +1,10 @@
+mod material_icons;
+
 use adw::prelude::*;
 use gtk::{gio, glib};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, Application, SearchLocation, SearchResult,
+    AppCommand, AppSnapshot, Application, SearchLocation, SearchResult, file_icon_name,
+    folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{
@@ -81,6 +84,22 @@ impl Ui {
                 || previous.directories != snapshot.directories
                 || self.force_sidebar.replace(false)
         };
+        {
+            let previous = self.snapshot.borrow();
+            if previous.workspace_root != snapshot.workspace_root {
+                self.collapsed_directories
+                    .replace(snapshot.directories.iter().cloned().collect());
+            } else if previous.directories != snapshot.directories {
+                let known: std::collections::HashSet<_> = previous.directories.iter().collect();
+                self.collapsed_directories.borrow_mut().extend(
+                    snapshot
+                        .directories
+                        .iter()
+                        .filter(|path| !known.contains(path))
+                        .cloned(),
+                );
+            }
+        }
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         self.window.set_title(Some(
             snapshot
@@ -149,6 +168,12 @@ impl Ui {
             self.files.remove_all();
             let mut rows = Vec::new();
             let section = adw::SidebarSection::new();
+            let conflicted: std::collections::HashSet<_> = snapshot
+                .documents
+                .iter()
+                .filter(|entry| entry.external_change)
+                .map(|entry| &entry.id)
+                .collect();
             let groups: std::collections::HashMap<_, _> = snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
@@ -180,29 +205,32 @@ impl Ui {
             paths.dedup();
             for (path, is_directory) in paths {
                 let depth = path.matches('/').count();
-                let hidden = path
-                    .split('/')
-                    .scan(String::new(), |prefix, part| {
-                        let parent = prefix.clone();
-                        if !prefix.is_empty() {
-                            prefix.push('/');
-                        }
-                        prefix.push_str(part);
-                        Some(parent)
-                    })
-                    .any(|parent| {
-                        !parent.is_empty() && self.collapsed_directories.borrow().contains(&parent)
-                    });
+                let hidden = snapshot.search_query.0.is_empty()
+                    && path
+                        .split('/')
+                        .scan(String::new(), |prefix, part| {
+                            let parent = prefix.clone();
+                            if !prefix.is_empty() {
+                                prefix.push('/');
+                            }
+                            prefix.push_str(part);
+                            Some(parent)
+                        })
+                        .any(|parent| {
+                            !parent.is_empty()
+                                && self.collapsed_directories.borrow().contains(&parent)
+                        });
                 if hidden {
                     continue;
                 }
                 let name = path.rsplit('/').next().unwrap_or(&path);
                 let indent = "\u{00a0}".repeat(depth * 3);
                 if is_directory {
-                    let collapsed = self.collapsed_directories.borrow().contains(&path);
+                    let collapsed = snapshot.search_query.0.is_empty()
+                        && self.collapsed_directories.borrow().contains(&path);
                     let marker = if collapsed { "▸" } else { "▾" };
                     let item = adw::SidebarItem::new(&format!("{indent}{marker} {name}"));
-                    item.set_icon_name(Some("folder-symbolic"));
+                    item.set_icon_paintable(Some(&folder_icon_for(&path, !collapsed)));
                     section.append(item);
                     rows.push(SidebarRow::Directory(path));
                     continue;
@@ -213,11 +241,7 @@ impl Ui {
                 let document = &group[0];
                 let file = adw::SidebarItem::new(&format!("{indent}{name}"));
                 file.set_icon_paintable(Some(&icon_for(document.id.as_str())));
-                if snapshot
-                    .documents
-                    .iter()
-                    .any(|entry| entry.id == document.id && entry.external_change)
-                {
+                if conflicted.contains(&document.id) {
                     let marker = gtk::Label::new(Some("⚠"));
                     marker.set_tooltip_text(Some("Changed on disk"));
                     file.set_suffix(Some(&marker));
@@ -294,27 +318,29 @@ impl Ui {
 }
 
 fn icon_for(name: &str) -> gtk::gdk::Texture {
-    let bytes: &'static [u8] = if name
-        .rsplit('/')
-        .next()
-        .is_some_and(|name| name.eq_ignore_ascii_case("readme.md"))
-    {
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/material-icon-theme/readme.png"
-        ))
-    } else if name.to_ascii_lowercase().ends_with(".md") {
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/material-icon-theme/markdown.png"
-        ))
-    } else {
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../assets/material-icon-theme/document.png"
-        ))
-    };
-    gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(bytes)).expect("bundled PNG icon")
+    texture_for_icon(file_icon_name(name))
+}
+
+fn folder_icon_for(name: &str, expanded: bool) -> gtk::gdk::Texture {
+    texture_for_icon(folder_icon_name(name, expanded))
+}
+
+fn texture_for_icon(name: &str) -> gtk::gdk::Texture {
+    thread_local! {
+        static CACHE: RefCell<std::collections::HashMap<String, gtk::gdk::Texture>> = RefCell::new(std::collections::HashMap::new());
+    }
+    CACHE.with(|cache| {
+        if let Some(texture) = cache.borrow().get(name) {
+            return texture.clone();
+        }
+        let bytes = material_icons::png_bytes(name)
+            .or_else(|| material_icons::png_bytes("file"))
+            .expect("bundled default file icon");
+        let texture = gtk::gdk::Texture::from_bytes(&glib::Bytes::from_static(bytes))
+            .expect("bundled PNG icon");
+        cache.borrow_mut().insert(name.to_owned(), texture.clone());
+        texture
+    })
 }
 
 fn main() {
@@ -715,6 +741,16 @@ fn build_window(app: &adw::Application) {
     if let Some(path) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE") {
         let workspace_path = PathBuf::from(path);
         ui.dispatch(AppCommand::OpenWorkspace(workspace_path.clone()));
+        if ui
+            .snapshot
+            .borrow()
+            .directories
+            .iter()
+            .any(|path| path == "src")
+        {
+            assert!(ui.collapsed_directories.borrow().contains("src"));
+            assert_eq!(ui.sidebar_rows.borrow().len(), 2);
+        }
         assert_eq!(
             window.title().as_deref(),
             ui.snapshot.borrow().workspace_name.as_deref()
@@ -784,13 +820,20 @@ fn build_window(app: &adw::Application) {
                 .expect("selected search occurrence");
             assert_eq!(ui.buffer.text(&start, &end, false), "Phase 1");
             let vertical = editor_scroll.vadjustment();
-            for _ in 0..100 {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
                 glib::MainContext::default().iteration(false);
                 if vertical.value() > 0.0 {
                     break;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            assert!(vertical.value() > 0.0);
+            assert!(
+                vertical.value() > 0.0,
+                "vertical scroll: upper={}, page={}",
+                vertical.upper(),
+                vertical.page_size()
+            );
             ui.dispatch(AppCommand::SetSearchQuery("unlikely-no-match".into()));
             assert!(ui.snapshot.borrow().search_results.is_empty());
             assert_eq!(ui.search.text(), "unlikely-no-match");
