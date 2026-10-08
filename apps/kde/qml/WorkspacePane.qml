@@ -12,6 +12,7 @@ Item {
     property alias editorSelectedText: editor.selectedText
     property real editorScrollY: editorScroll.contentItem.contentY
     property int searchFileCount: fileIds().length
+    property var collapsedDirectories: ({})
     signal browseRequested()
 
     function flushEditor() {
@@ -55,7 +56,7 @@ Item {
     function iconFor(name) {
         var lower = name.toLowerCase()
         var base = "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/"
-        if (lower === "readme.md") return base + "readme.png"
+        if (lower.split("/").pop() === "readme.md") return base + "readme.png"
         if (lower.endsWith(".md")) return base + "markdown.png"
         return base + "document.png"
     }
@@ -63,11 +64,50 @@ Item {
     function fileIds() {
         var ids = controller.search_result_ids
         var files = []
+        var seen = ({})
         for (var i = 0; i < ids.length; ++i) {
-            if (files.indexOf(ids[i]) === -1)
+            if (!seen["#" + ids[i]]) {
                 files.push(ids[i])
+                seen["#" + ids[i]] = true
+            }
         }
         return files
+    }
+
+    function sidebarEntries() {
+        var files = fileIds()
+        var directories = []
+        if (root.controller.search_query.length === 0) {
+            for (var k = 0; k < root.controller.directory_ids.length; ++k)
+                directories.push(root.controller.directory_ids[k])
+        }
+        if (root.controller.search_query.length > 0) {
+            for (var i = 0; i < files.length; ++i) {
+                var parts = files[i].split("/")
+                for (var j = 1; j < parts.length; ++j) {
+                    var parent = parts.slice(0, j).join("/")
+                    if (directories.indexOf(parent) === -1) directories.push(parent)
+                }
+            }
+        }
+        var paths = []
+        for (var d = 0; d < directories.length; ++d) paths.push({ path: directories[d], directory: true })
+        for (var f = 0; f < files.length; ++f) paths.push({ path: files[f], directory: false })
+        paths.sort(function(a, b) { return a.path.localeCompare(b.path) })
+        return paths.filter(function(item) {
+            var parts = item.path.split("/")
+            for (var i = 1; i < parts.length; ++i) {
+                if (root.collapsedDirectories[parts.slice(0, i).join("/")]) return false
+            }
+            return true
+        })
+    }
+
+    function toggleDirectory(path) {
+        var next = ({})
+        for (var key in collapsedDirectories) next[key] = collapsedDirectories[key]
+        next[path] = !next[path]
+        collapsedDirectories = next
     }
 
     function matchIndicesForFile(id) {
@@ -83,7 +123,10 @@ Item {
         interval: 250
         repeat: true
         running: root.controller && root.controller.workspace_name.length > 0
-        onTriggered: if (root.flushEditor()) root.controller.poll_workspace_changes()
+        onTriggered: if (root.flushEditor()) {
+            root.controller.poll_workspace_changes()
+            root.controller.poll_search_results()
+        }
     }
 
     ColumnLayout {
@@ -155,24 +198,36 @@ Item {
                             root.controller.search_files(text)
                         }
                     }
+                    BusyIndicator {
+                        running: root.controller.search_in_progress
+                        visible: running
+                        Layout.alignment: Qt.AlignHCenter
+                    }
                     ListView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: root.fileIds()
+                        model: root.sidebarEntries()
                         Label {
                             anchors.centerIn: parent
                             text: root.controller.search_query.length > 0 ? "No matching files" : "No files"
-                            visible: root.controller.workspace_name.length > 0 && root.controller.search_result_ids.length === 0
+                            visible: root.controller.workspace_name.length > 0 && root.sidebarEntries().length === 0 && !root.controller.search_in_progress
                         }
                         delegate: Column {
                             id: fileGroup
                             width: ListView.view.width
-                            property string fileId: modelData
+                            property string fileId: modelData.path
+                            property bool isDirectory: modelData.directory
+                            property int depth: fileId.split("/").length - 1
                             ItemDelegate {
                                 width: parent.width
-                                highlighted: root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
+                                leftPadding: 10 + fileGroup.depth * 16
+                                highlighted: !fileGroup.isDirectory && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
                                 onClicked: {
+                                    if (fileGroup.isDirectory) {
+                                        root.toggleDirectory(fileGroup.fileId)
+                                        return
+                                    }
                                     if (root.flushEditor()) {
                                         root.controller.open_document(fileGroup.fileId)
                                         root.selectedResultIndex = -1
@@ -180,6 +235,7 @@ Item {
                                 }
                                 contentItem: RowLayout {
                                     Image {
+                                        visible: !fileGroup.isDirectory
                                         source: root.iconFor(fileGroup.fileId)
                                         sourceSize.width: 20
                                         sourceSize.height: 20
@@ -188,27 +244,31 @@ Item {
                                         Layout.preferredHeight: 20
                                     }
                                     Label {
-                                        text: fileGroup.fileId
+                                        visible: fileGroup.isDirectory
+                                        text: root.collapsedDirectories[fileGroup.fileId] ? "▸ 📁" : "▾ 📁"
+                                    }
+                                    Label {
+                                        text: fileGroup.fileId.split("/").pop()
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
                                     Label {
                                         text: "⚠"
-                                        visible: root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
+                                        visible: !fileGroup.isDirectory && root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
                                         color: palette.highlight
                                     }
                                     Label {
                                         text: "●"
-                                        visible: root.controller.dirty_document_ids.indexOf(fileGroup.fileId) !== -1
+                                        visible: !fileGroup.isDirectory && root.controller.dirty_document_ids.indexOf(fileGroup.fileId) !== -1
                                     }
                                 }
                             }
                             Repeater {
-                                model: root.matchIndicesForFile(fileGroup.fileId)
+                                model: fileGroup.isDirectory ? [] : root.matchIndicesForFile(fileGroup.fileId)
                                 delegate: ItemDelegate {
                                     property int resultIndex: modelData
                                     width: fileGroup.width
-                                    leftPadding: 32
+                                    leftPadding: 32 + fileGroup.depth * 16
                                     highlighted: root.selectedResultIndex === resultIndex
                                     onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)
                                     contentItem: Label {

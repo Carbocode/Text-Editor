@@ -7,7 +7,14 @@ use native_workspace_filesystem::{
 pub use native_workspace_storage::RecentWorkspace;
 use native_workspace_storage::{MemoryStorage, MetadataStorage, SqliteStorage, StorageError};
 use std::{
-    path::PathBuf,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -16,6 +23,8 @@ use std::{
 pub enum AppCommand {
     IncrementDiagnostic,
     SetSearchQuery(String),
+    QueueSearchQuery(String),
+    PollSearchResults,
     OpenWorkspace(PathBuf),
     RefreshWorkspace,
     PollWorkspaceChanges,
@@ -35,13 +44,17 @@ pub enum AppEvent {
         query: SearchQuery,
         results: Vec<SearchResult>,
     },
+    SearchResultsUpdated(Vec<SearchResult>),
+    SearchStarted,
     WorkspaceOpened {
         workspace: Workspace,
         documents: Vec<DocumentId>,
+        directories: Vec<String>,
         recent_workspaces: Vec<RecentWorkspace>,
     },
     WorkspaceRefreshed {
         documents: Vec<DocumentEntry>,
+        directories: Vec<String>,
         search_results: Vec<SearchResult>,
     },
     DocumentLoaded {
@@ -210,6 +223,8 @@ pub struct AppSnapshot {
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub search_query: SearchQuery,
     pub search_results: Vec<SearchResult>,
+    pub search_in_progress: bool,
+    pub directories: Vec<String>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
 }
@@ -265,6 +280,8 @@ pub struct AppState {
     recent_workspaces: Vec<RecentWorkspace>,
     search_query: SearchQuery,
     search_results: Vec<SearchResult>,
+    search_in_progress: bool,
+    directories: Vec<String>,
     documents: Vec<DocumentEntry>,
     active_document: Option<DocumentId>,
 }
@@ -299,6 +316,8 @@ impl AppState {
             recent_workspaces: self.recent_workspaces.clone(),
             search_query: self.search_query.clone(),
             search_results: self.search_results.clone(),
+            search_in_progress: self.search_in_progress,
+            directories: self.directories.clone(),
             documents: self
                 .documents
                 .iter()
@@ -323,15 +342,24 @@ impl AppState {
             AppEvent::SearchQueryChanged { query, results } => {
                 self.search_query = query.clone();
                 self.search_results = results.clone();
+                self.search_in_progress = false;
             }
+            AppEvent::SearchResultsUpdated(results) => {
+                self.search_results = results.clone();
+                self.search_in_progress = false;
+            }
+            AppEvent::SearchStarted => self.search_in_progress = true,
             AppEvent::WorkspaceOpened {
                 workspace,
                 documents,
+                directories,
                 recent_workspaces,
             } => {
                 self.workspace = Some(workspace.clone());
                 self.search_query = SearchQuery::default();
+                self.search_in_progress = false;
                 self.recent_workspaces = recent_workspaces.clone();
+                self.directories = directories.clone();
                 self.documents = documents
                     .iter()
                     .cloned()
@@ -351,9 +379,11 @@ impl AppState {
             }
             AppEvent::WorkspaceRefreshed {
                 documents,
+                directories,
                 search_results,
             } => {
                 self.documents = documents.clone();
+                self.directories = directories.clone();
                 self.search_results = search_results.clone();
                 if self
                     .active_document
@@ -419,10 +449,88 @@ impl AppState {
 
 pub struct Application {
     state: AppState,
-    filesystem: Box<dyn WorkspaceFilesystem>,
+    filesystem: Arc<dyn WorkspaceFilesystem>,
     storage: Box<dyn MetadataStorage>,
     watcher: Option<WorkspaceWatcher>,
     last_reconcile: Instant,
+    search_jobs: Sender<SearchJob>,
+    search_results_rx: Receiver<SearchFinished>,
+    search_generation: Arc<AtomicU64>,
+}
+
+struct SearchJob {
+    generation: u64,
+    root: PathBuf,
+    documents: Vec<DocumentEntry>,
+    query: String,
+}
+
+struct SearchFinished {
+    generation: u64,
+    results: Vec<SearchResult>,
+}
+
+fn collect_search_results(
+    filesystem: &dyn WorkspaceFilesystem,
+    root: Option<&Path>,
+    documents: &[DocumentEntry],
+    query: &str,
+    cancelled: impl Fn() -> bool,
+) -> Vec<SearchResult> {
+    let needle = query.trim().to_lowercase();
+    documents
+        .iter()
+        .take_while(|_| !cancelled())
+        .flat_map(|entry| {
+            let disk_content = if needle.is_empty() || entry.content.is_some() {
+                None
+            } else {
+                root.and_then(|root| filesystem.read_document_if_matching(root, &entry.id, &needle))
+            };
+            search_results_for(
+                entry,
+                &needle,
+                entry.content.as_deref().or(disk_content.as_deref()),
+            )
+        })
+        .collect()
+}
+
+fn search_worker(
+    jobs: Receiver<SearchJob>,
+    results: Sender<SearchFinished>,
+    filesystem: Arc<dyn WorkspaceFilesystem>,
+    generation: Arc<AtomicU64>,
+) {
+    while let Ok(mut job) = jobs.recv() {
+        loop {
+            match jobs.recv_timeout(Duration::from_millis(150)) {
+                Ok(newer) => job = newer,
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        if generation.load(Ordering::Relaxed) != job.generation {
+            continue;
+        }
+        let found = collect_search_results(
+            filesystem.as_ref(),
+            Some(&job.root),
+            &job.documents,
+            &job.query,
+            || generation.load(Ordering::Relaxed) != job.generation,
+        );
+        if generation.load(Ordering::Relaxed) == job.generation
+            && results
+                .send(SearchFinished {
+                    generation: job.generation,
+                    results: found,
+                })
+                .is_err()
+        {
+            return;
+        }
+    }
 }
 
 impl Application {
@@ -431,12 +539,24 @@ impl Application {
     }
 
     pub fn with_filesystem(filesystem: Box<dyn WorkspaceFilesystem>) -> Self {
+        let filesystem: Arc<dyn WorkspaceFilesystem> = filesystem.into();
+        let (search_jobs, jobs_rx) = mpsc::channel();
+        let (results_tx, search_results_rx) = mpsc::channel();
+        let search_generation = Arc::new(AtomicU64::new(0));
+        let worker_filesystem = Arc::clone(&filesystem);
+        let worker_generation = Arc::clone(&search_generation);
+        thread::spawn(move || {
+            search_worker(jobs_rx, results_tx, worker_filesystem, worker_generation)
+        });
         Self {
             state: AppState::default(),
             filesystem,
             storage: Box::new(MemoryStorage::default()),
             watcher: None,
             last_reconcile: Instant::now(),
+            search_jobs,
+            search_results_rx,
+            search_generation,
         }
     }
 
@@ -461,30 +581,30 @@ impl Application {
     }
 
     fn search_results(&self, documents: &[DocumentEntry], query: &str) -> Vec<SearchResult> {
-        let needle = query.trim().to_lowercase();
-        let root = self
-            .state
-            .workspace
-            .as_ref()
-            .map(|workspace| &workspace.root);
-        documents
-            .iter()
-            .flat_map(|entry| {
-                let disk_content = if needle.is_empty() || entry.content.is_some() {
-                    None
-                } else {
-                    root.and_then(|root| {
-                        self.filesystem
-                            .read_document_if_matching(root, &entry.id, &needle)
-                    })
-                };
-                search_results_for(
-                    entry,
-                    &needle,
-                    entry.content.as_deref().or(disk_content.as_deref()),
-                )
-            })
-            .collect()
+        collect_search_results(
+            self.filesystem.as_ref(),
+            self.state
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.root.as_path()),
+            documents,
+            query,
+            || false,
+        )
+    }
+
+    fn queue_current_search(&mut self) {
+        let generation = self.search_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        if let Some(workspace) = &self.state.workspace
+            && !self.state.search_query.0.trim().is_empty()
+        {
+            let _ = self.search_jobs.send(SearchJob {
+                generation,
+                root: workspace.root.clone(),
+                documents: self.state.documents.clone(),
+                query: self.state.search_query.0.clone(),
+            });
+        }
     }
 
     /// Compatibility path for frontends that only render the resulting snapshot.
@@ -496,22 +616,77 @@ impl Application {
     /// Performs external I/O first, then applies the resulting events to state.
     /// Failed and no-op commands produce no events and do not advance revision.
     pub fn dispatch_with_events(&mut self, command: AppCommand) -> Result<AppOutcome, AppError> {
+        let events = self.execute(command)?;
+        Ok(AppOutcome {
+            events,
+            snapshot: self.snapshot(),
+        })
+    }
+
+    /// Avoids cloning a large workspace snapshot for a no-op timer poll.
+    pub fn dispatch_if_changed(
+        &mut self,
+        command: AppCommand,
+    ) -> Result<Option<AppSnapshot>, AppError> {
+        let events = self.execute(command)?;
+        Ok((!events.is_empty()).then(|| self.snapshot()))
+    }
+
+    fn execute(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
+        let queued_query = matches!(command, AppCommand::QueueSearchQuery(_));
+        let synchronous_query = matches!(command, AppCommand::SetSearchQuery(_));
+        let explicit_refresh = matches!(command, AppCommand::RefreshWorkspace);
         let next_revision = self
             .state
             .revision
             .checked_add(1)
             .ok_or(AppError::RevisionOverflow)?;
-        let events = self.resolve(command)?;
+        let mut events = self.resolve(command)?;
+        if !queued_query
+            && !synchronous_query
+            && !self.state.search_query.0.trim().is_empty()
+            && events.iter().any(|event| {
+                matches!(
+                    event,
+                    AppEvent::WorkspaceRefreshed { .. }
+                        | AppEvent::DocumentLoaded { .. }
+                        | AppEvent::DocumentChanged { .. }
+                        | AppEvent::DocumentSaved { .. }
+                )
+            })
+        {
+            events.push(AppEvent::SearchStarted);
+        }
         if !events.is_empty() {
             for event in &events {
                 self.state.apply(event);
             }
             self.state.revision = next_revision;
+            if events
+                .iter()
+                .any(|event| matches!(event, AppEvent::WorkspaceOpened { .. }))
+            {
+                self.search_generation.fetch_add(1, Ordering::Relaxed);
+            } else if queued_query
+                || (!synchronous_query
+                    && events.iter().any(|event| {
+                        matches!(
+                            event,
+                            AppEvent::WorkspaceRefreshed { .. }
+                                | AppEvent::DocumentLoaded { .. }
+                                | AppEvent::DocumentChanged { .. }
+                                | AppEvent::DocumentSaved { .. }
+                        )
+                    }))
+            {
+                self.queue_current_search();
+            } else if synchronous_query {
+                self.search_generation.fetch_add(1, Ordering::Relaxed);
+            }
+        } else if explicit_refresh {
+            self.queue_current_search();
         }
-        Ok(AppOutcome {
-            events,
-            snapshot: self.snapshot(),
-        })
+        Ok(events)
     }
 
     fn resolve(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
@@ -535,17 +710,52 @@ impl Application {
                     }]
                 }
             }
+            AppCommand::QueueSearchQuery(query) => {
+                if self.state.search_query.0 == query {
+                    Vec::new()
+                } else {
+                    let needle = query.trim().to_lowercase();
+                    let results = self
+                        .state
+                        .documents
+                        .iter()
+                        .flat_map(|entry| {
+                            search_results_for(entry, &needle, entry.content.as_deref())
+                        })
+                        .collect();
+                    let mut events = vec![AppEvent::SearchQueryChanged {
+                        query: SearchQuery(query),
+                        results,
+                    }];
+                    if !needle.is_empty() {
+                        events.push(AppEvent::SearchStarted);
+                    }
+                    events
+                }
+            }
+            AppCommand::PollSearchResults => {
+                let mut latest = None;
+                while let Ok(finished) = self.search_results_rx.try_recv() {
+                    if finished.generation == self.search_generation.load(Ordering::Relaxed) {
+                        latest = Some(finished.results);
+                    }
+                }
+                latest
+                    .map(|results| vec![AppEvent::SearchResultsUpdated(results)])
+                    .unwrap_or_default()
+            }
             AppCommand::OpenWorkspace(path) => {
                 if self.state.documents.iter().any(DocumentEntry::dirty) {
                     return Err(AppError::UnsavedChanges);
                 }
-                let (workspace, documents) = self.filesystem.open_workspace(&path)?;
+                let (workspace, documents, directories) = self.filesystem.open_workspace(&path)?;
                 let recent_workspaces = self.storage.record_workspace(&workspace)?;
                 self.watcher = WorkspaceWatcher::new(&workspace.root).ok();
                 self.last_reconcile = Instant::now();
                 vec![AppEvent::WorkspaceOpened {
                     workspace,
                     documents,
+                    directories,
                     recent_workspaces,
                 }]
             }
@@ -564,7 +774,11 @@ impl Application {
                     .is_some_and(WorkspaceWatcher::has_changes);
                 if changed || self.last_reconcile.elapsed() >= interval {
                     self.last_reconcile = Instant::now();
-                    return self.resolve(AppCommand::RefreshWorkspace);
+                    let events = self.resolve(AppCommand::RefreshWorkspace)?;
+                    if events.is_empty() {
+                        self.queue_current_search();
+                    }
+                    return Ok(events);
                 }
                 Vec::new()
             }
@@ -574,21 +788,26 @@ impl Application {
                     .workspace
                     .as_ref()
                     .ok_or(AppError::WorkspaceNotOpen)?;
-                let (_, ids) = self.filesystem.open_workspace(&workspace.root)?;
+                let (_, ids, directories) = self.filesystem.open_workspace(&workspace.root)?;
+                let listed: HashSet<_> = ids.iter().collect();
+                let previous: HashMap<_, _> = self
+                    .state
+                    .documents
+                    .iter()
+                    .map(|entry| (&entry.id, entry))
+                    .collect();
                 let mut documents = Vec::with_capacity(ids.len());
-                for id in ids {
-                    let mut entry = self
-                        .state
-                        .documents
-                        .iter()
-                        .find(|entry| entry.id == id)
-                        .cloned()
-                        .unwrap_or(DocumentEntry {
-                            id,
-                            content: None,
-                            saved_content: None,
-                            external_change: false,
-                        });
+                for id in &ids {
+                    let mut entry =
+                        previous
+                            .get(&id)
+                            .map(|entry| (*entry).clone())
+                            .unwrap_or(DocumentEntry {
+                                id: id.clone(),
+                                content: None,
+                                saved_content: None,
+                                external_change: false,
+                            });
                     if entry.content.is_some() {
                         match self.filesystem.read_document(&workspace.root, &entry.id) {
                             Ok(disk_content)
@@ -607,22 +826,26 @@ impl Application {
                     documents.push(entry);
                 }
                 for entry in &self.state.documents {
-                    if !documents.iter().any(|current| current.id == entry.id)
-                        && entry.content.is_some()
-                    {
+                    if !listed.contains(&entry.id) && entry.content.is_some() {
                         let mut missing = entry.clone();
                         missing.external_change = true;
                         documents.push(missing);
                     }
                 }
                 documents.sort_by(|left, right| left.id.cmp(&right.id));
-                let search_results = self.search_results(&documents, &self.state.search_query.0);
-                if documents == self.state.documents && search_results == self.state.search_results
-                {
+                if documents == self.state.documents && directories == self.state.directories {
                     Vec::new()
                 } else {
+                    let needle = self.state.search_query.0.trim().to_lowercase();
+                    let search_results = documents
+                        .iter()
+                        .flat_map(|entry| {
+                            search_results_for(entry, &needle, entry.content.as_deref())
+                        })
+                        .collect();
                     vec![AppEvent::WorkspaceRefreshed {
                         documents,
+                        directories,
                         search_results,
                     }]
                 }
@@ -788,6 +1011,21 @@ mod tests {
     }
 
     #[test]
+    fn no_op_poll_does_not_clone_a_snapshot() {
+        let mut app = Application::new();
+        assert!(
+            app.dispatch_if_changed(AppCommand::PollWorkspaceChanges)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            app.dispatch_if_changed(AppCommand::PollSearchResults)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn workspace_edit_save_round_trip_and_dirty_state() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("note.md"), "original").unwrap();
@@ -835,8 +1073,19 @@ mod tests {
         let refreshed = app.dispatch(AppCommand::RefreshWorkspace).unwrap();
         assert_eq!(refreshed.active_document.unwrap().content, "new text");
         assert_eq!(refreshed.documents.len(), 2);
-        assert_eq!(refreshed.search_results.len(), 2);
-        let revision = refreshed.revision;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = app.dispatch(AppCommand::PollSearchResults).unwrap();
+            if snapshot.search_results.len() == 2 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "background search did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let revision = app.snapshot().revision;
         assert_eq!(
             app.dispatch(AppCommand::RefreshWorkspace).unwrap().revision,
             revision
@@ -846,13 +1095,14 @@ mod tests {
     #[test]
     fn watcher_refreshes_workspace_after_external_change() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("note.md");
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        let path = dir.path().join("nested/note.md");
         fs::write(&path, "before").unwrap();
         let mut app = Application::new();
         app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
             .unwrap();
         assert!(app.watcher.is_some(), "native watcher should start");
-        app.dispatch(AppCommand::OpenDocument(id("note.md")))
+        app.dispatch(AppCommand::OpenDocument(id("nested/note.md")))
             .unwrap();
         let initial_revision = app.snapshot().revision;
         assert_eq!(
@@ -870,6 +1120,43 @@ mod tests {
                 break;
             }
             assert!(Instant::now() < deadline, "watcher did not report the edit");
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn queued_search_discards_stale_queries_in_nested_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::create_dir(dir.path().join("empty")).unwrap();
+        fs::write(dir.path().join("nested/note.rs"), "alpha beta beta").unwrap();
+        let mut app = Application::new();
+        let opened = app
+            .dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(opened.directories, ["empty", "nested"]);
+        assert_eq!(opened.documents[0].id, id("nested/note.rs"));
+        app.dispatch(AppCommand::QueueSearchQuery("alpha".into()))
+            .unwrap();
+        let queued = app
+            .dispatch(AppCommand::QueueSearchQuery("beta".into()))
+            .unwrap();
+        assert!(queued.search_in_progress);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = app.dispatch(AppCommand::PollSearchResults).unwrap();
+            if !snapshot.search_in_progress {
+                assert_eq!(snapshot.search_query.0, "beta");
+                assert_eq!(snapshot.search_results.len(), 2);
+                assert!(
+                    snapshot
+                        .search_results
+                        .iter()
+                        .all(|result| result.id == id("nested/note.rs"))
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "queued search did not finish");
             std::thread::sleep(Duration::from_millis(25));
         }
     }
@@ -1309,7 +1596,7 @@ mod tests {
         fn open_workspace(
             &self,
             path: &std::path::Path,
-        ) -> Result<(Workspace, Vec<DocumentId>), FilesystemError> {
+        ) -> Result<(Workspace, Vec<DocumentId>, Vec<String>), FilesystemError> {
             RealFilesystem.open_workspace(path)
         }
 

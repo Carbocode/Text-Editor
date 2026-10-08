@@ -20,6 +20,7 @@ pub mod qobject {
         #[qproperty(u64, revision)]
         #[qproperty(QString, workspace_name)]
         #[qproperty(QString, search_query)]
+        #[qproperty(bool, search_in_progress)]
         #[qproperty(QStringList, search_result_ids)]
         #[qproperty(QStringList, search_result_snippets)]
         #[qproperty(QStringList, search_result_lines)]
@@ -27,6 +28,7 @@ pub mod qobject {
         #[qproperty(QStringList, search_result_starts)]
         #[qproperty(QStringList, search_result_ends)]
         #[qproperty(QStringList, document_ids)]
+        #[qproperty(QStringList, directory_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
         #[qproperty(QStringList, conflicted_document_ids)]
         #[qproperty(QStringList, recent_workspace_paths)]
@@ -51,6 +53,8 @@ pub mod qobject {
         #[qinvokable]
         fn poll_workspace_changes(self: Pin<&mut Self>);
         #[qinvokable]
+        fn poll_search_results(self: Pin<&mut Self>);
+        #[qinvokable]
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
@@ -69,6 +73,7 @@ pub struct AppControllerRust {
     revision: u64,
     workspace_name: QString,
     search_query: QString,
+    search_in_progress: bool,
     search_result_ids: QStringList,
     search_result_snippets: QStringList,
     search_result_lines: QStringList,
@@ -76,6 +81,7 @@ pub struct AppControllerRust {
     search_result_starts: QStringList,
     search_result_ends: QStringList,
     document_ids: QStringList,
+    directory_ids: QStringList,
     dirty_document_ids: QStringList,
     conflicted_document_ids: QStringList,
     recent_workspace_paths: QStringList,
@@ -105,6 +111,8 @@ impl qobject::AppController {
         self.as_mut().set_counter(snapshot.diagnostic_counter);
         self.as_mut()
             .set_search_query(QString::from(snapshot.search_query.0));
+        self.as_mut()
+            .set_search_in_progress(snapshot.search_in_progress);
         self.as_mut().set_search_result_ids(
             snapshot
                 .search_results
@@ -202,6 +210,13 @@ impl qobject::AppController {
                 .map(|doc| QString::from(doc.id.as_str()))
                 .collect(),
         );
+        self.as_mut().set_directory_ids(
+            snapshot
+                .directories
+                .iter()
+                .map(|path| QString::from(path.as_str()))
+                .collect(),
+        );
         self.as_mut().set_dirty_document_ids(
             snapshot
                 .documents
@@ -241,7 +256,7 @@ impl qobject::AppController {
     }
 
     pub fn search_files(self: Pin<&mut Self>, query: &QString) {
-        self.dispatch(AppCommand::SetSearchQuery(query.to_string()));
+        self.dispatch(AppCommand::QueueSearchQuery(query.to_string()));
     }
 
     pub fn initialize_persistence(mut self: Pin<&mut Self>) {
@@ -286,13 +301,26 @@ impl qobject::AppController {
             .as_mut()
             .rust_mut()
             .application
-            .dispatch(AppCommand::PollWorkspaceChanges);
+            .dispatch_if_changed(AppCommand::PollWorkspaceChanges);
         match result {
-            Ok(snapshot) if snapshot.revision != self.rust().revision => {
+            Ok(Some(snapshot)) => {
                 self.as_mut().set_error_message(QString::default());
                 self.update_snapshot(snapshot);
             }
-            Ok(_) => {}
+            Ok(None) => {}
+            Err(error) => self.set_error_message(QString::from(error.to_string())),
+        }
+    }
+
+    pub fn poll_search_results(mut self: Pin<&mut Self>) {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .dispatch_if_changed(AppCommand::PollSearchResults);
+        match result {
+            Ok(Some(snapshot)) => self.update_snapshot(snapshot),
+            Ok(None) => {}
             Err(error) => self.set_error_message(QString::from(error.to_string())),
         }
     }

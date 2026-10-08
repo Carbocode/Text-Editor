@@ -18,6 +18,7 @@ struct Ui {
     files: adw::Sidebar,
     sidebar_rows: Rc<RefCell<Vec<SidebarRow>>>,
     search: gtk::SearchEntry,
+    search_spinner: gtk::Spinner,
     files_placeholder: gtk::Label,
     conflict_banner: gtk::Box,
     editor: gtk::TextView,
@@ -29,25 +30,29 @@ struct Ui {
     recent_button: gtk::MenuButton,
     recent_list: gtk::Box,
     updating: Rc<Cell<bool>>,
+    collapsed_directories: Rc<RefCell<std::collections::HashSet<String>>>,
+    force_sidebar: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
 enum SidebarRow {
+    Directory(String),
     File(DocumentId),
     Match(SearchResult),
 }
 
 impl SidebarRow {
-    fn id(&self) -> &DocumentId {
+    fn id(&self) -> Option<&DocumentId> {
         match self {
-            Self::File(id) => id,
-            Self::Match(result) => &result.id,
+            Self::Directory(_) => None,
+            Self::File(id) => Some(id),
+            Self::Match(result) => Some(&result.id),
         }
     }
 
     fn location(&self) -> Option<&SearchLocation> {
         match self {
-            Self::File(_) => None,
+            Self::Directory(_) | Self::File(_) => None,
             Self::Match(result) => result.location.as_ref(),
         }
     }
@@ -73,6 +78,8 @@ impl Ui {
             let previous = self.snapshot.borrow();
             previous.search_results != snapshot.search_results
                 || previous.documents != snapshot.documents
+                || previous.directories != snapshot.directories
+                || self.force_sidebar.replace(false)
         };
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         self.window.set_title(Some(
@@ -90,6 +97,9 @@ impl Ui {
         if self.search.text().as_str() != snapshot.search_query.0 {
             self.search.set_text(&snapshot.search_query.0);
         }
+        self.search_spinner
+            .set_spinning(snapshot.search_in_progress);
+        self.search_spinner.set_visible(snapshot.search_in_progress);
         self.files_placeholder
             .set_label(if snapshot.workspace_name.is_none() {
                 "Open a workspace"
@@ -139,12 +149,69 @@ impl Ui {
             self.files.remove_all();
             let mut rows = Vec::new();
             let section = adw::SidebarSection::new();
-            for group in snapshot
+            let groups: std::collections::HashMap<_, _> = snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
-            {
+                .map(|group| (group[0].id.as_str().to_owned(), group))
+                .collect();
+            let mut paths: Vec<(String, bool)> = Vec::new();
+            if snapshot.search_query.0.is_empty() {
+                paths.extend(
+                    snapshot
+                        .directories
+                        .iter()
+                        .cloned()
+                        .map(|path| (path, true)),
+                );
+            } else {
+                for id in groups.keys() {
+                    let mut parent = std::path::Path::new(id).parent();
+                    while let Some(path) = parent.and_then(|path| path.to_str()) {
+                        if path.is_empty() {
+                            break;
+                        }
+                        paths.push((path.to_owned(), true));
+                        parent = std::path::Path::new(path).parent();
+                    }
+                }
+            }
+            paths.extend(groups.keys().cloned().map(|path| (path, false)));
+            paths.sort();
+            paths.dedup();
+            for (path, is_directory) in paths {
+                let depth = path.matches('/').count();
+                let hidden = path
+                    .split('/')
+                    .scan(String::new(), |prefix, part| {
+                        let parent = prefix.clone();
+                        if !prefix.is_empty() {
+                            prefix.push('/');
+                        }
+                        prefix.push_str(part);
+                        Some(parent)
+                    })
+                    .any(|parent| {
+                        !parent.is_empty() && self.collapsed_directories.borrow().contains(&parent)
+                    });
+                if hidden {
+                    continue;
+                }
+                let name = path.rsplit('/').next().unwrap_or(&path);
+                let indent = "\u{00a0}".repeat(depth * 3);
+                if is_directory {
+                    let collapsed = self.collapsed_directories.borrow().contains(&path);
+                    let marker = if collapsed { "▸" } else { "▾" };
+                    let item = adw::SidebarItem::new(&format!("{indent}{marker} {name}"));
+                    item.set_icon_name(Some("folder-symbolic"));
+                    section.append(item);
+                    rows.push(SidebarRow::Directory(path));
+                    continue;
+                }
+                let Some(group) = groups.get(&path) else {
+                    continue;
+                };
                 let document = &group[0];
-                let file = adw::SidebarItem::new(&document.title);
+                let file = adw::SidebarItem::new(&format!("{indent}{name}"));
                 file.set_icon_paintable(Some(&icon_for(document.id.as_str())));
                 if snapshot
                     .documents
@@ -167,7 +234,7 @@ impl Ui {
                         }
                         None => format!("↳ {}:{}", location.line, location.column),
                     };
-                    let item = adw::SidebarItem::new(&title);
+                    let item = adw::SidebarItem::new(&format!("{indent}   {title}"));
                     section.append(item);
                     rows.push(SidebarRow::Match(result.clone()));
                 }
@@ -179,7 +246,7 @@ impl Ui {
             let rows = self.sidebar_rows.borrow();
             let selected_index = previous_selection.as_ref().and_then(|previous| {
                 rows.iter().position(|row| {
-                    row.id() == &active.id
+                    row.id() == Some(&active.id)
                         && row.id() == previous.id()
                         && row.location() == previous.location()
                 })
@@ -227,7 +294,11 @@ impl Ui {
 }
 
 fn icon_for(name: &str) -> gtk::gdk::Texture {
-    let bytes: &'static [u8] = if name.eq_ignore_ascii_case("readme.md") {
+    let bytes: &'static [u8] = if name
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("readme.md"))
+    {
         include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../assets/material-icon-theme/readme.png"
@@ -319,13 +390,19 @@ fn build_window(app: &adw::Application) {
     let files_placeholder = gtk::Label::new(Some("Open a workspace"));
     files.set_placeholder(Some(&files_placeholder));
     let search = gtk::SearchEntry::new();
+    let search_spinner = gtk::Spinner::new();
+    search_spinner.set_visible(false);
     search.set_placeholder_text(Some("Search files"));
     search.set_margin_top(8);
     search.set_margin_bottom(8);
     search.set_margin_start(8);
     search.set_margin_end(8);
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    sidebar_content.append(&search);
+    let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    search.set_hexpand(true);
+    search_row.append(&search);
+    search_row.append(&search_spinner);
+    sidebar_content.append(&search_row);
     files.set_vexpand(true);
     sidebar_content.append(&files);
     let sidebar_style = gtk::CssProvider::new();
@@ -414,6 +491,7 @@ fn build_window(app: &adw::Application) {
         files,
         sidebar_rows: Rc::new(RefCell::new(Vec::new())),
         search,
+        search_spinner,
         files_placeholder,
         conflict_banner,
         editor,
@@ -425,6 +503,8 @@ fn build_window(app: &adw::Application) {
         recent_button,
         recent_list,
         updating: Rc::new(Cell::new(false)),
+        collapsed_directories: Rc::new(RefCell::new(std::collections::HashSet::new())),
+        force_sidebar: Rc::new(Cell::new(false)),
     };
     ui.render(snapshot);
     if let Some(error) = persistence_error {
@@ -457,7 +537,7 @@ fn build_window(app: &adw::Application) {
         let ui = ui.clone();
         ui.search.clone().connect_search_changed(move |search| {
             if !ui.updating.get() {
-                ui.dispatch(AppCommand::SetSearchQuery(search.text().to_string()));
+                ui.dispatch(AppCommand::QueueSearchQuery(search.text().to_string()));
             }
         });
     }
@@ -473,7 +553,18 @@ fn build_window(app: &adw::Application) {
                 .get(sidebar.selected() as usize)
                 .cloned();
             if let Some(row) = row {
-                let id = row.id().clone();
+                if let SidebarRow::Directory(path) = row {
+                    let mut collapsed = ui.collapsed_directories.borrow_mut();
+                    if !collapsed.insert(path.clone()) {
+                        collapsed.remove(&path);
+                    }
+                    drop(collapsed);
+                    ui.force_sidebar.set(true);
+                    let snapshot = ui.snapshot.borrow().clone();
+                    ui.render(snapshot);
+                    return;
+                }
+                let Some(id) = row.id().cloned() else { return };
                 let location = row.location().cloned();
                 ui.dispatch(AppCommand::OpenDocument(id.clone()));
                 if ui
@@ -501,7 +592,7 @@ fn build_window(app: &adw::Application) {
                     .active_document
                     .as_ref()
                     .map(|doc| &doc.id)
-                    == Some(row.id())
+                    == row.id()
                 && let Some(location) = row.location()
             {
                 ui.select_match(location);
@@ -579,12 +670,19 @@ fn build_window(app: &adw::Application) {
                 let result = ui
                     .core
                     .borrow_mut()
-                    .dispatch(AppCommand::PollWorkspaceChanges);
+                    .dispatch_if_changed(AppCommand::PollWorkspaceChanges);
                 match result {
-                    Ok(snapshot) if snapshot.revision != ui.snapshot.borrow().revision => {
-                        ui.render(snapshot)
-                    }
-                    Ok(_) => {}
+                    Ok(Some(snapshot)) => ui.render(snapshot),
+                    Ok(None) => {}
+                    Err(error) => ui.status.set_label(&error.to_string()),
+                }
+                let result = ui
+                    .core
+                    .borrow_mut()
+                    .dispatch_if_changed(AppCommand::PollSearchResults);
+                match result {
+                    Ok(Some(snapshot)) => ui.render(snapshot),
+                    Ok(None) => {}
                     Err(error) => ui.status.set_label(&error.to_string()),
                 }
             }
@@ -697,7 +795,10 @@ fn build_window(app: &adw::Application) {
             assert!(ui.snapshot.borrow().search_results.is_empty());
             assert_eq!(ui.search.text(), "unlikely-no-match");
             ui.dispatch(AppCommand::SetSearchQuery(String::new()));
-            assert_eq!(ui.snapshot.borrow().search_results.len(), 1);
+            assert_eq!(
+                ui.snapshot.borrow().search_results.len(),
+                ui.snapshot.borrow().documents.len()
+            );
             let document_path = workspace_path.join(id.as_str());
             std::fs::write(&document_path, "external clean edit").unwrap();
             ui.dispatch(AppCommand::RefreshWorkspace);

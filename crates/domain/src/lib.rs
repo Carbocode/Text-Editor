@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-/// A file name within the flat Phase 1 workspace root.
+/// A slash-separated relative file path within a workspace.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DocumentId(String);
 
@@ -11,14 +11,14 @@ impl DocumentId {
         let value = value.into();
         let path = std::path::Path::new(&value);
         if value.is_empty()
-            || value == "."
-            || value == ".."
-            || path.components().count() != 1
-            || path.file_name().is_none_or(|name| name != value.as_str())
-            || !matches!(
-                path.extension().and_then(|ext| ext.to_str()),
-                Some("md" | "txt")
-            )
+            || value.contains('\\')
+            || value
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+            || path.is_absolute()
+            || path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
         {
             return Err(InvalidDocumentId);
         }
@@ -70,12 +70,25 @@ mod tests {
     }
 
     #[test]
-    fn document_id_is_one_supported_file_name() {
+    fn document_id_is_a_safe_relative_file_path() {
         assert_eq!(
             DocumentId::parse("README.md").unwrap().as_str(),
             "README.md"
         );
-        for invalid in ["", "../escape.md", "folder/note.md", "note.rs", ".."] {
+        assert_eq!(
+            DocumentId::parse("folder/note.rs").unwrap().as_str(),
+            "folder/note.rs"
+        );
+        for invalid in [
+            "",
+            "../escape.md",
+            "folder/../note.md",
+            "a//b",
+            "a/./b",
+            "..",
+            "/tmp/file",
+            "a\\b",
+        ] {
             assert_eq!(DocumentId::parse(invalid), Err(InvalidDocumentId));
         }
     }

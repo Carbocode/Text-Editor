@@ -18,6 +18,29 @@ struct ContentView: View {
         var matches: [SearchMatchRow] = []
     }
 
+    private final class SidebarTreeNode: Identifiable {
+        enum Kind {
+            case directory(String)
+            case file(SearchFileGroup)
+            case match(SearchMatchRow)
+        }
+
+        let id: String
+        let kind: Kind
+        var children: [SidebarTreeNode]?
+
+        init(id: String, kind: Kind, children: [SidebarTreeNode]? = nil) {
+            self.id = id
+            self.kind = kind
+            self.children = children
+        }
+
+        var isDirectory: Bool {
+            if case .directory = kind { return true }
+            return false
+        }
+    }
+
     private var searchFileGroups: [SearchFileGroup] {
         var groups: [SearchFileGroup] = []
         var indicesByID: [String: Int] = [:]
@@ -37,6 +60,81 @@ struct ContentView: View {
         return groups
     }
 
+    private var sidebarTree: [SidebarTreeNode] {
+        let root = SidebarTreeNode(id: "root", kind: .directory(""), children: [])
+        var directoryNodes: [String: SidebarTreeNode] = ["": root]
+
+        func ensureDirectory(_ path: String) -> SidebarTreeNode {
+            if let existing = directoryNodes[path] { return existing }
+            let parent = path.split(separator: "/").dropLast().joined(separator: "/")
+            let node = SidebarTreeNode(id: "directory:\(path)", kind: .directory(path), children: [])
+            ensureDirectory(parent).children?.append(node)
+            directoryNodes[path] = node
+            return node
+        }
+
+        if store.searchQuery.isEmpty {
+            for path in store.directories { _ = ensureDirectory(path) }
+        }
+        for group in searchFileGroups {
+            let parent = group.id.split(separator: "/").dropLast().joined(separator: "/")
+            let matches = group.matches.map { SidebarTreeNode(id: "match:\($0.index)", kind: .match($0)) }
+            let node = SidebarTreeNode(id: "file:\(group.id)", kind: .file(group), children: matches.isEmpty ? nil : matches)
+            ensureDirectory(parent).children?.append(node)
+        }
+
+        func sort(_ node: SidebarTreeNode) {
+            node.children?.sort {
+                if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+                return $0.id.localizedStandardCompare($1.id) == .orderedAscending
+            }
+            node.children?.forEach(sort)
+        }
+        sort(root)
+        return root.children ?? []
+    }
+
+    @ViewBuilder private func sidebarRow(_ node: SidebarTreeNode) -> some View {
+        switch node.kind {
+        case .directory(let path):
+            Label(path.split(separator: "/").last.map(String.init) ?? path, systemImage: "folder")
+        case .file(let group):
+            Button {
+                store.openSearchFile(group.id)
+            } label: {
+                HStack(spacing: 8) {
+                    if let icon = WorkspaceIcons.image(for: group.id) {
+                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 20, height: 20)
+                    }
+                    Text(group.id.split(separator: "/").last.map(String.init) ?? group.id)
+                    Spacer(minLength: 0)
+                    if store.documents.first(where: { $0.id == group.id })?.externalChange == true {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    }
+                    if group.file.dirty { Circle().fill(.secondary).frame(width: 6, height: 6) }
+                }
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
+                ? Color.accentColor.opacity(0.12) : Color.clear)
+        case .match(let match):
+            Button {
+                store.openSearchResult(match.result, at: match.index)
+            } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    if let location = match.result.location {
+                        Text("\(location.line):\(location.column)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    if let snippet = match.result.snippet { Text(snippet).font(.caption).lineLimit(1) }
+                    Spacer(minLength: 0)
+                }
+            }
+            .buttonStyle(.plain)
+            .listRowBackground(store.selectedSearchResultIndex == match.index
+                ? Color.accentColor.opacity(0.12) : Color.clear)
+        }
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
@@ -48,6 +146,7 @@ struct ContentView: View {
                         set: { store.setSearchQuery($0) }
                     ))
                     .textFieldStyle(.plain)
+                    if store.searchInProgress { ProgressView().controlSize(.small) }
                     if !store.searchQuery.isEmpty {
                         Button("Clear search", systemImage: "xmark.circle.fill") {
                             store.setSearchQuery("")
@@ -62,68 +161,13 @@ struct ContentView: View {
                 .padding(.top, 8)
                 .disabled(store.workspaceName == nil)
                 List {
-                    ForEach(searchFileGroups, id: \.id) { group in
-                        Group {
-                            Button {
-                                store.openSearchFile(group.id)
-                            } label: {
-                                HStack(spacing: 8) {
-                                    if let icon = WorkspaceIcons.image(for: group.id) {
-                                        Image(nsImage: icon)
-                                            .resizable()
-                                            .interpolation(.high)
-                                            .frame(width: 20, height: 20)
-                                    }
-                                    Text(group.file.title)
-                                    Spacer(minLength: 0)
-                                    if store.documents.first(where: { $0.id == group.id })?.externalChange == true {
-                                        Image(systemName: "exclamationmark.triangle.fill")
-                                            .foregroundStyle(.orange)
-                                            .help("Changed on disk")
-                                    }
-                                    if group.file.dirty {
-                                        Circle().fill(.secondary).frame(width: 6, height: 6)
-                                    }
-                                }
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .listRowBackground(
-                                store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
-                                    ? Color.accentColor.opacity(0.12) : Color.clear
-                            )
-
-                            ForEach(group.matches, id: \.index) { match in
-                                Button {
-                                    store.openSearchResult(match.result, at: match.index)
-                                } label: {
-                                    HStack(alignment: .top, spacing: 8) {
-                                        if let location = match.result.location {
-                                            Text("\(location.line):\(location.column)")
-                                                .font(.caption.monospacedDigit())
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        if let snippet = match.result.snippet {
-                                            Text(snippet)
-                                                .font(.caption)
-                                                .lineLimit(1)
-                                        }
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.leading, 28)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .listRowBackground(
-                                    store.selectedSearchResultIndex == match.index
-                                        ? Color.accentColor.opacity(0.12) : Color.clear
-                                )
-                            }
-                        }
+                    OutlineGroup(sidebarTree, children: \.children) { node in
+                        sidebarRow(node)
                     }
                 }
                 .overlay {
-                    if store.workspaceName != nil && store.searchResults.isEmpty {
+                    if store.workspaceName != nil && store.searchResults.isEmpty
+                        && (store.searchQuery.isEmpty ? store.directories.isEmpty : !store.searchInProgress) {
                         Text(store.searchQuery.isEmpty ? "No files" : "No matching files")
                             .foregroundStyle(.secondary)
                     }

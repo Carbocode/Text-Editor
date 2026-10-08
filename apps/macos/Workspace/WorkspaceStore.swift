@@ -8,6 +8,8 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
     @Published private(set) var searchQuery = ""
     @Published private(set) var searchResults: [SearchResult] = []
+    @Published private(set) var searchInProgress = false
+    @Published private(set) var directories: [String] = []
     @Published private(set) var selectedSearchLocation: SearchLocation?
     @Published private(set) var selectedSearchResultIndex: Int?
     @Published private(set) var searchNavigationRevision: UInt64 = 0
@@ -76,13 +78,14 @@ final class WorkspaceStore: ObservableObject {
 
     func pollWorkspaceChanges() {
         updateWorkspace { try core.pollWorkspaceChanges() }
+        updateWorkspace { try core.pollSearchResults() }
     }
 
-    private func updateWorkspace(_ refresh: () throws -> WorkspaceSnapshot) {
+    private func updateWorkspace(_ refresh: () throws -> WorkspaceSnapshot?) {
         guard workspaceName != nil else { return }
         do {
             try flushLocalEdits()
-            let snapshot = try refresh()
+            guard let snapshot = try refresh() else { return }
             if snapshot.revision != revision {
                 if snapshot.activeDocument?.content != activeDocument?.content {
                     selectedSearchLocation = nil
@@ -182,6 +185,8 @@ final class WorkspaceStore: ObservableObject {
         recentWorkspaces = snapshot.recentWorkspaces
         searchQuery = snapshot.searchQuery
         searchResults = snapshot.searchResults
+        searchInProgress = snapshot.searchInProgress
+        directories = snapshot.directories
         documents = snapshot.documents
         activeDocument = snapshot.activeDocument
         editorText = snapshot.activeDocument?.content ?? ""

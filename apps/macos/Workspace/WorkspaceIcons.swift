@@ -3,7 +3,7 @@ import AppKit
 enum WorkspaceIcons {
     static func image(for name: String) -> NSImage? {
         let iconName: String
-        if name.lowercased() == "readme.md" {
+        if name.split(separator: "/").last?.lowercased() == "readme.md" {
             iconName = "readme"
         } else if name.lowercased().hasSuffix(".md") {
             iconName = "markdown"

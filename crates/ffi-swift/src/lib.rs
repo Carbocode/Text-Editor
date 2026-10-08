@@ -57,6 +57,8 @@ pub struct WorkspaceSnapshot {
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub search_query: String,
     pub search_results: Vec<SearchResult>,
+    pub search_in_progress: bool,
+    pub directories: Vec<String>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
 }
@@ -97,6 +99,8 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                     }),
                 })
                 .collect(),
+            search_in_progress: snapshot.search_in_progress,
+            directories: snapshot.directories,
             documents: snapshot
                 .documents
                 .into_iter()
@@ -197,7 +201,11 @@ impl WorkspaceApplication {
     }
 
     pub fn set_search_query(&self, query: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::SetSearchQuery(query))
+        self.dispatch(AppCommand::QueueSearchQuery(query))
+    }
+
+    pub fn poll_search_results(&self) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
+        self.dispatch_if_changed(AppCommand::PollSearchResults)
     }
 
     pub fn open_workspace(&self, path: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
@@ -208,8 +216,8 @@ impl WorkspaceApplication {
         self.dispatch(AppCommand::RefreshWorkspace)
     }
 
-    pub fn poll_workspace_changes(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::PollWorkspaceChanges)
+    pub fn poll_workspace_changes(&self) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
+        self.dispatch_if_changed(AppCommand::PollWorkspaceChanges)
     }
 
     pub fn open_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
@@ -251,6 +259,19 @@ impl WorkspaceApplication {
             .lock()
             .map_err(|_| WorkspaceError::LockPoisoned)?;
         app.dispatch(command).map(Into::into).map_err(Into::into)
+    }
+
+    fn dispatch_if_changed(
+        &self,
+        command: AppCommand,
+    ) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
+        let mut app = self
+            .inner
+            .lock()
+            .map_err(|_| WorkspaceError::LockPoisoned)?;
+        app.dispatch_if_changed(command)
+            .map(|snapshot| snapshot.map(Into::into))
+            .map_err(Into::into)
     }
 }
 
