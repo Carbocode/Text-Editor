@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var resolvingExternalChange = false
     @State private var expandedDirectories: Set<String> = []
     @State private var currentWorkspaceRoot: String?
+    @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
+    @State private var sidebarRows: [SidebarOutlineRow] = []
 
     private struct SearchMatchRow {
         let index: Int
@@ -32,21 +34,11 @@ struct ContentView: View {
         let kind: Kind
     }
 
-    private var sidebarRows: [SidebarOutlineRow] {
+    private func rebuildSidebarIndex() {
         let searching = !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        func visible(_ path: String) -> Bool {
-            if searching { return true }
-            let parts = path.split(separator: "/")
-            for count in 1..<parts.count where !expandedDirectories.contains(parts.prefix(count).joined(separator: "/")) {
-                return false
-            }
-            return true
-        }
-
         var groups: [SearchFileGroup] = []
         var indicesByID: [String: Int] = [:]
         for (index, result) in store.searchResults.enumerated() {
-            if !visible(result.id) { continue }
             if let groupIndex = indicesByID[result.id] {
                 if result.location != nil {
                     groups[groupIndex].matches.append(SearchMatchRow(index: index, result: result))
@@ -69,34 +61,50 @@ struct ContentView: View {
                 }
             }
         } else {
-            directoryPaths = Set(store.directories.filter(visible))
+            directoryPaths = Set(store.directories)
         }
 
-        var entries: [(String, SidebarOutlineRow.Kind)] = directoryPaths.map { ($0, .directory($0)) }
-        entries += groups.map { ($0.id, .file($0)) }
-        entries.sort { left, right in
-            let leftParts = left.0.split(separator: "/")
-            let rightParts = right.0.split(separator: "/")
-            for index in 0..<min(leftParts.count, rightParts.count) {
-                if leftParts[index] == rightParts[index] { continue }
-                let leftDirectory = directoryPaths.contains(leftParts.prefix(index + 1).joined(separator: "/"))
-                let rightDirectory = directoryPaths.contains(rightParts.prefix(index + 1).joined(separator: "/"))
-                if leftDirectory != rightDirectory { return leftDirectory }
-                return leftParts[index].localizedStandardCompare(rightParts[index]) == .orderedAscending
-            }
-            return leftParts.count < rightParts.count
-        }
-        var rows: [SidebarOutlineRow] = []
-        for (path, kind) in entries {
+        var children: [String: [SidebarOutlineRow]] = [:]
+        func append(_ path: String, kind: SidebarOutlineRow.Kind) {
             let depth = path.split(separator: "/").count - 1
-            rows.append(SidebarOutlineRow(id: "entry:\(path)", depth: depth, kind: kind))
-            if case .file(let group) = kind {
-                for match in group.matches {
-                    rows.append(SidebarOutlineRow(id: "match:\(match.index)", depth: depth + 1, kind: .match(match)))
+            let parent = path.split(separator: "/").dropLast().joined(separator: "/")
+            children[parent, default: []].append(SidebarOutlineRow(id: "entry:\(path)", depth: depth, kind: kind))
+        }
+        for path in directoryPaths { append(path, kind: .directory(path)) }
+        for group in groups { append(group.id, kind: .file(group)) }
+        for parent in Array(children.keys) {
+            children[parent]?.sort { left, right in
+                let leftIsDirectory: Bool
+                let rightIsDirectory: Bool
+                if case .directory = left.kind { leftIsDirectory = true } else { leftIsDirectory = false }
+                if case .directory = right.kind { rightIsDirectory = true } else { rightIsDirectory = false }
+                if leftIsDirectory != rightIsDirectory { return leftIsDirectory }
+                return left.id.localizedStandardCompare(right.id) == .orderedAscending
+            }
+        }
+        sidebarChildren = children
+        refreshSidebarRows()
+    }
+
+    private func refreshSidebarRows() {
+        let searching = !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        var rows: [SidebarOutlineRow] = []
+        func appendChildren(of parent: String) {
+            for row in sidebarChildren[parent] ?? [] {
+                rows.append(row)
+                switch row.kind {
+                case .directory(let path):
+                    if searching || expandedDirectories.contains(path) { appendChildren(of: path) }
+                case .file(let group):
+                    for match in group.matches {
+                        rows.append(SidebarOutlineRow(id: "match:\(match.index)", depth: row.depth + 1, kind: .match(match)))
+                    }
+                case .match: break
                 }
             }
         }
-        return rows
+        appendChildren(of: "")
+        sidebarRows = rows
     }
 
     @ViewBuilder private func sidebarRow(_ row: SidebarOutlineRow) -> some View {
@@ -108,6 +116,7 @@ struct ContentView: View {
                 } else {
                     expandedDirectories.insert(path)
                 }
+                refreshSidebarRows()
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: expandedDirectories.contains(path) || !store.searchQuery.isEmpty
@@ -192,6 +201,9 @@ struct ContentView: View {
                         currentWorkspaceRoot = root
                         expandedDirectories.removeAll()
                     }
+                }
+                .onReceive(store.$sidebarRevision) { _ in
+                    DispatchQueue.main.async { rebuildSidebarIndex() }
                 }
                 .overlay {
                     if store.workspaceName != nil && store.searchResults.isEmpty

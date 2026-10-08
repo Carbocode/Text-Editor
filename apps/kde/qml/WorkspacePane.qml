@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQml.Models
 
 Item {
     id: root
@@ -15,9 +16,12 @@ Item {
     property var collapsedDirectories: ({})
     property var orderedSidebarEntries: []
     property var visibleSidebarEntries: []
+    property var childEntriesByParent: ({})
     property bool sidebarEntriesDirty: true
     property string lastWorkspaceRoot: ""
     signal browseRequested()
+
+    ListModel { id: sidebarModel }
 
     Timer {
         id: sidebarUpdate
@@ -99,6 +103,7 @@ Item {
 
     function rebuildOrderedEntries() {
         sidebarEntriesDirty = false
+        sidebarUpdate.stop()
         var files = fileIds()
         var directories = []
         var seenDirectories = ({})
@@ -136,16 +141,24 @@ Item {
             addChild(foldersByParent, directories[d])
         for (var f = 0; f < files.length; ++f)
             addChild(filesByParent, files[f])
+        var childEntries = ({})
+        for (var folderParent in foldersByParent) {
+            childEntries[folderParent] = foldersByParent[folderParent].map(function(path) {
+                return { path: path, directory: true }
+            })
+        }
+        for (var fileParent in filesByParent) {
+            if (!childEntries[fileParent]) childEntries[fileParent] = []
+            for (var child of filesByParent[fileParent])
+                childEntries[fileParent].push({ path: child, directory: false })
+        }
+        childEntriesByParent = childEntries
         var paths = []
         function appendChildren(parent) {
-            var folders = foldersByParent["#" + parent] || []
-            for (var i = 0; i < folders.length; ++i) {
-                paths.push({ path: folders[i], directory: true })
-                appendChildren(folders[i])
+            for (var entry of childEntries["#" + parent] || []) {
+                paths.push(entry)
+                if (entry.directory) appendChildren(entry.path)
             }
-            var documents = filesByParent["#" + parent] || []
-            for (var j = 0; j < documents.length; ++j)
-                paths.push({ path: documents[j], directory: false })
         }
         appendChildren("")
         orderedSidebarEntries = paths
@@ -166,6 +179,24 @@ Item {
             if (!searching && entry.directory && collapsedDirectories[entry.path] !== false)
                 hiddenPrefix = entry.path + "/"
         }
+        var previous = visibleSidebarEntries
+        var start = 0
+        while (start < previous.length && start < visible.length
+               && previous[start].path === visible[start].path
+               && previous[start].directory === visible[start].directory)
+            ++start
+        var oldEnd = previous.length
+        var newEnd = visible.length
+        while (oldEnd > start && newEnd > start
+               && previous[oldEnd - 1].path === visible[newEnd - 1].path
+               && previous[oldEnd - 1].directory === visible[newEnd - 1].directory) {
+            --oldEnd
+            --newEnd
+        }
+        if (oldEnd > start)
+            sidebarModel.remove(start, oldEnd - start)
+        for (var row = start; row < newEnd; ++row)
+            sidebarModel.insert(row, visible[row])
         visibleSidebarEntries = visible
     }
 
@@ -175,12 +206,33 @@ Item {
     }
 
     function toggleDirectory(path) {
+        if (sidebarEntriesDirty) rebuildOrderedEntries()
+        var visible = visibleSidebarEntries
+        var index = visible.findIndex(entry => entry.directory && entry.path === path)
+        if (index < 0) return
+        var prefix = path + "/"
+        var oldEnd = index + 1
+        while (oldEnd < visible.length && visible[oldEnd].path.startsWith(prefix))
+            ++oldEnd
         var next = ({})
         for (var key in collapsedDirectories) next[key] = collapsedDirectories[key]
-        next[path] = !(collapsedDirectories[path] !== false)
+        var expanding = collapsedDirectories[path] !== false
+        next[path] = expanding ? false : true
         collapsedDirectories = next
-        if (sidebarEntriesDirty) rebuildOrderedEntries()
-        else updateVisibleEntries()
+        var children = []
+        function appendVisibleChildren(parent) {
+            for (var entry of childEntriesByParent["#" + parent] || []) {
+                children.push(entry)
+                if (entry.directory && collapsedDirectories[entry.path] === false)
+                    appendVisibleChildren(entry.path)
+            }
+        }
+        if (expanding) appendVisibleChildren(path)
+        var oldCount = oldEnd - index - 1
+        if (oldCount > 0) sidebarModel.remove(index + 1, oldCount)
+        for (var row = 0; row < children.length; ++row)
+            sidebarModel.insert(index + 1 + row, children[row])
+        visibleSidebarEntries = visible.slice(0, index + 1).concat(children, visible.slice(oldEnd))
     }
 
     function matchIndicesForFile(id) {
@@ -277,10 +329,11 @@ Item {
                         Layout.alignment: Qt.AlignHCenter
                     }
                     ListView {
+                        id: fileList
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: root.visibleSidebarEntries
+                        model: sidebarModel
                         reuseItems: true
                         Label {
                             anchors.centerIn: parent
@@ -290,8 +343,8 @@ Item {
                         delegate: Column {
                             id: fileGroup
                             width: ListView.view.width
-                            property string fileId: modelData.path
-                            property bool isDirectory: modelData.directory
+                            property string fileId: model.path
+                            property bool isDirectory: model.directory
                             property int depth: fileId.split("/").length - 1
                             ItemDelegate {
                                 width: parent.width

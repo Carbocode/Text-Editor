@@ -11,6 +11,7 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var searchInProgress = false
     @Published private(set) var directories: [String] = []
+    @Published private(set) var sidebarRevision: UInt64 = 0
     @Published private(set) var selectedSearchLocation: SearchLocation?
     @Published private(set) var selectedSearchResultIndex: Int?
     @Published private(set) var searchNavigationRevision: UInt64 = 0
@@ -180,6 +181,9 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func apply(_ snapshot: WorkspaceSnapshot) {
+        let sidebarChanged = searchQuery != snapshot.searchQuery
+            || searchResults != snapshot.searchResults
+            || directories != snapshot.directories
         revision = snapshot.revision
         counter = snapshot.counter
         workspaceName = snapshot.workspaceName
@@ -192,5 +196,6 @@ final class WorkspaceStore: ObservableObject {
         documents = snapshot.documents
         activeDocument = snapshot.activeDocument
         editorText = snapshot.activeDocument?.content ?? ""
+        if sidebarChanged { sidebarRevision &+= 1 }
     }
 }

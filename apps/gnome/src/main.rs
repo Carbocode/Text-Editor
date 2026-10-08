@@ -340,14 +340,68 @@ impl Ui {
         if !self.snapshot.borrow().search_query.0.is_empty() {
             return;
         }
+        let Some(visible_index) = self
+            .visible_entries
+            .borrow()
+            .iter()
+            .position(|entry| matches!(&entry.row, SidebarRow::Directory(id) if id == path))
+        else {
+            return;
+        };
+        let Some(all_index) = self
+            .all_entries
+            .borrow()
+            .iter()
+            .position(|entry| matches!(&entry.row, SidebarRow::Directory(id) if id == path))
+        else {
+            return;
+        };
+        let prefix = format!("{path}/");
+        let old_children = self.visible_entries.borrow()[visible_index + 1..]
+            .iter()
+            .take_while(|entry| entry.path.starts_with(&prefix))
+            .count();
         let mut collapsed = self.collapsed_directories.borrow_mut();
-        if !collapsed.insert(path.to_owned()) {
-            collapsed.remove(path);
+        let expanding = collapsed.remove(path);
+        if !expanding {
+            collapsed.insert(path.to_owned());
+        }
+        let mut replacement = vec![self.all_entries.borrow()[all_index].clone()];
+        if expanding {
+            let mut hidden_prefix: Option<String> = None;
+            for entry in self.all_entries.borrow()[all_index + 1..].iter() {
+                if !entry.path.starts_with(&prefix) {
+                    break;
+                }
+                if let Some(hidden) = hidden_prefix.as_ref() {
+                    if entry.path.starts_with(hidden) {
+                        continue;
+                    }
+                    hidden_prefix = None;
+                }
+                if let SidebarRow::Directory(child) = &entry.row
+                    && collapsed.contains(child)
+                {
+                    hidden_prefix = Some(format!("{child}/"));
+                }
+                replacement.push(entry.clone());
+            }
         }
         drop(collapsed);
         self.updating.set(true);
-        self.rebuild_visible_sidebar(&self.snapshot.borrow());
         self.file_selection.set_selected(u32::MAX);
+        let range = visible_index..visible_index + old_children + 1;
+        self.sidebar_rows.borrow_mut().splice(
+            range.clone(),
+            replacement.iter().map(|entry| entry.row.clone()),
+        );
+        let placeholders = vec![""; replacement.len()];
+        self.visible_entries.borrow_mut().splice(range, replacement);
+        self.file_model.splice(
+            visible_index as u32,
+            (old_children + 1) as u32,
+            &placeholders,
+        );
         self.updating.set(false);
     }
 
@@ -961,6 +1015,7 @@ fn build_window(app: &adw::Application) {
                 ui.sidebar_rows.borrow()[0],
                 SidebarRow::Directory(_)
             ));
+            let unchanged_root_file = ui.file_model.item(1).expect("root file row");
             ui.file_selection.set_selected(0);
             let nested_index = ui
                 .sidebar_rows
@@ -970,6 +1025,14 @@ fn build_window(app: &adw::Application) {
                 .expect("expanded directory file");
             let nested = ui.visible_entries.borrow()[nested_index].clone();
             assert_eq!(sidebar_entry_widget(&nested, false).margin_start(), 24);
+            assert_eq!(
+                unchanged_root_file.as_ptr(),
+                ui.file_model
+                    .item((ui.file_model.n_items() - 1) as u32)
+                    .expect("root file after expansion")
+                    .as_ptr(),
+                "expanding a folder should preserve rows outside its subtree"
+            );
             ui.file_selection.set_selected(0);
             assert_eq!(ui.sidebar_rows.borrow().len(), 2);
             ui.file_selection.set_selected(0);
