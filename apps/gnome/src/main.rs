@@ -415,6 +415,20 @@ impl Ui {
         self.buffer.select_range(&start, &end);
         self.editor.grab_focus();
         self.editor.scroll_to_iter(&mut end, 0.2, false, 0.0, 0.0);
+        let start_offset = start.offset();
+        let end_offset = end.offset();
+        let mark = self.buffer.create_mark(None, &end, false);
+        let buffer = self.buffer.clone();
+        let editor = self.editor.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(16), move || {
+            if let Some((selected_start, selected_end)) = buffer.selection_bounds()
+                && selected_start.offset() == start_offset
+                && selected_end.offset() == end_offset
+            {
+                editor.scroll_to_mark(&mark, 0.2, false, 0.0, 0.0);
+            }
+            buffer.delete_mark(&mark);
+        });
     }
 }
 
