@@ -89,10 +89,6 @@ Item {
                 SplitView.minimumWidth: 180
                 ColumnLayout {
                     anchors.fill: parent
-                    Label {
-                        text: root.controller.workspace_name || "Files"
-                        font.bold: true
-                    }
                     TextField {
                         Layout.fillWidth: true
                         text: root.controller.search_query

@@ -8,7 +8,7 @@ Kirigami.ApplicationWindow {
     visible: true
     width: 900
     height: 600
-    title: "Native Workspace"
+    title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
 
     AppController { id: controller }
     FolderDialog {
@@ -39,6 +39,8 @@ Kirigami.ApplicationWindow {
                 controller.open_workspace(argument.substring("--smoke-workspace=".length))
                 if (controller.document_ids.length === 0)
                     throw new Error("Workspace documents were not listed")
+                if (title !== controller.workspace_name)
+                    throw new Error("Window title did not follow the workspace")
                 controller.search_files("unlikely-no-match")
                 if (controller.search_result_ids.length !== 0)
                     throw new Error("Filename search did not filter results")

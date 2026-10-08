@@ -9,6 +9,7 @@ use std::{
 
 #[derive(Clone)]
 struct Ui {
+    window: adw::ApplicationWindow,
     core: Rc<RefCell<Application>>,
     snapshot: Rc<RefCell<AppSnapshot>>,
     files: adw::Sidebar,
@@ -38,6 +39,12 @@ impl Ui {
         self.updating.set(true);
         let results_changed = self.snapshot.borrow().search_results != snapshot.search_results;
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
+        self.window.set_title(Some(
+            snapshot
+                .workspace_name
+                .as_deref()
+                .unwrap_or("Native Workspace"),
+        ));
         self.heading.set_label(
             snapshot
                 .workspace_name
@@ -287,6 +294,7 @@ fn build_window(app: &adw::Application) {
     window.set_content(Some(&split));
 
     let ui = Ui {
+        window: window.clone(),
         core: Rc::new(RefCell::new(core)),
         snapshot: Rc::new(RefCell::new(Application::new().snapshot())),
         files,
@@ -414,6 +422,10 @@ fn build_window(app: &adw::Application) {
     }
     if let Some(path) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE") {
         ui.dispatch(AppCommand::OpenWorkspace(PathBuf::from(path)));
+        assert_eq!(
+            window.title().as_deref(),
+            ui.snapshot.borrow().workspace_name.as_deref()
+        );
         let first = ui
             .snapshot
             .borrow()

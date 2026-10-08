@@ -60,7 +60,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .navigationTitle(store.workspaceName ?? "Workspace")
+            .navigationTitle(store.workspaceName ?? "Native Workspace")
             .toolbar {
                 Button("Open Workspace", systemImage: "folder") {
                     choosingWorkspace = true
@@ -84,7 +84,6 @@ struct ContentView: View {
                         get: { store.editorText },
                         set: { store.changeDocument($0) }
                     ))
-                    .navigationTitle(active.title)
                 } else {
                     VStack(spacing: 16) {
                         ContentUnavailableView(
