@@ -127,12 +127,12 @@ impl Ui {
         if results_changed {
             self.files.remove_all();
             let mut rows = Vec::new();
+            let section = adw::SidebarSection::new();
             for group in snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
             {
                 let document = &group[0];
-                let section = adw::SidebarSection::new();
                 let file = adw::SidebarItem::new(&document.title);
                 file.set_icon_paintable(Some(&icon_for(document.id.as_str())));
                 if document.dirty {
@@ -148,8 +148,8 @@ impl Ui {
                     section.append(item);
                     rows.push(SidebarRow::Match(result.clone()));
                 }
-                self.files.append(section);
             }
+            self.files.append(section);
             self.sidebar_rows.replace(rows);
         }
         if let Some(active) = snapshot.active_document.as_ref() {
