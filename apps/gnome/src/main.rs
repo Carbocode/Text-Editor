@@ -567,6 +567,25 @@ fn build_window(app: &adw::Application) {
             ui.dispatch(AppCommand::SetSearchQuery("phase 1".into()));
             assert_eq!(ui.snapshot.borrow().search_results.len(), 2);
             assert_eq!(ui.sidebar_rows.borrow().len(), 3);
+            fn first_sidebar_row(widget: &gtk::Widget) -> Option<gtk::Widget> {
+                if widget.css_name() == "row" {
+                    return Some(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(current) = child {
+                    if let Some(row) = first_sidebar_row(&current) {
+                        return Some(row);
+                    }
+                    child = current.next_sibling();
+                }
+                None
+            }
+            let first_row = first_sidebar_row(ui.files.upcast_ref()).expect("sidebar file row");
+            let (_, natural_height, _, _) = first_row.measure(gtk::Orientation::Vertical, -1);
+            assert!(
+                natural_height <= 32,
+                "sidebar row is {natural_height}px high"
+            );
             assert!(matches!(ui.sidebar_rows.borrow()[0], SidebarRow::File(_)));
             assert_eq!(
                 ui.snapshot.borrow().search_results[0].snippet.as_deref(),

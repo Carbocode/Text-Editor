@@ -3,3 +3,8 @@ sidebar.compact-files list.navigation-sidebar row {
   padding-top: 0;
   padding-bottom: 0;
 }
+
+sidebar.compact-files list.navigation-sidebar row > box {
+  min-height: 0;
+  padding: 3px 8px;
+}
