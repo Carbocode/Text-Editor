@@ -68,6 +68,8 @@ pub mod qobject {
         #[qinvokable]
         fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList;
         #[qinvokable]
+        fn minimap_glyphs(self: Pin<&mut Self>) -> QString;
+        #[qinvokable]
         fn save_document(self: Pin<&mut Self>);
         #[qinvokable]
         fn reload_document(self: Pin<&mut Self>);
@@ -105,6 +107,15 @@ pub struct AppControllerRust {
 }
 
 impl qobject::AppController {
+    pub fn minimap_glyphs(self: Pin<&mut Self>) -> QString {
+        use std::fmt::Write;
+        let mut encoded = String::with_capacity(384);
+        for byte in native_workspace_syntax::minimap_glyphs() {
+            write!(encoded, "{byte:02X}").expect("write into string");
+        }
+        QString::from(encoded)
+    }
+
     pub fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList {
         let file_name = self.rust().active_document_id.to_string();
         let text = text.to_string();

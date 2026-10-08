@@ -3,6 +3,25 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+static MINIMAP_GLYPHS: &[u8; 192] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/minimap-glyphs.bin"
+));
+
+pub fn minimap_glyphs() -> &'static [u8; 192] {
+    MINIMAP_GLYPHS
+}
+
+pub fn minimap_glyph_alpha(character: char) -> (u8, u8) {
+    let code = character as usize;
+    let index = if (32..=126).contains(&code) {
+        code - 32
+    } else {
+        95
+    };
+    (MINIMAP_GLYPHS[index * 2], MINIMAP_GLYPHS[index * 2 + 1])
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenKind {
     Keyword,
@@ -148,5 +167,12 @@ mod tests {
                 .iter()
                 .any(|token| token.kind == TokenKind::Heading)
         );
+    }
+
+    #[test]
+    fn minimap_atlas_has_two_coverage_values_per_character() {
+        assert_eq!(minimap_glyphs().len(), 192);
+        assert_eq!(minimap_glyph_alpha(' '), (0, 0));
+        assert_ne!(minimap_glyph_alpha('A'), (0, 0));
     }
 }

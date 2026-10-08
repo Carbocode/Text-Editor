@@ -10,6 +10,12 @@ Item {
     property bool enableBrowse: false
     property bool syncingEditor: false
     property bool updatingHighlight: false
+    property var minimapLines: [""]
+    property var minimapOffsets: [0]
+    property var minimapKinds: []
+    property var minimapGlyphs: []
+    property string minimapSource: ""
+    property var minimapSpans: []
     property int selectedResultIndex: -1
     property alias editorText: editor.text
     property alias editorSelectedText: editor.selectedText
@@ -32,6 +38,12 @@ Item {
         onTriggered: if (root.sidebarEntriesDirty) root.rebuildOrderedEntries()
     }
 
+    Timer {
+        id: minimapUpdate
+        interval: 180
+        onTriggered: root.rebuildMinimap()
+    }
+
     Connections {
         target: root.controller
         function onWorkspace_rootChanged() {
@@ -48,14 +60,47 @@ Item {
 
     Component.onCompleted: {
         scheduleSidebarUpdate()
+        var encoded = root.controller ? root.controller.minimap_glyphs() : ""
+        var glyphs = []
+        for (var glyph = 0; glyph < encoded.length; glyph += 2)
+            glyphs.push(parseInt(encoded.slice(glyph, glyph + 2), 16))
+        minimapGlyphs = glyphs
         updateHighlight()
     }
 
     function updateHighlight() {
         if (updatingHighlight || !root.controller) return
         updatingHighlight = true
-        syntaxHighlighter.spans = root.controller.highlight_document(editor.text)
+        var source = editor.text
+        var spans = root.controller.highlight_document(source)
+        syntaxHighlighter.spans = spans
+        minimapSource = source
+        minimapSpans = spans
+        minimapUpdate.restart()
         updatingHighlight = false
+    }
+
+    function rebuildMinimap() {
+        var source = minimapSource
+        var spans = minimapSpans
+        var kinds = []
+        for (var index = 0; index < spans.length; ++index) {
+            var parts = spans[index].split(":")
+            var end = Math.min(source.length, Number(parts[1]))
+            for (var position = Number(parts[0]); position < end; ++position)
+                kinds[position] = Number(parts[2])
+        }
+        minimapKinds = kinds
+        var lines = source.split("\n")
+        var offsets = []
+        var nextOffset = 0
+        for (var line = 0; line < lines.length; ++line) {
+            offsets.push(nextOffset)
+            nextOffset += lines[line].length + 1
+        }
+        minimapOffsets = offsets
+        minimapLines = lines
+        minimap.requestPaint()
     }
 
     function scheduleSidebarUpdate() {
@@ -486,7 +531,6 @@ Item {
                         onTextChanged: {
                             root.updateHighlight()
                             lineNumbers.requestPaint()
-                            minimap.requestPaint()
                             if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
                                 root.selectedResultIndex = -1
                                 root.controller.change_document(text)
@@ -496,27 +540,67 @@ Item {
                 }
                 Canvas {
                     id: minimap
-                    Layout.preferredWidth: 80
+                    Layout.preferredWidth: 100
                     Layout.fillHeight: true
+                    property real usedHeight: Math.min(height, root.minimapLines.length * 2)
                     onPaint: {
                         var ctx = getContext("2d")
                         ctx.clearRect(0, 0, width, height)
-                        ctx.fillStyle = "#80808066"
-                        var lines = editor.text.split("\n")
-                        var stride = Math.max(1, Math.ceil(lines.length / Math.max(1, height / 2)))
-                        for (var i = 0; i < lines.length; i += stride)
-                            ctx.fillRect(4, i / lines.length * height, Math.min(width - 8, lines[i].length * 1.2), 1)
-                        var flick = editorScroll.contentItem
-                        var ratio = flick.contentHeight > 0 ? height / flick.contentHeight : 1
-                        ctx.fillStyle = "#80808044"
-                        ctx.fillRect(0, flick.contentY * ratio, width, Math.max(8, flick.height * ratio))
+                        var lines = root.minimapLines
+                        var count = Math.max(1, lines.length)
+                        var shortDocument = count * 2 <= height
+                        var rows = shortDocument ? count : Math.max(1, Math.floor(height))
+                        var palette = ["#9ba4ae", "#aa70d3", "#d88b44", "#5eb569", "#858e97", "#569ae0"]
+                        for (var row = 0; row < rows; ++row) {
+                            var line = shortDocument ? row : Math.floor(row * (count - 1) / Math.max(1, rows - 1))
+                            var offset = root.minimapOffsets[line]
+                            var y = shortDocument ? row * 2 : row
+                            var x = 4
+                            var source = lines[line]
+                            for (var column = 0; column < source.length && x < width - 4; ++column) {
+                                var code = source.charCodeAt(column)
+                                if (code === 9) {
+                                    x += 4 - (x - 4) % 4
+                                } else {
+                                    if (code > 32) {
+                                        ctx.fillStyle = palette[root.minimapKinds[offset + column] || 0]
+                                        var glyphIndex = (code >= 32 && code <= 126 ? code - 32 : 95) * 2
+                                        var top = root.minimapGlyphs[glyphIndex] || 0
+                                        var bottom = root.minimapGlyphs[glyphIndex + 1] || 0
+                                        if (shortDocument) {
+                                            if (top > 0) {
+                                                ctx.globalAlpha = Math.min(1, top / 128)
+                                                ctx.fillRect(x, y, 1, 1)
+                                            }
+                                            if (bottom > 0) {
+                                                ctx.globalAlpha = Math.min(1, bottom / 128)
+                                                ctx.fillRect(x, y + 1, 1, 1)
+                                            }
+                                        } else {
+                                            ctx.globalAlpha = Math.min(1, Math.max(top, bottom) / 128)
+                                            ctx.fillRect(x, y, 1, 1)
+                                        }
+                                        ctx.globalAlpha = 1
+                                    }
+                                    ++x
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: minimap.width
+                        y: editorScroll.contentItem.contentY / Math.max(1, editorScroll.contentItem.contentHeight) * minimap.usedHeight
+                        height: Math.max(8, editorScroll.contentItem.height / Math.max(1, editorScroll.contentItem.contentHeight) * minimap.usedHeight)
+                        color: "#80808044"
                     }
                     MouseArea {
                         anchors.fill: parent
-                        onPressed: {
+                        onPressed: moveTo(mouseY)
+                        onPositionChanged: if (pressed) moveTo(mouseY)
+                        function moveTo(y) {
                             var flick = editorScroll.contentItem
                             flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
-                                mouseY / minimap.height * flick.contentHeight - flick.height / 2))
+                                y / Math.max(1, minimap.usedHeight) * flick.contentHeight - flick.height / 2))
                         }
                     }
                 }
@@ -524,7 +608,6 @@ Item {
                     target: editorScroll.contentItem
                     function onContentYChanged() {
                         lineNumbers.requestPaint()
-                        minimap.requestPaint()
                     }
                 }
             }

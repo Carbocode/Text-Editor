@@ -31,6 +31,7 @@ struct Ui {
     files_placeholder: gtk::Label,
     conflict_banner: gtk::Box,
     editor: gtk::TextView,
+    editor_chrome: editor_chrome::EditorChrome,
     buffer: gtk::TextBuffer,
     heading: gtk::Label,
     status: gtk::Label,
@@ -307,6 +308,12 @@ impl Ui {
         }
         syntax::apply(
             &self.buffer,
+            snapshot
+                .active_document
+                .as_ref()
+                .map_or("", |doc| doc.id.as_str()),
+        );
+        self.editor_chrome.set_file_name(
             snapshot
                 .active_document
                 .as_ref()
@@ -743,7 +750,8 @@ fn build_window(app: &adw::Application) {
     let content_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content_body.append(&conflict_banner);
     editor_scroll.set_vexpand(true);
-    content_body.append(&editor_chrome::wrap(&editor, &editor_scroll));
+    let editor_chrome = editor_chrome::wrap(&editor, &editor_scroll);
+    content_body.append(&editor_chrome.row);
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar_view));
@@ -796,6 +804,7 @@ fn build_window(app: &adw::Application) {
         files_placeholder,
         conflict_banner,
         editor,
+        editor_chrome,
         buffer,
         heading,
         status,

@@ -6,6 +6,11 @@ use std::{path::PathBuf, sync::Mutex};
 
 uniffi::setup_scaffolding!();
 
+#[uniffi::export]
+pub fn minimap_glyphs() -> Vec<u8> {
+    native_workspace_syntax::minimap_glyphs().to_vec()
+}
+
 #[derive(Clone, uniffi::Record)]
 pub struct SyntaxToken {
     pub start_utf16: u64,

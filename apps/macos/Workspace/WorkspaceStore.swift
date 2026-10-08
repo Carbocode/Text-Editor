@@ -26,6 +26,7 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var externalChangeIDs: Set<String> = []
     @Published private(set) var activeDocument: DocumentSnapshot?
     @Published private(set) var editorText = ""
+    private(set) var editorContentRevision: UInt64 = 0
     @Published private(set) var errorMessage: String?
 
     private let core = WorkspaceApplication()
@@ -131,6 +132,7 @@ final class WorkspaceStore: ObservableObject {
 
     func changeDocument(_ content: String) {
         guard let id = activeDocument?.id, content != editorText else { return }
+        editorContentRevision &+= 1
         editorText = content
         selectedSearchResultIndex = nil
         do {
@@ -198,7 +200,11 @@ final class WorkspaceStore: ObservableObject {
         let changedIDs = Set(snapshot.documents.lazy.filter(\.externalChange).map(\.id))
         if changedIDs != externalChangeIDs { externalChangeIDs = changedIDs }
         activeDocument = snapshot.activeDocument
-        editorText = snapshot.activeDocument?.content ?? ""
+        let content = snapshot.activeDocument?.content ?? ""
+        if content != editorText {
+            editorContentRevision &+= 1
+            editorText = content
+        }
         if sidebarChanged { sidebarRevision &+= 1 }
     }
 }

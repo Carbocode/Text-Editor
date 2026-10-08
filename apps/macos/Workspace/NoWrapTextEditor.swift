@@ -3,6 +3,7 @@ import SwiftUI
 
 struct NoWrapTextEditor: NSViewRepresentable {
     let documentID: String
+    let textRevision: UInt64
     @Binding var text: String
     let searchRange: NSRange?
     let searchNavigationRevision: UInt64
@@ -13,12 +14,13 @@ struct NoWrapTextEditor: NSViewRepresentable {
 
     func makeNSView(context: Context) -> EditorContainer {
         let scrollView = Self.makeScrollView(text: text)
-        let container = EditorContainer(scrollView: scrollView)
+        let container = EditorContainer(scrollView: scrollView, fileName: documentID)
         context.coordinator.container = container
         (scrollView.documentView as? NSTextView)?.delegate = context.coordinator
         if let textView = scrollView.documentView as? NSTextView {
             SyntaxHighlighting.apply(to: textView, fileName: documentID)
         }
+        container.refreshContent()
         return container
     }
 
@@ -52,12 +54,18 @@ struct NoWrapTextEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.parent = self
         let switchedDocument = context.coordinator.documentID != documentID
-        if textView.string != text {
-            textView.string = text
-            SyntaxHighlighting.apply(to: textView, fileName: documentID)
+        if switchedDocument || context.coordinator.textRevision != textRevision {
+            context.coordinator.textRevision = textRevision
+            if textView.string != text {
+                textView.string = text
+                SyntaxHighlighting.apply(to: textView, fileName: documentID)
+                container.refreshContent()
+            }
         }
         if switchedDocument {
+            container.fileName = documentID
             SyntaxHighlighting.apply(to: textView, fileName: documentID)
+            container.refreshContent()
             textView.setSelectedRange(NSRange(location: 0, length: 0))
             scrollView.contentView.scroll(to: .zero)
             scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -84,31 +92,46 @@ struct NoWrapTextEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NoWrapTextEditor
         var documentID: String
+        var textRevision: UInt64
         var searchNavigationRevision: UInt64 = 0
         weak var container: EditorContainer?
 
         init(_ parent: NoWrapTextEditor) {
             self.parent = parent
             documentID = parent.documentID
+            textRevision = parent.textRevision
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
             SyntaxHighlighting.apply(to: textView, fileName: documentID)
             parent.text = textView.string
-            container?.refreshChrome()
+            container?.refreshContent(incremental: true)
+        }
+
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
+                      replacementString: String?) -> Bool {
+            container?.noteReplacement(in: textView, range: affectedCharRange,
+                                       replacement: replacementString ?? "")
+            return true
         }
     }
 }
 
 final class EditorContainer: NSView {
     let scrollView: NSScrollView
+    var fileName: String
     private let gutter = EditorGutter()
     private let minimap = EditorMinimap()
     private var scrollObserver: NSObjectProtocol?
+    private var minimapWork: DispatchWorkItem?
+    private var minimapGeneration = 0
+    private var lastMinimapSize: NSSize = .zero
+    private var incrementalLineCountReady = false
 
-    init(scrollView: NSScrollView) {
+    init(scrollView: NSScrollView, fileName: String) {
         self.scrollView = scrollView
+        self.fileName = fileName
         super.init(frame: .zero)
         addSubview(gutter)
         addSubview(scrollView)
@@ -120,21 +143,74 @@ final class EditorContainer: NSView {
             forName: NSView.boundsDidChangeNotification,
             object: scrollView.contentView,
             queue: .main
-        ) { [weak self] _ in self?.refreshChrome() }
+        ) { [weak self] _ in
+            guard let self else { return }
+            if let textView = self.textView {
+                SyntaxHighlighting.apply(to: textView, fileName: self.fileName)
+            }
+            self.refreshChrome()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     deinit {
         if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        minimapWork?.cancel()
     }
 
     override func layout() {
         super.layout()
         gutter.frame = NSRect(x: 0, y: 0, width: 48, height: bounds.height)
-        scrollView.frame = NSRect(x: 48, y: 0, width: max(0, bounds.width - 128), height: bounds.height)
-        minimap.frame = NSRect(x: max(48, bounds.width - 80), y: 0, width: 80, height: bounds.height)
+        scrollView.frame = NSRect(x: 48, y: 0, width: max(0, bounds.width - 148), height: bounds.height)
+        minimap.frame = NSRect(x: max(48, bounds.width - 100), y: 0, width: 100, height: bounds.height)
+        if minimap.bounds.size != lastMinimapSize {
+            lastMinimapSize = minimap.bounds.size
+            scheduleMinimap()
+        }
         refreshChrome()
+    }
+
+    func noteReplacement(in view: NSTextView, range: NSRange, replacement: String) {
+        let old = view.string as NSString
+        guard NSMaxRange(range) <= old.length else { return }
+        let removed = old.substring(with: range).utf8.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
+        let inserted = replacement.utf8.reduce(0) { $0 + ($1 == 10 ? 1 : 0) }
+        gutter.lineCount = max(1, gutter.lineCount + inserted - removed)
+        incrementalLineCountReady = true
+    }
+
+    func refreshContent(incremental: Bool = false) {
+        if !incremental || !incrementalLineCountReady {
+            gutter.lineCount = textView?.string.utf8.reduce(1) { $0 + ($1 == 10 ? 1 : 0) } ?? 1
+        }
+        incrementalLineCountReady = false
+        scheduleMinimap()
+        refreshChrome()
+    }
+
+    private func scheduleMinimap() {
+        minimapWork?.cancel()
+        minimapGeneration += 1
+        let generation = minimapGeneration
+        guard minimap.bounds.width > 0, minimap.bounds.height > 0 else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.minimapGeneration == generation, let textView = self.textView else { return }
+            let content = textView.string
+            let name = self.fileName
+            let width = Int(self.minimap.bounds.width)
+            let height = Int(self.minimap.bounds.height)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let raster = EditorMinimapRaster.build(text: content, fileName: name,
+                                                        width: width, height: height)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.minimapGeneration == generation else { return }
+                    self.minimap.setRaster(raster)
+                }
+            }
+        }
+        minimapWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: work)
     }
 
     func refreshChrome() {
@@ -143,6 +219,7 @@ final class EditorContainer: NSView {
     }
 
     var textView: NSTextView? { scrollView.documentView as? NSTextView }
+    var displayedLineCount: Int { gutter.lineCount }
     var lineHeight: CGFloat {
         guard let textView, let font = textView.font else { return 16 }
         return textView.layoutManager?.defaultLineHeight(for: font) ?? 16
@@ -151,13 +228,14 @@ final class EditorContainer: NSView {
 
 private final class EditorGutter: NSView {
     weak var container: EditorContainer?
+    var lineCount = 1
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let container, let textView = container.textView else { return }
         let lineHeight = container.lineHeight
         let scrollY = container.scrollView.contentView.bounds.origin.y
-        let count = textView.string.reduce(1) { $1 == "\n" ? $0 + 1 : $0 }
+        let count = lineCount
         let first = min(count, max(0, Int((scrollY - textView.textContainerInset.height) / lineHeight)))
         let last = min(count, first + Int(ceil(bounds.height / lineHeight)) + 3)
         let attributes: [NSAttributedString.Key: Any] = [
@@ -175,31 +253,44 @@ private final class EditorGutter: NSView {
 
 private final class EditorMinimap: NSView {
     weak var container: EditorContainer?
+    private var raster: EditorMinimapRaster?
+    private var rasterImage: NSImage?
     override var isFlipped: Bool { true }
 
+    func setRaster(_ value: EditorMinimapRaster) {
+        raster = value
+        rasterImage = value.image()
+        needsDisplay = true
+    }
+
     override func draw(_ dirtyRect: NSRect) {
-        guard let container, let textView = container.textView else { return }
-        let lines = textView.string.split(separator: "\n", omittingEmptySubsequences: false)
-        let lineStride = max(1, Int(ceil(CGFloat(lines.count) / max(1, bounds.height / 2))))
-        NSColor.secondaryLabelColor.withAlphaComponent(0.4).setFill()
-        for index in stride(from: 0, to: lines.count, by: lineStride) {
-            let line = lines[index]
-            NSRect(x: 4, y: CGFloat(index) / CGFloat(lines.count) * bounds.height,
-                   width: min(bounds.width - 8, CGFloat(line.count) * 1.2), height: 1).fill()
-        }
+        guard let container else { return }
+        rasterImage?.draw(in: bounds, from: .zero, operation: .sourceOver,
+                          fraction: 1, respectFlipped: true, hints: nil)
         let clip = container.scrollView.contentView
-        let total = max(1, textView.bounds.height)
+        let scale = CGFloat(raster?.usedHeight ?? 0) / CGFloat(max(1, raster?.lineCount ?? 1))
+        let top = clip.bounds.origin.y / container.lineHeight * scale
+        let visibleHeight = clip.bounds.height / container.lineHeight * scale
         NSColor.secondaryLabelColor.withAlphaComponent(0.2).setFill()
-        NSRect(x: 0, y: clip.bounds.origin.y / total * bounds.height,
-               width: bounds.width, height: max(8, clip.bounds.height / total * bounds.height)).fill()
+        NSRect(x: 0, y: max(0, top), width: bounds.width,
+               height: max(8, min(bounds.height, visibleHeight))).fill()
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard let container, let textView = container.textView else { return }
+        scrollTo(event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        scrollTo(event)
+    }
+
+    private func scrollTo(_ event: NSEvent) {
+        guard let container, let textView = container.textView, let raster else { return }
         let y = convert(event.locationInWindow, from: nil).y
         let clip = container.scrollView.contentView
         let limit = max(0, textView.bounds.height - clip.bounds.height)
-        let target = min(limit, max(0, y / max(1, bounds.height) * textView.bounds.height - clip.bounds.height / 2))
+        let targetLine = y / CGFloat(max(1, raster.usedHeight)) * CGFloat(raster.lineCount)
+        let target = min(limit, max(0, targetLine * container.lineHeight - clip.bounds.height / 2))
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
         container.scrollView.reflectScrolledClipView(clip)
     }

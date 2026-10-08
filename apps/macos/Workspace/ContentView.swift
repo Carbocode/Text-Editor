@@ -273,7 +273,9 @@ struct ContentView: View {
                         .font(.callout)
                         .padding(8)
                     }
-                    NoWrapTextEditor(documentID: active.id, text: Binding(
+                    NoWrapTextEditor(documentID: active.id,
+                                     textRevision: store.editorContentRevision,
+                                     text: Binding(
                         get: { store.editorText },
                         set: { store.changeDocument($0) }
                     ), searchRange: store.selectedSearchRange,
