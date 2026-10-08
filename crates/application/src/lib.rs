@@ -12,10 +12,13 @@ pub enum AppCommand {
     IncrementDiagnostic,
     SetSearchQuery(String),
     OpenWorkspace(PathBuf),
+    RefreshWorkspace,
     OpenDocument(DocumentId),
     CloseDocument(DocumentId),
     ChangeDocument { id: DocumentId, content: String },
     SaveDocument(DocumentId),
+    ReloadDocument(DocumentId),
+    OverwriteDocument(DocumentId),
 }
 
 /// A fact produced by a successful command. Events are transient, not a persisted log.
@@ -30,6 +33,10 @@ pub enum AppEvent {
         workspace: Workspace,
         documents: Vec<DocumentId>,
         recent_workspaces: Vec<RecentWorkspace>,
+    },
+    WorkspaceRefreshed {
+        documents: Vec<DocumentEntry>,
+        search_results: Vec<SearchResult>,
     },
     DocumentLoaded {
         id: DocumentId,
@@ -55,6 +62,7 @@ pub struct DocumentSummary {
     pub id: DocumentId,
     pub title: String,
     pub dirty: bool,
+    pub external_change: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +71,7 @@ pub struct DocumentSnapshot {
     pub title: String,
     pub content: String,
     pub dirty: bool,
+    pub external_change: bool,
 }
 
 /// A search query, kept as entered so frontends can render the same text.
@@ -215,6 +224,8 @@ pub enum AppError {
     DocumentNotOpen(String),
     #[error("save modified documents before changing workspaces or closing them")]
     UnsavedChanges,
+    #[error("document changed on disk; reload it or explicitly overwrite the disk version: {0}")]
+    ExternalChanges(String),
     #[error("diagnostic counter overflow")]
     CounterOverflow,
     #[error("application revision overflow")]
@@ -225,11 +236,12 @@ pub enum AppError {
     Storage(#[from] StorageError),
 }
 
-#[derive(Debug)]
-struct DocumentEntry {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentEntry {
     id: DocumentId,
     content: Option<String>,
     saved_content: Option<String>,
+    external_change: bool,
 }
 
 impl DocumentEntry {
@@ -263,6 +275,7 @@ impl AppState {
                         title: entry.id.as_str().to_owned(),
                         content: content.clone(),
                         dirty: entry.dirty(),
+                        external_change: entry.external_change,
                     })
                 })
         });
@@ -287,6 +300,7 @@ impl AppState {
                     id: entry.id.clone(),
                     title: entry.id.as_str().to_owned(),
                     dirty: entry.dirty(),
+                    external_change: entry.external_change,
                 })
                 .collect(),
             active_document,
@@ -319,6 +333,7 @@ impl AppState {
                         id,
                         content: None,
                         saved_content: None,
+                        external_change: false,
                     })
                     .collect();
                 self.search_results = self
@@ -328,10 +343,25 @@ impl AppState {
                     .collect();
                 self.active_document = None;
             }
+            AppEvent::WorkspaceRefreshed {
+                documents,
+                search_results,
+            } => {
+                self.documents = documents.clone();
+                self.search_results = search_results.clone();
+                if self
+                    .active_document
+                    .as_ref()
+                    .is_some_and(|id| !self.documents.iter().any(|entry| &entry.id == id))
+                {
+                    self.active_document = None;
+                }
+            }
             AppEvent::DocumentLoaded { id, content } => {
                 let entry = self.document_mut(id);
                 entry.content = Some(content.clone());
                 entry.saved_content = Some(content.clone());
+                entry.external_change = false;
                 self.refresh_search_result(id);
             }
             AppEvent::DocumentOpened { id } => self.active_document = Some(id.clone()),
@@ -346,6 +376,7 @@ impl AppState {
             AppEvent::DocumentSaved { id } => {
                 let entry = self.document_mut(id);
                 entry.saved_content = entry.content.clone();
+                entry.external_change = false;
                 self.refresh_search_result(id);
             }
         }
@@ -419,6 +450,30 @@ impl Application {
         self.state.snapshot()
     }
 
+    fn search_results(&self, documents: &[DocumentEntry], query: &str) -> Vec<SearchResult> {
+        let needle = query.trim().to_lowercase();
+        let root = self
+            .state
+            .workspace
+            .as_ref()
+            .map(|workspace| &workspace.root);
+        documents
+            .iter()
+            .flat_map(|entry| {
+                let disk_content = if needle.is_empty() || entry.content.is_some() {
+                    None
+                } else {
+                    root.and_then(|root| self.filesystem.read_document_for_search(root, &entry.id))
+                };
+                search_results_for(
+                    entry,
+                    &needle,
+                    entry.content.as_deref().or(disk_content.as_deref()),
+                )
+            })
+            .collect()
+    }
+
     /// Compatibility path for frontends that only render the resulting snapshot.
     pub fn dispatch(&mut self, command: AppCommand) -> Result<AppSnapshot, AppError> {
         self.dispatch_with_events(command)
@@ -460,31 +515,7 @@ impl Application {
                 if self.state.search_query.0 == query {
                     Vec::new()
                 } else {
-                    let needle = query.trim().to_lowercase();
-                    let root = self
-                        .state
-                        .workspace
-                        .as_ref()
-                        .map(|workspace| &workspace.root);
-                    let results = self
-                        .state
-                        .documents
-                        .iter()
-                        .flat_map(|entry| {
-                            let disk_content = if needle.is_empty() || entry.content.is_some() {
-                                None
-                            } else {
-                                root.and_then(|root| {
-                                    self.filesystem.read_document_for_search(root, &entry.id)
-                                })
-                            };
-                            search_results_for(
-                                entry,
-                                &needle,
-                                entry.content.as_deref().or(disk_content.as_deref()),
-                            )
-                        })
-                        .collect();
+                    let results = self.search_results(&self.state.documents, &query);
                     vec![AppEvent::SearchQueryChanged {
                         query: SearchQuery(query),
                         results,
@@ -502,6 +533,65 @@ impl Application {
                     documents,
                     recent_workspaces,
                 }]
+            }
+            AppCommand::RefreshWorkspace => {
+                let workspace = self
+                    .state
+                    .workspace
+                    .as_ref()
+                    .ok_or(AppError::WorkspaceNotOpen)?;
+                let (_, ids) = self.filesystem.open_workspace(&workspace.root)?;
+                let mut documents = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let mut entry = self
+                        .state
+                        .documents
+                        .iter()
+                        .find(|entry| entry.id == id)
+                        .cloned()
+                        .unwrap_or(DocumentEntry {
+                            id,
+                            content: None,
+                            saved_content: None,
+                            external_change: false,
+                        });
+                    if entry.content.is_some() {
+                        match self.filesystem.read_document(&workspace.root, &entry.id) {
+                            Ok(disk_content)
+                                if entry.saved_content.as_ref() == Some(&disk_content) =>
+                            {
+                                entry.external_change = false;
+                            }
+                            Ok(disk_content) if !entry.dirty() => {
+                                entry.content = Some(disk_content.clone());
+                                entry.saved_content = Some(disk_content);
+                                entry.external_change = false;
+                            }
+                            _ => entry.external_change = true,
+                        }
+                    }
+                    documents.push(entry);
+                }
+                for entry in &self.state.documents {
+                    if !documents.iter().any(|current| current.id == entry.id)
+                        && entry.content.is_some()
+                    {
+                        let mut missing = entry.clone();
+                        missing.external_change = true;
+                        documents.push(missing);
+                    }
+                }
+                documents.sort_by(|left, right| left.id.cmp(&right.id));
+                let search_results = self.search_results(&documents, &self.state.search_query.0);
+                if documents == self.state.documents && search_results == self.state.search_results
+                {
+                    Vec::new()
+                } else {
+                    vec![AppEvent::WorkspaceRefreshed {
+                        documents,
+                        search_results,
+                    }]
+                }
             }
             AppCommand::OpenDocument(id) => {
                 let root = &self
@@ -584,11 +674,50 @@ impl Application {
                     .as_ref()
                     .ok_or_else(|| AppError::DocumentNotOpen(id.as_str().to_owned()))?;
                 if entry.dirty() {
+                    let disk_content = self.filesystem.read_document(root, &id).ok();
+                    if disk_content != entry.saved_content {
+                        return Err(AppError::ExternalChanges(id.as_str().to_owned()));
+                    }
                     self.filesystem.write_document(root, &id, content)?;
                     vec![AppEvent::DocumentSaved { id }]
                 } else {
                     Vec::new()
                 }
+            }
+            AppCommand::ReloadDocument(id) => {
+                let root = &self
+                    .state
+                    .workspace
+                    .as_ref()
+                    .ok_or(AppError::WorkspaceNotOpen)?
+                    .root;
+                self.state
+                    .documents
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .ok_or_else(|| AppError::DocumentNotFound(id.as_str().to_owned()))?;
+                let content = self.filesystem.read_document(root, &id)?;
+                vec![AppEvent::DocumentLoaded { id, content }]
+            }
+            AppCommand::OverwriteDocument(id) => {
+                let root = &self
+                    .state
+                    .workspace
+                    .as_ref()
+                    .ok_or(AppError::WorkspaceNotOpen)?
+                    .root;
+                let entry = self
+                    .state
+                    .documents
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .ok_or_else(|| AppError::DocumentNotFound(id.as_str().to_owned()))?;
+                let content = entry
+                    .content
+                    .as_ref()
+                    .ok_or_else(|| AppError::DocumentNotOpen(id.as_str().to_owned()))?;
+                self.filesystem.write_document(root, &id, content)?;
+                vec![AppEvent::DocumentSaved { id }]
             }
         };
         Ok(events)
@@ -654,6 +783,71 @@ mod tests {
             fs::read_to_string(dir.path().join("note.md")).unwrap(),
             "edited"
         );
+    }
+
+    #[test]
+    fn refresh_updates_clean_documents_and_workspace_search() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("note.md"), "old text").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        app.dispatch(AppCommand::OpenDocument(id("note.md")))
+            .unwrap();
+        app.dispatch(AppCommand::SetSearchQuery("new".into()))
+            .unwrap();
+        fs::write(dir.path().join("note.md"), "new text").unwrap();
+        fs::write(dir.path().join("added.txt"), "new file").unwrap();
+        let refreshed = app.dispatch(AppCommand::RefreshWorkspace).unwrap();
+        assert_eq!(refreshed.active_document.unwrap().content, "new text");
+        assert_eq!(refreshed.documents.len(), 2);
+        assert_eq!(refreshed.search_results.len(), 2);
+        let revision = refreshed.revision;
+        assert_eq!(
+            app.dispatch(AppCommand::RefreshWorkspace).unwrap().revision,
+            revision
+        );
+    }
+
+    #[test]
+    fn external_edits_block_save_until_reload_or_explicit_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "base").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        app.dispatch(AppCommand::OpenDocument(id("note.md")))
+            .unwrap();
+        app.dispatch(AppCommand::ChangeDocument {
+            id: id("note.md"),
+            content: "local".into(),
+        })
+        .unwrap();
+        fs::write(&path, "external").unwrap();
+        assert!(matches!(
+            app.dispatch(AppCommand::SaveDocument(id("note.md"))),
+            Err(AppError::ExternalChanges(_))
+        ));
+        let conflicted = app.dispatch(AppCommand::RefreshWorkspace).unwrap();
+        let active = conflicted.active_document.unwrap();
+        assert_eq!(active.content, "local");
+        assert!(active.dirty && active.external_change);
+        app.dispatch(AppCommand::ReloadDocument(id("note.md")))
+            .unwrap();
+        assert_eq!(app.snapshot().active_document.unwrap().content, "external");
+        app.dispatch(AppCommand::ChangeDocument {
+            id: id("note.md"),
+            content: "local again".into(),
+        })
+        .unwrap();
+        fs::remove_file(&path).unwrap();
+        app.dispatch(AppCommand::RefreshWorkspace).unwrap();
+        assert!(app.snapshot().active_document.unwrap().external_change);
+        app.dispatch(AppCommand::OverwriteDocument(id("note.md")))
+            .unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "local again");
+        assert!(!app.snapshot().active_document.unwrap().external_change);
     }
 
     #[test]

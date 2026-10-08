@@ -19,6 +19,7 @@ struct Ui {
     sidebar_rows: Rc<RefCell<Vec<SidebarRow>>>,
     search: gtk::SearchEntry,
     files_placeholder: gtk::Label,
+    conflict_banner: gtk::Box,
     editor: gtk::TextView,
     buffer: gtk::TextBuffer,
     heading: gtk::Label,
@@ -68,7 +69,11 @@ impl Ui {
             .borrow()
             .get(self.files.selected() as usize)
             .cloned();
-        let results_changed = self.snapshot.borrow().search_results != snapshot.search_results;
+        let results_changed = {
+            let previous = self.snapshot.borrow();
+            previous.search_results != snapshot.search_results
+                || previous.documents != snapshot.documents
+        };
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         self.window.set_title(Some(
             snapshot
@@ -91,6 +96,12 @@ impl Ui {
             } else {
                 "No matching files"
             });
+        self.conflict_banner.set_visible(
+            snapshot
+                .active_document
+                .as_ref()
+                .is_some_and(|document| document.external_change),
+        );
         self.counter
             .set_label(&format!("Counter: {}", snapshot.diagnostic_counter));
         self.save.set_sensitive(
@@ -135,7 +146,15 @@ impl Ui {
                 let document = &group[0];
                 let file = adw::SidebarItem::new(&document.title);
                 file.set_icon_paintable(Some(&icon_for(document.id.as_str())));
-                if document.dirty {
+                if snapshot
+                    .documents
+                    .iter()
+                    .any(|entry| entry.id == document.id && entry.external_change)
+                {
+                    let marker = gtk::Label::new(Some("⚠"));
+                    marker.set_tooltip_text(Some("Changed on disk"));
+                    file.set_suffix(Some(&marker));
+                } else if document.dirty {
                     file.set_suffix(Some(&gtk::Label::new(Some("●"))));
                 }
                 section.append(file);
@@ -332,7 +351,26 @@ fn build_window(app: &adw::Application) {
     sidebar_view.set_content(Some(&sidebar_content));
     let content_view = adw::ToolbarView::new();
     content_view.add_top_bar(&content_header);
-    content_view.set_content(Some(&editor_scroll));
+    let conflict_banner = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    conflict_banner.add_css_class("warning");
+    conflict_banner.set_margin_start(8);
+    conflict_banner.set_margin_end(8);
+    conflict_banner.set_margin_top(8);
+    conflict_banner.set_margin_bottom(8);
+    let conflict_label = gtk::Label::new(Some("This file changed on disk"));
+    conflict_label.set_hexpand(true);
+    conflict_label.set_xalign(0.0);
+    conflict_banner.append(&conflict_label);
+    let reload = gtk::Button::with_label("Reload (discard edits)");
+    let overwrite = gtk::Button::with_label("Overwrite disk");
+    conflict_banner.append(&reload);
+    conflict_banner.append(&overwrite);
+    conflict_banner.set_visible(false);
+    let content_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content_body.append(&conflict_banner);
+    editor_scroll.set_vexpand(true);
+    content_body.append(&editor_scroll);
+    content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar_view));
     split.set_content(Some(&content_view));
@@ -377,6 +415,7 @@ fn build_window(app: &adw::Application) {
         sidebar_rows: Rc::new(RefCell::new(Vec::new())),
         search,
         files_placeholder,
+        conflict_banner,
         editor,
         buffer,
         heading,
@@ -465,7 +504,7 @@ fn build_window(app: &adw::Application) {
                     == Some(row.id())
                 && let Some(location) = row.location()
             {
-                ui.select_match(&location);
+                ui.select_match(location);
             }
         });
     }
@@ -506,6 +545,44 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
+        reload.connect_clicked(move |_| {
+            let id = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.clone());
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::ReloadDocument(id));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        overwrite.connect_clicked(move |_| {
+            let id = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.clone());
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::OverwriteDocument(id));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+            let has_workspace = ui.snapshot.borrow().workspace_root.is_some();
+            if has_workspace {
+                ui.dispatch(AppCommand::RefreshWorkspace);
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+    {
+        let ui = ui.clone();
         diagnostic.connect_clicked(move |_| ui.dispatch(AppCommand::IncrementDiagnostic));
     }
     window.present();
@@ -528,7 +605,8 @@ fn build_window(app: &adw::Application) {
         app.quit();
     }
     if let Some(path) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE") {
-        ui.dispatch(AppCommand::OpenWorkspace(PathBuf::from(path)));
+        let workspace_path = PathBuf::from(path);
+        ui.dispatch(AppCommand::OpenWorkspace(workspace_path.clone()));
         assert_eq!(
             window.title().as_deref(),
             ui.snapshot.borrow().workspace_name.as_deref()
@@ -610,6 +688,30 @@ fn build_window(app: &adw::Application) {
             assert_eq!(ui.search.text(), "unlikely-no-match");
             ui.dispatch(AppCommand::SetSearchQuery(String::new()));
             assert_eq!(ui.snapshot.borrow().search_results.len(), 1);
+            let document_path = workspace_path.join(id.as_str());
+            std::fs::write(&document_path, "external clean edit").unwrap();
+            ui.dispatch(AppCommand::RefreshWorkspace);
+            assert_eq!(
+                ui.buffer
+                    .text(&ui.buffer.start_iter(), &ui.buffer.end_iter(), false),
+                "external clean edit"
+            );
+            assert!(!ui.conflict_banner.is_visible());
+            ui.buffer.set_text("local edit");
+            std::fs::write(&document_path, "external conflict").unwrap();
+            ui.dispatch(AppCommand::RefreshWorkspace);
+            assert!(ui.conflict_banner.is_visible());
+            ui.save.emit_clicked();
+            assert_eq!(
+                std::fs::read_to_string(&document_path).unwrap(),
+                "external conflict"
+            );
+            overwrite.emit_clicked();
+            assert_eq!(
+                std::fs::read_to_string(&document_path).unwrap(),
+                "local edit"
+            );
+            assert!(!ui.conflict_banner.is_visible());
             println!("GTK workspace edit/save smoke test passed");
         }
         app.quit();

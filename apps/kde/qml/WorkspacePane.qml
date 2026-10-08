@@ -79,6 +79,13 @@ Item {
         return indices
     }
 
+    Timer {
+        interval: 2000
+        repeat: true
+        running: root.controller && root.controller.workspace_name.length > 0
+        onTriggered: if (root.flushEditor()) root.controller.refresh_workspace()
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 8
@@ -125,7 +132,7 @@ Item {
                     icon.width: 20
                     icon.height: 20
                     display: AbstractButton.TextBesideIcon
-                    enabled: root.controller.active_document_dirty
+                    enabled: root.controller.active_document_dirty && !root.controller.active_document_external_change
                     onClicked: root.saveActive()
                 }
             }
@@ -186,6 +193,11 @@ Item {
                                         elide: Text.ElideRight
                                     }
                                     Label {
+                                        text: "⚠"
+                                        visible: root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
+                                        color: palette.highlight
+                                    }
+                                    Label {
                                         text: "●"
                                         visible: root.controller.dirty_document_ids.indexOf(fileGroup.fileId) !== -1
                                     }
@@ -229,6 +241,24 @@ Item {
         }
         RowLayout {
             Layout.fillWidth: true
+            Layout.leftMargin: 8
+            Layout.rightMargin: 8
+            visible: root.controller.active_document_external_change
+            Label {
+                text: "This file changed on disk"
+                Layout.fillWidth: true
+            }
+            Button {
+                text: "Reload (discard edits)"
+                onClicked: root.controller.reload_document()
+            }
+            Button {
+                text: "Overwrite disk"
+                onClicked: if (root.flushEditor()) root.controller.overwrite_document()
+            }
+        }
+        RowLayout {
+            Layout.fillWidth: true
             Layout.margins: 8
             Label { text: root.controller.active_document_id || "No document" }
             Label {
@@ -244,6 +274,7 @@ Item {
         target: root.controller
         function onActive_document_textChanged() {
             if (editor.text !== root.controller.active_document_text) {
+                root.selectedResultIndex = -1
                 root.syncingEditor = true
                 editor.text = root.controller.active_document_text
                 root.syncingEditor = false

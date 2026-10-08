@@ -11,6 +11,7 @@ pub struct DocumentSummary {
     pub id: String,
     pub title: String,
     pub dirty: bool,
+    pub external_change: bool,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -19,6 +20,7 @@ pub struct DocumentSnapshot {
     pub title: String,
     pub content: String,
     pub dirty: bool,
+    pub external_change: bool,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -102,6 +104,7 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                     id: doc.id.as_str().to_owned(),
                     title: doc.title,
                     dirty: doc.dirty,
+                    external_change: doc.external_change,
                 })
                 .collect(),
             active_document: snapshot.active_document.map(|doc| DocumentSnapshot {
@@ -109,6 +112,7 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                 title: doc.title,
                 content: doc.content,
                 dirty: doc.dirty,
+                external_change: doc.external_change,
             }),
         }
     }
@@ -124,6 +128,8 @@ pub enum WorkspaceError {
     DocumentNotOpen(String),
     #[error("save modified documents before changing workspaces")]
     UnsavedChanges,
+    #[error("document changed on disk: {0}")]
+    ExternalChanges(String),
     #[error("invalid document name")]
     InvalidDocumentId,
     #[error("filesystem error: {0}")]
@@ -145,6 +151,7 @@ impl From<AppError> for WorkspaceError {
             AppError::DocumentNotFound(id) => Self::DocumentNotFound(id),
             AppError::DocumentNotOpen(id) => Self::DocumentNotOpen(id),
             AppError::UnsavedChanges => Self::UnsavedChanges,
+            AppError::ExternalChanges(id) => Self::ExternalChanges(id),
             AppError::Filesystem(error) => Self::Filesystem(error.to_string()),
             AppError::Storage(error) => Self::Storage(error.to_string()),
             AppError::CounterOverflow => Self::CounterOverflow,
@@ -197,6 +204,10 @@ impl WorkspaceApplication {
         self.dispatch(AppCommand::OpenWorkspace(PathBuf::from(path)))
     }
 
+    pub fn refresh_workspace(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::RefreshWorkspace)
+    }
+
     pub fn open_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
         self.dispatch(AppCommand::OpenDocument(Self::parse_id(id)?))
     }
@@ -214,6 +225,14 @@ impl WorkspaceApplication {
 
     pub fn save_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
         self.dispatch(AppCommand::SaveDocument(Self::parse_id(id)?))
+    }
+
+    pub fn reload_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::ReloadDocument(Self::parse_id(id)?))
+    }
+
+    pub fn overwrite_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::OverwriteDocument(Self::parse_id(id)?))
     }
 }
 

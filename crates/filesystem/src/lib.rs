@@ -3,7 +3,7 @@
 use native_workspace_domain::{DocumentId, Workspace};
 use std::{
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -121,8 +121,26 @@ impl WorkspaceFilesystem for RealFilesystem {
         id: &DocumentId,
         content: &str,
     ) -> Result<(), FilesystemError> {
-        let path = Self::document_path(root, id)?;
-        fs::write(&path, content).map_err(|source| FilesystemError::Io { path, source })
+        let path = root.join(id.as_str());
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::write(&path, content).map_err(|source| FilesystemError::Io { path, source })
+            }
+            Ok(_) => Err(FilesystemError::InvalidDocument(path)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .map_err(|source| FilesystemError::Io {
+                        path: path.clone(),
+                        source,
+                    })?;
+                file.write_all(content.as_bytes())
+                    .map_err(|source| FilesystemError::Io { path, source })
+            }
+            Err(source) => Err(FilesystemError::Io { path, source }),
+        }
     }
 }
 
@@ -165,7 +183,7 @@ mod tests {
         let filesystem = RealFilesystem;
         assert_eq!(
             filesystem.open_workspace(dir.path()).unwrap().1,
-            [id.clone()]
+            std::slice::from_ref(&id)
         );
         assert!(
             filesystem

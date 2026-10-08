@@ -10,6 +10,8 @@ Phase 3 adds a versioned SQLite metadata store for recent workspaces. Each front
 
 Phase 4 adds a search field inside each sidebar. The Rust application core matches filenames and every occurrence in file contents without case sensitivity. Each occurrence has its own preview and opens at the matching text in the editor. Unsaved edits are searchable. SQLite indexing is a later step.
 
+Phase 5 checks the open workspace every two seconds for files added, removed, or changed outside the app. Clean open documents reload automatically, while local edits are preserved when the disk version changes. A conflict notice offers an explicit choice to reload from disk or overwrite it. Normal Save refuses to replace a changed disk version, including changes detected before the next check.
+
 Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build or start a frontend with cargo xtask build-macos, build-gnome, build-kde or their run-* counterparts. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
 
 See [architecture](docs/architecture.md), [development](docs/development.md), [macOS](docs/macos.md), [GNOME](docs/gnome.md), and [KDE](docs/kde.md).

@@ -1,9 +1,11 @@
+import Combine
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
     @State private var choosingWorkspace = false
+    @State private var resolvingExternalChange = false
 
     private struct SearchMatchRow {
         let index: Int
@@ -74,6 +76,11 @@ struct ContentView: View {
                                     }
                                     Text(group.file.title)
                                     Spacer(minLength: 0)
+                                    if store.documents.first(where: { $0.id == group.id })?.externalChange == true {
+                                        Image(systemName: "exclamationmark.triangle.fill")
+                                            .foregroundStyle(.orange)
+                                            .help("Changed on disk")
+                                    }
                                     if group.file.dirty {
                                         Circle().fill(.secondary).frame(width: 6, height: 6)
                                     }
@@ -142,6 +149,17 @@ struct ContentView: View {
         } detail: {
             VStack(spacing: 0) {
                 if let active = store.activeDocument {
+                    if active.externalChange {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("This file changed on disk")
+                            Spacer()
+                            Button("Resolve…") { resolvingExternalChange = true }
+                        }
+                        .font(.callout)
+                        .padding(8)
+                    }
                     NoWrapTextEditor(documentID: active.id, text: Binding(
                         get: { store.editorText },
                         set: { store.changeDocument($0) }
@@ -191,6 +209,15 @@ struct ContentView: View {
             case .success(let url): store.openWorkspace(url)
             case .failure: break
             }
+        }
+        .confirmationDialog("This file changed on disk", isPresented: $resolvingExternalChange) {
+            Button("Reload from Disk", role: .destructive) { store.reloadDocument() }
+            Button("Keep Mine and Overwrite", role: .destructive) { store.overwriteDocument() }
+        } message: {
+            Text("Choose which version to keep. Reloading discards your local edits.")
+        }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            store.refreshWorkspace()
         }
         .frame(minWidth: 680, minHeight: 420)
     }

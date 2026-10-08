@@ -70,6 +70,25 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func refreshWorkspace() {
+        guard workspaceName != nil else { return }
+        do {
+            try flushLocalEdits()
+            let snapshot = try core.refreshWorkspace()
+            if snapshot.revision != revision {
+                if snapshot.activeDocument?.content != activeDocument?.content {
+                    selectedSearchLocation = nil
+                    selectedSearchResultIndex = nil
+                    searchNavigationRevision &+= 1
+                }
+                apply(snapshot)
+                errorMessage = nil
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func openDocument(_ id: String) {
         do {
             try flushLocalEdits()
@@ -113,6 +132,30 @@ final class WorkspaceStore: ObservableObject {
         do {
             try flushLocalEdits()
             apply(try core.saveDocument(id: id))
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func reloadDocument() {
+        guard let id = activeDocument?.id else { return }
+        do {
+            apply(try core.reloadDocument(id: id))
+            selectedSearchLocation = nil
+            selectedSearchResultIndex = nil
+            searchNavigationRevision &+= 1
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func overwriteDocument() {
+        guard let id = activeDocument?.id else { return }
+        do {
+            try flushLocalEdits()
+            apply(try core.overwriteDocument(id: id))
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription

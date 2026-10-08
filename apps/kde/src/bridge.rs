@@ -28,11 +28,13 @@ pub mod qobject {
         #[qproperty(QStringList, search_result_ends)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
+        #[qproperty(QStringList, conflicted_document_ids)]
         #[qproperty(QStringList, recent_workspace_paths)]
         #[qproperty(QStringList, recent_workspace_names)]
         #[qproperty(QString, active_document_id)]
         #[qproperty(QString, active_document_text)]
         #[qproperty(bool, active_document_dirty)]
+        #[qproperty(bool, active_document_external_change)]
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
 
@@ -45,11 +47,17 @@ pub mod qobject {
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
+        fn refresh_workspace(self: Pin<&mut Self>);
+        #[qinvokable]
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
         #[qinvokable]
         fn save_document(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn reload_document(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn overwrite_document(self: Pin<&mut Self>);
     }
 }
 
@@ -67,11 +75,13 @@ pub struct AppControllerRust {
     search_result_ends: QStringList,
     document_ids: QStringList,
     dirty_document_ids: QStringList,
+    conflicted_document_ids: QStringList,
     recent_workspace_paths: QStringList,
     recent_workspace_names: QStringList,
     active_document_id: QString,
     active_document_text: QString,
     active_document_dirty: bool,
+    active_document_external_change: bool,
     error_message: QString,
     application: Application,
 }
@@ -198,18 +208,28 @@ impl qobject::AppController {
                 .map(|doc| QString::from(doc.id.as_str()))
                 .collect(),
         );
+        self.as_mut().set_conflicted_document_ids(
+            snapshot
+                .documents
+                .iter()
+                .filter(|doc| doc.external_change)
+                .map(|doc| QString::from(doc.id.as_str()))
+                .collect(),
+        );
         match snapshot.active_document {
             Some(doc) => {
                 self.as_mut()
                     .set_active_document_id(QString::from(doc.id.as_str()));
                 self.as_mut()
                     .set_active_document_text(QString::from(doc.content));
-                self.set_active_document_dirty(doc.dirty);
+                self.as_mut().set_active_document_dirty(doc.dirty);
+                self.set_active_document_external_change(doc.external_change);
             }
             None => {
                 self.as_mut().set_active_document_id(QString::default());
                 self.as_mut().set_active_document_text(QString::default());
-                self.set_active_document_dirty(false);
+                self.as_mut().set_active_document_dirty(false);
+                self.set_active_document_external_change(false);
             }
         }
     }
@@ -243,6 +263,22 @@ impl qobject::AppController {
         self.dispatch(AppCommand::OpenWorkspace(path));
     }
 
+    pub fn refresh_workspace(mut self: Pin<&mut Self>) {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .dispatch(AppCommand::RefreshWorkspace);
+        match result {
+            Ok(snapshot) if snapshot.revision != self.rust().revision => {
+                self.as_mut().set_error_message(QString::default());
+                self.update_snapshot(snapshot);
+            }
+            Ok(_) => {}
+            Err(error) => self.set_error_message(QString::from(error.to_string())),
+        }
+    }
+
     pub fn open_document(mut self: Pin<&mut Self>, id: &QString) {
         match DocumentId::parse(id.to_string()) {
             Ok(id) => self.dispatch(AppCommand::OpenDocument(id)),
@@ -269,6 +305,26 @@ impl qobject::AppController {
         let id = self.rust().active_document_id.to_string();
         match DocumentId::parse(id) {
             Ok(id) => self.dispatch(AppCommand::SaveDocument(id)),
+            Err(_) => self
+                .as_mut()
+                .set_error_message(QString::from("No document is open")),
+        }
+    }
+
+    pub fn reload_document(mut self: Pin<&mut Self>) {
+        let id = self.rust().active_document_id.to_string();
+        match DocumentId::parse(id) {
+            Ok(id) => self.dispatch(AppCommand::ReloadDocument(id)),
+            Err(_) => self
+                .as_mut()
+                .set_error_message(QString::from("No document is open")),
+        }
+    }
+
+    pub fn overwrite_document(mut self: Pin<&mut Self>) {
+        let id = self.rust().active_document_id.to_string();
+        match DocumentId::parse(id) {
+            Ok(id) => self.dispatch(AppCommand::OverwriteDocument(id)),
             Err(_) => self
                 .as_mut()
                 .set_error_message(QString::from("No document is open")),

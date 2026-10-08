@@ -37,6 +37,26 @@ struct BridgeSmoke {
         precondition(contentMatch.searchResults[1].location?.endUtf16 == 14)
         let diskContent = try String(contentsOf: file, encoding: .utf8)
         precondition(diskContent == "after 💡 after")
+        try "external clean edit".write(to: file, atomically: true, encoding: .utf8)
+        let refreshed = try app.refreshWorkspace()
+        precondition(refreshed.activeDocument?.content == "external clean edit")
+        precondition(refreshed.activeDocument?.externalChange == false)
+        _ = try app.changeDocument(id: "README.md", content: "local edit")
+        try "external conflict".write(to: file, atomically: true, encoding: .utf8)
+        var saveWasBlocked = false
+        do {
+            _ = try app.saveDocument(id: "README.md")
+        } catch {
+            saveWasBlocked = true
+        }
+        precondition(saveWasBlocked)
+        let conflicted = try app.refreshWorkspace()
+        precondition(conflicted.activeDocument?.content == "local edit")
+        precondition(conflicted.activeDocument?.externalChange == true)
+        let overwritten = try app.overwriteDocument(id: "README.md")
+        precondition(overwritten.activeDocument?.externalChange == false)
+        let overwrittenContent = try String(contentsOf: file, encoding: .utf8)
+        precondition(overwrittenContent == "local edit")
         print("Swift → UniFFI → Rust workspace smoke test passed")
     }
 }
