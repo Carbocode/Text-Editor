@@ -29,3 +29,8 @@ swiftc -parse-as-library \
   apps/macos/WorkspaceTests/EditorLayoutSmoke.swift \
   -o apps/macos/.build/EditorLayoutSmoke
 apps/macos/.build/EditorLayoutSmoke
+swiftc -parse-as-library \
+  apps/macos/Workspace/WorkspaceIcons.swift \
+  apps/macos/WorkspaceTests/IconSmoke.swift \
+  -o apps/macos/.build/IconSmoke
+apps/macos/.build/IconSmoke
