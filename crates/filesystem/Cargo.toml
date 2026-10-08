@@ -1,0 +1,16 @@
+[package]
+name = "native-workspace-filesystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-domain = { path = "../domain" }
+grep-regex = "0.1.14"
+grep-searcher = "0.1.17"
+notify = "8.2"
+regex = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

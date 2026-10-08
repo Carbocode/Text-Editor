@@ -1,0 +1,15 @@
+.workspace-sidebar,
+scrolledwindow.workspace-files-scroll,
+scrolledwindow.workspace-files-scroll > viewport,
+listview.compact-files {
+  background: transparent;
+}
+
+listview.compact-files row {
+  min-height: 24px;
+  padding: 0;
+}
+
+listview.compact-files row > box {
+  min-height: 0;
+}

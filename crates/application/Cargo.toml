@@ -1,0 +1,15 @@
+[package]
+name = "native-workspace-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-domain = { path = "../domain" }
+native-workspace-filesystem = { path = "../filesystem" }
+native-workspace-storage = { path = "../storage" }
+thiserror = "2"
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
