@@ -2,12 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQml.Models
+import org.nativeworkspace.Syntax 1.0
 
 Item {
     id: root
     property var controller
     property bool enableBrowse: false
     property bool syncingEditor: false
+    property bool updatingHighlight: false
     property int selectedResultIndex: -1
     property alias editorText: editor.text
     property alias editorSelectedText: editor.selectedText
@@ -44,7 +46,17 @@ Item {
         function onSearch_queryChanged() { root.scheduleSidebarUpdate() }
     }
 
-    Component.onCompleted: scheduleSidebarUpdate()
+    Component.onCompleted: {
+        scheduleSidebarUpdate()
+        updateHighlight()
+    }
+
+    function updateHighlight() {
+        if (updatingHighlight || !root.controller) return
+        updatingHighlight = true
+        syntaxHighlighter.spans = root.controller.highlight_document(editor.text)
+        updatingHighlight = false
+    }
 
     function scheduleSidebarUpdate() {
         sidebarEntriesDirty = true
@@ -435,19 +447,84 @@ Item {
                     }
                 }
             }
-            ScrollView {
-                id: editorScroll
+            RowLayout {
                 SplitView.fillWidth: true
-                TextArea {
-                    id: editor
-                    font.family: "monospace"
-                    enabled: root.controller.active_document_id.length > 0
-                    placeholderText: "Select a document"
-                    onTextChanged: {
-                        if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
-                            root.selectedResultIndex = -1
-                            root.controller.change_document(text)
+                spacing: 0
+                FontMetrics { id: editorMetrics; font: editor.font }
+                Canvas {
+                    id: lineNumbers
+                    Layout.preferredWidth: 48
+                    Layout.fillHeight: true
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.fillStyle = "#808080"
+                        ctx.font = (editorMetrics.font.pixelSize > 0 ? editorMetrics.font.pixelSize : 12) + "px monospace"
+                        ctx.textAlign = "right"
+                        var lineHeight = editorMetrics.height
+                        var scrollY = editorScroll.contentItem.contentY
+                        var first = Math.max(0, Math.floor(scrollY / lineHeight) - 1)
+                        var last = Math.min(editor.lineCount, first + Math.ceil(height / lineHeight) + 3)
+                        for (var line = first; line < last; ++line)
+                            ctx.fillText(String(line + 1), width - 8, editor.topPadding + (line + 1) * lineHeight - scrollY)
+                    }
+                }
+                ScrollView {
+                    id: editorScroll
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    TextArea {
+                        id: editor
+                        font.family: "monospace"
+                        wrapMode: TextEdit.NoWrap
+                        EditorSyntaxHighlighter {
+                            id: syntaxHighlighter
+                            textDocument: editor.textDocument
                         }
+                        enabled: root.controller.active_document_id.length > 0
+                        placeholderText: "Select a document"
+                        onTextChanged: {
+                            root.updateHighlight()
+                            lineNumbers.requestPaint()
+                            minimap.requestPaint()
+                            if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
+                                root.selectedResultIndex = -1
+                                root.controller.change_document(text)
+                            }
+                        }
+                    }
+                }
+                Canvas {
+                    id: minimap
+                    Layout.preferredWidth: 80
+                    Layout.fillHeight: true
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.fillStyle = "#80808066"
+                        var lines = editor.text.split("\n")
+                        var stride = Math.max(1, Math.ceil(lines.length / Math.max(1, height / 2)))
+                        for (var i = 0; i < lines.length; i += stride)
+                            ctx.fillRect(4, i / lines.length * height, Math.min(width - 8, lines[i].length * 1.2), 1)
+                        var flick = editorScroll.contentItem
+                        var ratio = flick.contentHeight > 0 ? height / flick.contentHeight : 1
+                        ctx.fillStyle = "#80808044"
+                        ctx.fillRect(0, flick.contentY * ratio, width, Math.max(8, flick.height * ratio))
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        onPressed: {
+                            var flick = editorScroll.contentItem
+                            flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                mouseY / minimap.height * flick.contentHeight - flick.height / 2))
+                        }
+                    }
+                }
+                Connections {
+                    target: editorScroll.contentItem
+                    function onContentYChanged() {
+                        lineNumbers.requestPaint()
+                        minimap.requestPaint()
                     }
                 }
             }
@@ -485,6 +562,7 @@ Item {
 
     Connections {
         target: root.controller
+        function onActive_document_idChanged() { root.updateHighlight() }
         function onActive_document_textChanged() {
             if (editor.text !== root.controller.active_document_text) {
                 root.selectedResultIndex = -1

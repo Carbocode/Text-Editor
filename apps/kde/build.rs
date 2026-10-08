@@ -24,6 +24,8 @@ fn main() {
     .qrc_resources(["qml/icons/action-open.png", "qml/icons/action-save.png"])
     .qrc_resources(QResources::new().resource(resources))
     .qt_module("Network")
+    .qt_module("Quick")
+    .cpp_files(["src/syntax_highlighter.h", "src/syntax_highlighter.cpp"])
     .files(["src/bridge.rs"])
     .build();
 }

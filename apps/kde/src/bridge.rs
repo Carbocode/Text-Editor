@@ -66,6 +66,8 @@ pub mod qobject {
         #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
         #[qinvokable]
+        fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList;
+        #[qinvokable]
         fn save_document(self: Pin<&mut Self>);
         #[qinvokable]
         fn reload_document(self: Pin<&mut Self>);
@@ -103,6 +105,22 @@ pub struct AppControllerRust {
 }
 
 impl qobject::AppController {
+    pub fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList {
+        let file_name = self.rust().active_document_id.to_string();
+        let text = text.to_string();
+        native_workspace_syntax::highlight(&file_name, &text)
+            .into_iter()
+            .map(|token| {
+                QString::from(format!(
+                    "{}:{}:{}",
+                    token.start_utf16,
+                    token.end_utf16,
+                    token.kind.code()
+                ))
+            })
+            .collect()
+    }
+
     fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
         let result = self.as_mut().rust_mut().application.dispatch(command);
         match result {

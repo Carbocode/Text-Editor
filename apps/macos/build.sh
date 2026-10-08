@@ -25,8 +25,13 @@ swiftc -I apps/macos/generated \
   -o apps/macos/.build/BridgeSmoke
 apps/macos/.build/BridgeSmoke
 swiftc -parse-as-library \
+  -I apps/macos/generated \
+  -Xcc -fmodule-map-file=apps/macos/generated/native_workspace_ffi_swiftFFI.modulemap \
+  apps/macos/generated/native_workspace_ffi_swift.swift \
+  apps/macos/Workspace/SyntaxHighlighting.swift \
   apps/macos/Workspace/NoWrapTextEditor.swift \
   apps/macos/WorkspaceTests/EditorLayoutSmoke.swift \
+  target/debug/libnative_workspace_ffi_swift.a \
   -o apps/macos/.build/EditorLayoutSmoke
 apps/macos/.build/EditorLayoutSmoke
 swiftc -parse-as-library \

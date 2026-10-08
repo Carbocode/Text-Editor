@@ -7,6 +7,25 @@ use std::{path::PathBuf, sync::Mutex};
 uniffi::setup_scaffolding!();
 
 #[derive(Clone, uniffi::Record)]
+pub struct SyntaxToken {
+    pub start_utf16: u64,
+    pub end_utf16: u64,
+    pub kind: u8,
+}
+
+#[uniffi::export]
+pub fn highlight_document(file_name: String, text: String) -> Vec<SyntaxToken> {
+    native_workspace_syntax::highlight(&file_name, &text)
+        .into_iter()
+        .map(|token| SyntaxToken {
+            start_utf16: token.start_utf16 as u64,
+            end_utf16: token.end_utf16 as u64,
+            kind: token.kind.code(),
+        })
+        .collect()
+}
+
+#[derive(Clone, uniffi::Record)]
 pub struct DocumentSummary {
     pub id: String,
     pub title: String,

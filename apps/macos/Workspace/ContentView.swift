@@ -147,6 +147,9 @@ struct ContentView: View {
                     }
                     Text(path.split(separator: "/").last.map(String.init) ?? path)
                 }
+                .padding(.leading, CGFloat(row.depth) * 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         case .file(let group):
@@ -164,6 +167,9 @@ struct ContentView: View {
                     }
                     if group.file.dirty { Circle().fill(.secondary).frame(width: 6, height: 6) }
                 }
+                .padding(.leading, CGFloat(row.depth) * 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
@@ -179,6 +185,9 @@ struct ContentView: View {
                     if let snippet = match.result.snippet { Text(snippet).font(.caption).lineLimit(1) }
                     Spacer(minLength: 0)
                 }
+                .padding(.leading, CGFloat(row.depth) * 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .listRowBackground(store.selectedSearchResultIndex == match.index
@@ -213,7 +222,7 @@ struct ContentView: View {
                 .disabled(store.workspaceName == nil)
                 List {
                     ForEach(sidebarRows) { row in
-                        sidebarRow(row).padding(.leading, CGFloat(row.depth) * 14)
+                        sidebarRow(row)
                     }
                 }
                 .onReceive(store.$workspaceRoot) { root in

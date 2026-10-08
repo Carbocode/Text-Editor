@@ -1,4 +1,6 @@
+mod editor_chrome;
 mod material_icons;
+mod syntax;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -303,6 +305,13 @@ impl Ui {
         if self.buffer.text(&start, &end, false).as_str() != content {
             self.buffer.set_text(content);
         }
+        syntax::apply(
+            &self.buffer,
+            snapshot
+                .active_document
+                .as_ref()
+                .map_or("", |doc| doc.id.as_str()),
+        );
         self.snapshot.replace(snapshot);
         self.updating.set(false);
     }
@@ -734,7 +743,7 @@ fn build_window(app: &adw::Application) {
     let content_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content_body.append(&conflict_banner);
     editor_scroll.set_vexpand(true);
-    content_body.append(&editor_scroll);
+    content_body.append(&editor_chrome::wrap(&editor, &editor_scroll));
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
     split.set_sidebar(Some(&sidebar_view));
@@ -890,6 +899,15 @@ fn build_window(app: &adw::Application) {
         ui.buffer.clone().connect_changed(move |buffer| {
             if ui.updating.get() {
                 return;
+            }
+            let file_name = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.as_str().to_owned());
+            if let Some(file_name) = file_name.as_deref() {
+                syntax::apply(buffer, file_name);
             }
             let id = ui
                 .snapshot
