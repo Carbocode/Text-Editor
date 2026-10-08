@@ -85,6 +85,7 @@ Item {
             for (var k = 0; k < root.controller.directory_ids.length; ++k) {
                 var directory = root.controller.directory_ids[k]
                 directories.push(directory)
+                seenDirectories["#" + directory] = true
             }
         }
         if (root.controller.search_query.length > 0) {
@@ -112,7 +113,22 @@ Item {
             if (visible(directories[d])) paths.push({ path: directories[d], directory: true })
         for (var f = 0; f < files.length; ++f)
             if (visible(files[f])) paths.push({ path: files[f], directory: false })
-        paths.sort(function(a, b) { return a.path.localeCompare(b.path) })
+        paths.sort(function(a, b) {
+            var aParts = a.path.split("/")
+            var bParts = b.path.split("/")
+            var aPrefix = ""
+            var bPrefix = ""
+            for (var i = 0; i < Math.min(aParts.length, bParts.length); ++i) {
+                aPrefix += (i ? "/" : "") + aParts[i]
+                bPrefix += (i ? "/" : "") + bParts[i]
+                if (aParts[i] === bParts[i]) continue
+                var aDirectory = !!seenDirectories["#" + aPrefix]
+                var bDirectory = !!seenDirectories["#" + bPrefix]
+                if (aDirectory !== bDirectory) return aDirectory ? -1 : 1
+                return aParts[i].localeCompare(bParts[i])
+            }
+            return aParts.length - bParts.length
+        })
         return paths
     }
 
@@ -250,9 +266,10 @@ Item {
                                     Image {
                                         visible: !fileGroup.isDirectory
                                         source: root.controller.file_icon(fileGroup.fileId)
-                                        sourceSize.width: 20
-                                        sourceSize.height: 20
+                                        sourceSize.width: 64
+                                        sourceSize.height: 64
                                         fillMode: Image.PreserveAspectFit
+                                        mipmap: true
                                         Layout.preferredWidth: 20
                                         Layout.preferredHeight: 20
                                     }
@@ -263,9 +280,10 @@ Item {
                                     Image {
                                         visible: fileGroup.isDirectory
                                         source: root.controller.folder_icon(fileGroup.fileId, root.controller.search_query.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false)
-                                        sourceSize.width: 20
-                                        sourceSize.height: 20
+                                        sourceSize.width: 64
+                                        sourceSize.height: 64
                                         fillMode: Image.PreserveAspectFit
+                                        mipmap: true
                                         Layout.preferredWidth: 20
                                         Layout.preferredHeight: 20
                                     }

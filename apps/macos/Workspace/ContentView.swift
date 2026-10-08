@@ -74,7 +74,18 @@ struct ContentView: View {
 
         var entries: [(String, SidebarOutlineRow.Kind)] = directoryPaths.map { ($0, .directory($0)) }
         entries += groups.map { ($0.id, .file($0)) }
-        entries.sort { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+        entries.sort { left, right in
+            let leftParts = left.0.split(separator: "/")
+            let rightParts = right.0.split(separator: "/")
+            for index in 0..<min(leftParts.count, rightParts.count) {
+                if leftParts[index] == rightParts[index] { continue }
+                let leftDirectory = directoryPaths.contains(leftParts.prefix(index + 1).joined(separator: "/"))
+                let rightDirectory = directoryPaths.contains(rightParts.prefix(index + 1).joined(separator: "/"))
+                if leftDirectory != rightDirectory { return leftDirectory }
+                return leftParts[index].localizedStandardCompare(rightParts[index]) == .orderedAscending
+            }
+            return leftParts.count < rightParts.count
+        }
         var rows: [SidebarOutlineRow] = []
         for (path, kind) in entries {
             let depth = path.split(separator: "/").count - 1

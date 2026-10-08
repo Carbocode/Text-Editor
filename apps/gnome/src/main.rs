@@ -18,7 +18,7 @@ struct Ui {
     window: adw::ApplicationWindow,
     core: Rc<RefCell<Application>>,
     snapshot: Rc<RefCell<AppSnapshot>>,
-    files: adw::Sidebar,
+    files: gtk::ListBox,
     sidebar_rows: Rc<RefCell<Vec<SidebarRow>>>,
     search: gtk::SearchEntry,
     search_spinner: gtk::Spinner,
@@ -75,11 +75,16 @@ impl Ui {
         let previous_selection = self
             .sidebar_rows
             .borrow()
-            .get(self.files.selected() as usize)
+            .get(
+                self.files
+                    .selected_row()
+                    .map_or(usize::MAX, |row| row.index() as usize),
+            )
             .cloned();
         let results_changed = {
             let previous = self.snapshot.borrow();
             previous.search_results != snapshot.search_results
+                || previous.search_query != snapshot.search_query
                 || previous.documents != snapshot.documents
                 || previous.directories != snapshot.directories
                 || self.force_sidebar.replace(false)
@@ -165,9 +170,10 @@ impl Ui {
             }
         }
         if results_changed {
-            self.files.remove_all();
+            while let Some(child) = self.files.first_child() {
+                self.files.remove(&child);
+            }
             let mut rows = Vec::new();
-            let section = adw::SidebarSection::new();
             let conflicted: std::collections::HashSet<_> = snapshot
                 .documents
                 .iter()
@@ -201,7 +207,12 @@ impl Ui {
                 }
             }
             paths.extend(groups.keys().cloned().map(|path| (path, false)));
-            paths.sort();
+            let directories: std::collections::HashSet<_> = paths
+                .iter()
+                .filter(|(_, is_directory)| *is_directory)
+                .map(|(path, _)| path.clone())
+                .collect();
+            paths.sort_by(|left, right| compare_sidebar_paths(left, right, &directories));
             paths.dedup();
             for (path, is_directory) in paths {
                 let depth = path.matches('/').count();
@@ -224,14 +235,17 @@ impl Ui {
                     continue;
                 }
                 let name = path.rsplit('/').next().unwrap_or(&path);
-                let indent = "\u{00a0}".repeat(depth * 3);
                 if is_directory {
                     let collapsed = snapshot.search_query.0.is_empty()
                         && self.collapsed_directories.borrow().contains(&path);
                     let marker = if collapsed { "▸" } else { "▾" };
-                    let item = adw::SidebarItem::new(&format!("{indent}{marker} {name}"));
-                    item.set_icon_paintable(Some(&folder_icon_for(&path, !collapsed)));
-                    section.append(item);
+                    self.files.append(&sidebar_row(
+                        name,
+                        depth,
+                        Some(marker),
+                        Some(&folder_icon_for(&path, !collapsed)),
+                        None,
+                    ));
                     rows.push(SidebarRow::Directory(path));
                     continue;
                 }
@@ -239,16 +253,20 @@ impl Ui {
                     continue;
                 };
                 let document = &group[0];
-                let file = adw::SidebarItem::new(&format!("{indent}{name}"));
-                file.set_icon_paintable(Some(&icon_for(document.id.as_str())));
-                if conflicted.contains(&document.id) {
-                    let marker = gtk::Label::new(Some("⚠"));
-                    marker.set_tooltip_text(Some("Changed on disk"));
-                    file.set_suffix(Some(&marker));
+                let suffix = if conflicted.contains(&document.id) {
+                    Some("⚠")
                 } else if document.dirty {
-                    file.set_suffix(Some(&gtk::Label::new(Some("●"))));
-                }
-                section.append(file);
+                    Some("●")
+                } else {
+                    None
+                };
+                self.files.append(&sidebar_row(
+                    name,
+                    depth,
+                    None,
+                    Some(&icon_for(document.id.as_str())),
+                    suffix,
+                ));
                 rows.push(SidebarRow::File(document.id.clone()));
                 for result in group.iter().filter(|result| result.location.is_some()) {
                     let location = result.location.as_ref().unwrap();
@@ -258,12 +276,11 @@ impl Ui {
                         }
                         None => format!("↳ {}:{}", location.line, location.column),
                     };
-                    let item = adw::SidebarItem::new(&format!("{indent}   {title}"));
-                    section.append(item);
+                    self.files
+                        .append(&sidebar_row(&title, depth + 1, None, None, None));
                     rows.push(SidebarRow::Match(result.clone()));
                 }
             }
-            self.files.append(section);
             self.sidebar_rows.replace(rows);
         }
         if let Some(active) = snapshot.active_document.as_ref() {
@@ -284,12 +301,13 @@ impl Ui {
                 }
             });
             if let Some(index) = index {
-                self.files.set_selected(index as u32);
+                self.files
+                    .select_row(self.files.row_at_index(index as i32).as_ref());
             } else {
-                self.files.set_selected(u32::MAX);
+                self.files.unselect_all();
             }
         } else {
-            self.files.set_selected(u32::MAX);
+            self.files.unselect_all();
         }
         let content = snapshot
             .active_document
@@ -315,6 +333,109 @@ impl Ui {
         self.editor.grab_focus();
         self.editor.scroll_to_iter(&mut end, 0.2, false, 0.0, 0.0);
     }
+}
+
+fn compare_sidebar_paths(
+    left: &(String, bool),
+    right: &(String, bool),
+    directories: &std::collections::HashSet<String>,
+) -> std::cmp::Ordering {
+    let mut left_prefix = String::new();
+    let mut right_prefix = String::new();
+    let mut left_parts = left.0.split('/');
+    let mut right_parts = right.0.split('/');
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (Some(a), Some(b)) => {
+                if !left_prefix.is_empty() {
+                    left_prefix.push('/');
+                    right_prefix.push('/');
+                }
+                left_prefix.push_str(a);
+                right_prefix.push_str(b);
+                if a != b {
+                    return (!directories.contains(&left_prefix))
+                        .cmp(&(!directories.contains(&right_prefix)))
+                        .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
+                        .then_with(|| a.cmp(b));
+                }
+            }
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return std::cmp::Ordering::Equal,
+        }
+    }
+}
+
+#[cfg(test)]
+mod sidebar_order_tests {
+    use super::compare_sidebar_paths;
+    use std::collections::HashSet;
+
+    #[test]
+    fn directories_precede_files_at_each_level() {
+        let mut entries = vec![
+            ("a.txt".to_owned(), false),
+            ("z/child.txt".to_owned(), false),
+            ("z/x".to_owned(), true),
+            ("z".to_owned(), true),
+            ("z/x/nested.txt".to_owned(), false),
+            ("z/b.txt".to_owned(), false),
+        ];
+        let directories: HashSet<_> = entries
+            .iter()
+            .filter(|(_, is_directory)| *is_directory)
+            .map(|(path, _)| path.clone())
+            .collect();
+        entries.sort_by(|left, right| compare_sidebar_paths(left, right, &directories));
+        let paths: Vec<_> = entries.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "z",
+                "z/x",
+                "z/x/nested.txt",
+                "z/b.txt",
+                "z/child.txt",
+                "a.txt"
+            ]
+        );
+    }
+}
+
+fn sidebar_row(
+    title: &str,
+    depth: usize,
+    disclosure: Option<&str>,
+    icon: Option<&gtk::gdk::Texture>,
+    suffix: Option<&str>,
+) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::new();
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.set_margin_start(8 + (depth as i32 * 16));
+    content.set_margin_end(8);
+    content.set_margin_top(3);
+    content.set_margin_bottom(3);
+    if let Some(disclosure) = disclosure {
+        let marker = gtk::Label::new(Some(disclosure));
+        marker.set_size_request(12, -1);
+        content.append(&marker);
+    }
+    if let Some(icon) = icon {
+        let image = gtk::Image::from_paintable(Some(icon));
+        image.set_pixel_size(18);
+        content.append(&image);
+    }
+    let label = gtk::Label::new(Some(title));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    content.append(&label);
+    if let Some(suffix) = suffix {
+        content.append(&gtk::Label::new(Some(suffix)));
+    }
+    row.set_child(Some(&content));
+    row
 }
 
 fn icon_for(name: &str) -> gtk::gdk::Texture {
@@ -410,7 +531,7 @@ fn build_window(app: &adw::Application) {
     content_header.pack_end(&save);
     let heading = gtk::Label::new(Some("Open a workspace"));
     content_header.set_title_widget(Some(&heading));
-    let files = adw::Sidebar::new();
+    let files = gtk::ListBox::new();
     files.add_css_class("compact-files");
     files.set_size_request(220, -1);
     let files_placeholder = gtk::Label::new(Some("Open a workspace"));
@@ -429,8 +550,10 @@ fn build_window(app: &adw::Application) {
     search_row.append(&search);
     search_row.append(&search_spinner);
     sidebar_content.append(&search_row);
-    files.set_vexpand(true);
-    sidebar_content.append(&files);
+    let files_scroll = gtk::ScrolledWindow::new();
+    files_scroll.set_vexpand(true);
+    files_scroll.set_child(Some(&files));
+    sidebar_content.append(&files_scroll);
     let sidebar_style = gtk::CssProvider::new();
     sidebar_style.load_from_data(include_str!("sidebar.css"));
     gtk::style_context_add_provider_for_display(
@@ -569,48 +692,50 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
-        ui.files.clone().connect_selected_notify(move |sidebar| {
-            if ui.updating.get() {
-                return;
-            }
-            let row = ui
-                .sidebar_rows
-                .borrow()
-                .get(sidebar.selected() as usize)
-                .cloned();
-            if let Some(row) = row {
-                if let SidebarRow::Directory(path) = row {
-                    let mut collapsed = ui.collapsed_directories.borrow_mut();
-                    if !collapsed.insert(path.clone()) {
-                        collapsed.remove(&path);
-                    }
-                    drop(collapsed);
-                    ui.force_sidebar.set(true);
-                    let snapshot = ui.snapshot.borrow().clone();
-                    ui.render(snapshot);
+        ui.files
+            .clone()
+            .connect_row_selected(move |_, selected_row| {
+                if ui.updating.get() {
                     return;
                 }
-                let Some(id) = row.id().cloned() else { return };
-                let location = row.location().cloned();
-                ui.dispatch(AppCommand::OpenDocument(id.clone()));
-                if ui
-                    .snapshot
+                let row = ui
+                    .sidebar_rows
                     .borrow()
-                    .active_document
-                    .as_ref()
-                    .map(|doc| &doc.id)
-                    == Some(&id)
-                    && let Some(location) = &location
-                {
-                    ui.select_match(location);
+                    .get(selected_row.map_or(usize::MAX, |row| row.index() as usize))
+                    .cloned();
+                if let Some(row) = row {
+                    if let SidebarRow::Directory(path) = row {
+                        let mut collapsed = ui.collapsed_directories.borrow_mut();
+                        if !collapsed.insert(path.clone()) {
+                            collapsed.remove(&path);
+                        }
+                        drop(collapsed);
+                        ui.force_sidebar.set(true);
+                        let snapshot = ui.snapshot.borrow().clone();
+                        ui.render(snapshot);
+                        return;
+                    }
+                    let Some(id) = row.id().cloned() else { return };
+                    let location = row.location().cloned();
+                    ui.dispatch(AppCommand::OpenDocument(id.clone()));
+                    if ui
+                        .snapshot
+                        .borrow()
+                        .active_document
+                        .as_ref()
+                        .map(|doc| &doc.id)
+                        == Some(&id)
+                        && let Some(location) = &location
+                    {
+                        ui.select_match(location);
+                    }
                 }
-            }
-        });
+            });
     }
     {
         let ui = ui.clone();
-        ui.files.clone().connect_activated(move |_, index| {
-            let selected = ui.sidebar_rows.borrow().get(index as usize).cloned();
+        ui.files.clone().connect_row_activated(move |_, row| {
+            let selected = ui.sidebar_rows.borrow().get(row.index() as usize).cloned();
             if let Some(row) = selected
                 && ui
                     .snapshot
@@ -750,19 +875,36 @@ fn build_window(app: &adw::Application) {
         {
             assert!(ui.collapsed_directories.borrow().contains("src"));
             assert_eq!(ui.sidebar_rows.borrow().len(), 2);
+            assert!(matches!(
+                ui.sidebar_rows.borrow()[0],
+                SidebarRow::Directory(_)
+            ));
+            ui.files.select_row(ui.files.row_at_index(0).as_ref());
+            let nested_index = ui
+                .sidebar_rows
+                .borrow()
+                .iter()
+                .position(|row| matches!(row, SidebarRow::File(id) if id.as_str() == "src/main.rs"))
+                .expect("expanded directory file");
+            let nested_row = ui.files.row_at_index(nested_index as i32).unwrap();
+            assert_eq!(nested_row.child().unwrap().margin_start(), 24);
         }
         assert_eq!(
             window.title().as_deref(),
             ui.snapshot.borrow().workspace_name.as_deref()
         );
-        let first = ui
-            .snapshot
-            .borrow()
-            .documents
-            .first()
-            .map(|doc| doc.id.clone());
-        if let Some(id) = first {
-            ui.files.set_selected(0);
+        let first =
+            ui.sidebar_rows
+                .borrow()
+                .iter()
+                .enumerate()
+                .find_map(|(index, row)| match row {
+                    SidebarRow::File(id) if id.as_str() == "README.md" => Some((index, id.clone())),
+                    _ => None,
+                });
+        if let Some((index, id)) = first {
+            ui.files
+                .select_row(ui.files.row_at_index(index as i32).as_ref());
             assert_eq!(
                 ui.snapshot
                     .borrow()
@@ -813,7 +955,7 @@ fn build_window(app: &adw::Application) {
                 ui.snapshot.borrow().search_results[0].snippet.as_deref(),
                 Some("GTK Phase 1 smoke content")
             );
-            ui.files.set_selected(2);
+            ui.files.select_row(ui.files.row_at_index(2).as_ref());
             let (start, end) = ui
                 .buffer
                 .selection_bounds()

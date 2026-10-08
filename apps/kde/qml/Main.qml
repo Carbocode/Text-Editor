@@ -40,6 +40,8 @@ ApplicationWindow {
                 if (title !== controller.workspace_name)
                     throw new Error("Window title did not follow the workspace")
                 if (controller.directory_ids.indexOf("src") !== -1) {
+                    if (workspacePane.sidebarEntries()[0].path !== "src")
+                        throw new Error("Directories were not ordered before files")
                     if (workspacePane.sidebarEntries().some(entry => entry.path === "src/main.rs"))
                         throw new Error("Directory contents were visible before expansion")
                     workspacePane.toggleDirectory("src")
