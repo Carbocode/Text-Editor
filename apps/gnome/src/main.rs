@@ -142,9 +142,13 @@ impl Ui {
                 rows.push(SidebarRow::File(document.id.clone()));
                 for result in group.iter().filter(|result| result.location.is_some()) {
                     let location = result.location.as_ref().unwrap();
-                    let item =
-                        adw::SidebarItem::new(&format!("↳ {}:{}", location.line, location.column));
-                    item.set_subtitle(result.snippet.as_deref());
+                    let title = match result.snippet.as_deref() {
+                        Some(snippet) => {
+                            format!("↳ {}:{}  {}", location.line, location.column, snippet)
+                        }
+                        None => format!("↳ {}:{}", location.line, location.column),
+                    };
+                    let item = adw::SidebarItem::new(&title);
                     section.append(item);
                     rows.push(SidebarRow::Match(result.clone()));
                 }
