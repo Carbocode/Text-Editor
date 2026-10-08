@@ -17,6 +17,7 @@ Item {
     property var orderedSidebarEntries: []
     property var visibleSidebarEntries: []
     property var childEntriesByParent: ({})
+    property var matchIndicesByFile: ({})
     property bool sidebarEntriesDirty: true
     property string lastWorkspaceRoot: ""
     signal browseRequested()
@@ -105,6 +106,18 @@ Item {
         sidebarEntriesDirty = false
         sidebarUpdate.stop()
         var files = fileIds()
+        var matches = ({})
+        if (root.controller.search_query.length > 0) {
+            var resultIds = root.controller.search_result_ids
+            var resultLines = root.controller.search_result_lines
+            for (var result = 0; result < resultIds.length; ++result) {
+                if (resultLines[result] === "") continue
+                var resultKey = "#" + resultIds[result]
+                if (!matches[resultKey]) matches[resultKey] = []
+                matches[resultKey].push(result)
+            }
+        }
+        matchIndicesByFile = matches
         var directories = []
         var seenDirectories = ({})
         if (root.controller.search_query.length === 0) {
@@ -236,12 +249,7 @@ Item {
     }
 
     function matchIndicesForFile(id) {
-        var indices = []
-        for (var i = 0; i < controller.search_result_ids.length; ++i) {
-            if (controller.search_result_ids[i] === id && controller.search_result_lines[i] !== "")
-                indices.push(i)
-        }
-        return indices
+        return matchIndicesByFile["#" + id] || []
     }
 
     Timer {
@@ -348,6 +356,9 @@ Item {
                             property int depth: fileId.split("/").length - 1
                             ItemDelegate {
                                 width: parent.width
+                                height: 26
+                                topPadding: 2
+                                bottomPadding: 2
                                 leftPadding: 10 + fileGroup.depth * 16
                                 highlighted: !fileGroup.isDirectory && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
                                 onClicked: {
@@ -364,12 +375,12 @@ Item {
                                     Image {
                                         visible: !fileGroup.isDirectory
                                         source: root.controller.file_icon(fileGroup.fileId)
-                                        sourceSize.width: 64
-                                        sourceSize.height: 64
+                                        sourceSize.width: 32
+                                        sourceSize.height: 32
                                         fillMode: Image.PreserveAspectFit
                                         mipmap: true
-                                        Layout.preferredWidth: 20
-                                        Layout.preferredHeight: 20
+                                        Layout.preferredWidth: 16
+                                        Layout.preferredHeight: 16
                                     }
                                     Label {
                                         visible: fileGroup.isDirectory
@@ -378,12 +389,12 @@ Item {
                                     Image {
                                         visible: fileGroup.isDirectory
                                         source: root.controller.folder_icon(fileGroup.fileId, root.controller.search_query.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false)
-                                        sourceSize.width: 64
-                                        sourceSize.height: 64
+                                        sourceSize.width: 32
+                                        sourceSize.height: 32
                                         fillMode: Image.PreserveAspectFit
                                         mipmap: true
-                                        Layout.preferredWidth: 20
-                                        Layout.preferredHeight: 20
+                                        Layout.preferredWidth: 16
+                                        Layout.preferredHeight: 16
                                     }
                                     Label {
                                         text: fileGroup.fileId.split("/").pop()
@@ -402,10 +413,14 @@ Item {
                                 }
                             }
                             Repeater {
-                                model: fileGroup.isDirectory ? [] : root.matchIndicesForFile(fileGroup.fileId)
+                                model: fileGroup.isDirectory || root.controller.search_query.length === 0
+                                    ? [] : root.matchIndicesForFile(fileGroup.fileId)
                                 delegate: ItemDelegate {
                                     property int resultIndex: modelData
                                     width: fileGroup.width
+                                    height: 23
+                                    topPadding: 2
+                                    bottomPadding: 2
                                     leftPadding: 32 + fileGroup.depth * 16
                                     highlighted: root.selectedResultIndex === resultIndex
                                     onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)

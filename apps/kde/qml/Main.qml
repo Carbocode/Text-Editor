@@ -33,28 +33,30 @@ ApplicationWindow {
                 var initialAt = Date.now()
                 var initialRows = workspacePane.sidebarEntries()
                 var initialMs = Date.now() - initialAt
-                var expandedAt = Date.now()
-                workspacePane.toggleDirectory("src")
-                var expandedRows = workspacePane.sidebarEntries()
-                var expandMs = Date.now() - expandedAt
-                if (expandedRows.length <= initialRows.length)
-                    throw new Error("Benchmark directory did not expand; expected a populated src folder")
                 Qt.callLater(function() {
-                    var expandedSettledMs = Date.now() - expandedAt
-                    var collapsedAt = Date.now()
+                    var expandedAt = Date.now()
                     workspacePane.toggleDirectory("src")
-                    var collapsedRows = workspacePane.sidebarEntries()
-                    var collapseMs = Date.now() - collapsedAt
-                    if (collapsedRows.length !== initialRows.length)
-                        throw new Error("Benchmark directory did not collapse")
+                    var expandedRows = workspacePane.sidebarEntries()
+                    var expandMs = Date.now() - expandedAt
+                    if (expandedRows.length <= initialRows.length)
+                        throw new Error("Benchmark directory did not expand; expected a populated src folder")
                     Qt.callLater(function() {
-                        console.log("KDE tree benchmark files=" + controller.document_ids.length
-                            + " open=" + openMs + "ms initial=" + initialMs + "ms/" + initialRows.length
-                            + " expand=" + expandMs + "ms/" + expandedRows.length
-                            + " expand-next-turn=" + expandedSettledMs + "ms"
-                            + " collapse=" + collapseMs + "ms/" + collapsedRows.length
-                            + " collapse-next-turn=" + (Date.now() - collapsedAt) + "ms")
-                        Qt.quit()
+                        var expandedSettledMs = Date.now() - expandedAt
+                        var collapsedAt = Date.now()
+                        workspacePane.toggleDirectory("src")
+                        var collapsedRows = workspacePane.sidebarEntries()
+                        var collapseMs = Date.now() - collapsedAt
+                        if (collapsedRows.length !== initialRows.length)
+                            throw new Error("Benchmark directory did not collapse")
+                        Qt.callLater(function() {
+                            console.log("KDE tree benchmark files=" + controller.document_ids.length
+                                + " open=" + openMs + "ms initial=" + initialMs + "ms/" + initialRows.length
+                                + " expand=" + expandMs + "ms/" + expandedRows.length
+                                + " expand-next-turn=" + expandedSettledMs + "ms"
+                                + " collapse=" + collapseMs + "ms/" + collapsedRows.length
+                                + " collapse-next-turn=" + (Date.now() - collapsedAt) + "ms")
+                            Qt.quit()
+                        })
                     })
                 })
                 return
@@ -115,6 +117,8 @@ ApplicationWindow {
                     throw new Error("Search matches were not grouped by file")
                 if (workspacePane.sidebarEntries().length !== 1)
                     throw new Error("Sidebar did not update its cached search entries")
+                if (workspacePane.matchIndicesForFile(controller.document_ids[0]).length !== 2)
+                    throw new Error("Cached search matches did not include both occurrences")
                 workspacePane.openSearchResult(1, controller.document_ids[0])
                 Qt.callLater(function() {
                     if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)

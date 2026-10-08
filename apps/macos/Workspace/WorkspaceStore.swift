@@ -23,6 +23,7 @@ final class WorkspaceStore: ObservableObject {
         return NSRange(location: start, length: end - start)
     }
     @Published private(set) var documents: [DocumentSummary] = []
+    @Published private(set) var externalChangeIDs: Set<String> = []
     @Published private(set) var activeDocument: DocumentSnapshot?
     @Published private(set) var editorText = ""
     @Published private(set) var errorMessage: String?
@@ -194,6 +195,8 @@ final class WorkspaceStore: ObservableObject {
         searchInProgress = snapshot.searchInProgress
         directories = snapshot.directories
         documents = snapshot.documents
+        let changedIDs = Set(snapshot.documents.lazy.filter(\.externalChange).map(\.id))
+        if changedIDs != externalChangeIDs { externalChangeIDs = changedIDs }
         activeDocument = snapshot.activeDocument
         editorText = snapshot.activeDocument?.content ?? ""
         if sidebarChanged { sidebarRevision &+= 1 }

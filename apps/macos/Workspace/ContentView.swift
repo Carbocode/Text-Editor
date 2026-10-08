@@ -87,6 +87,10 @@ struct ContentView: View {
     }
 
     private func refreshSidebarRows() {
+        sidebarRows = visibleChildren(of: "")
+    }
+
+    private func visibleChildren(of parent: String) -> [SidebarOutlineRow] {
         let searching = !store.searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         var rows: [SidebarOutlineRow] = []
         func appendChildren(of parent: String) {
@@ -103,20 +107,36 @@ struct ContentView: View {
                 }
             }
         }
-        appendChildren(of: "")
-        sidebarRows = rows
+        appendChildren(of: parent)
+        return rows
+    }
+
+    private func toggleDirectory(_ path: String) {
+        let opening = !expandedDirectories.contains(path)
+        if opening { expandedDirectories.insert(path) }
+        else { expandedDirectories.remove(path) }
+        if !store.searchQuery.isEmpty { return }
+        guard let index = sidebarRows.firstIndex(where: { $0.id == "entry:\(path)" }) else { return }
+        let prefix = path + "/"
+        var end = index + 1
+        while end < sidebarRows.count {
+            let rowPath: String
+            switch sidebarRows[end].kind {
+            case .directory(let directory): rowPath = directory
+            case .file(let file): rowPath = file.id
+            case .match(let match): rowPath = match.result.id
+            }
+            if !rowPath.hasPrefix(prefix) { break }
+            end += 1
+        }
+        sidebarRows.replaceSubrange(index + 1..<end, with: opening ? visibleChildren(of: path) : [])
     }
 
     @ViewBuilder private func sidebarRow(_ row: SidebarOutlineRow) -> some View {
         switch row.kind {
         case .directory(let path):
             Button {
-                if expandedDirectories.contains(path) {
-                    expandedDirectories.remove(path)
-                } else {
-                    expandedDirectories.insert(path)
-                }
-                refreshSidebarRows()
+                toggleDirectory(path)
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: expandedDirectories.contains(path) || !store.searchQuery.isEmpty
@@ -139,7 +159,7 @@ struct ContentView: View {
                     }
                     Text(group.id.split(separator: "/").last.map(String.init) ?? group.id)
                     Spacer(minLength: 0)
-                    if store.documents.first(where: { $0.id == group.id })?.externalChange == true {
+                    if store.externalChangeIDs.contains(group.id) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
                     if group.file.dirty { Circle().fill(.secondary).frame(width: 6, height: 6) }
