@@ -7,3 +7,5 @@ Use cargo xtask doctor to inspect local tools, or cargo xtask doctor --strict ma
 The Phase 1 vertical slice covers opening a directory, listing root-level .md/.txt files, opening, editing, and saving UTF-8 documents. There is no watcher or conflict resolution for external edits yet. The diagnostic counter remains in the core and smoke tests, but is hidden from normal windows.
 
 Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
+
+The sidebar search currently matches root-level filenames in memory, ignoring case and surrounding whitespace in the query. It does not read document contents or use SQLite. An empty query shows every listed document.

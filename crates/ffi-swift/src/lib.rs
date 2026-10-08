@@ -28,12 +28,21 @@ pub struct RecentWorkspace {
 }
 
 #[derive(Clone, uniffi::Record)]
+pub struct SearchResult {
+    pub id: String,
+    pub title: String,
+    pub dirty: bool,
+}
+
+#[derive(Clone, uniffi::Record)]
 pub struct WorkspaceSnapshot {
     pub revision: u64,
     pub counter: u64,
     pub workspace_name: Option<String>,
     pub workspace_root: Option<String>,
     pub recent_workspaces: Vec<RecentWorkspace>,
+    pub search_query: String,
+    pub search_results: Vec<SearchResult>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
 }
@@ -53,6 +62,16 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                 .map(|item| RecentWorkspace {
                     root: item.root.to_string_lossy().into_owned(),
                     name: item.name,
+                })
+                .collect(),
+            search_query: snapshot.search_query.0,
+            search_results: snapshot
+                .search_results
+                .into_iter()
+                .map(|result| SearchResult {
+                    id: result.id.as_str().to_owned(),
+                    title: result.title,
+                    dirty: result.dirty,
                 })
                 .collect(),
             documents: snapshot
@@ -147,6 +166,10 @@ impl WorkspaceApplication {
 
     pub fn increment(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
         self.dispatch(AppCommand::IncrementDiagnostic)
+    }
+
+    pub fn set_search_query(&self, query: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::SetSearchQuery(query))
     }
 
     pub fn open_workspace(&self, path: String) -> Result<WorkspaceSnapshot, WorkspaceError> {

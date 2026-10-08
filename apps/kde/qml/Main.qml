@@ -37,6 +37,10 @@ ApplicationWindow {
                 controller.open_workspace(argument.substring("--smoke-workspace=".length))
                 if (controller.document_ids.length === 0)
                     throw new Error("Workspace documents were not listed")
+                controller.search_files("unlikely-no-match")
+                if (controller.search_result_ids.length !== 0)
+                    throw new Error("Filename search did not filter results")
+                controller.search_files("")
                 controller.open_document(controller.document_ids[0])
                 workspacePane.editorText = "QML Phase 1 smoke content"
                 if (!controller.active_document_dirty)

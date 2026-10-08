@@ -12,6 +12,8 @@ struct Ui {
     core: Rc<RefCell<Application>>,
     snapshot: Rc<RefCell<AppSnapshot>>,
     files: adw::Sidebar,
+    search: gtk::SearchEntry,
+    files_placeholder: gtk::Label,
     editor: gtk::TextView,
     buffer: gtk::TextBuffer,
     heading: gtk::Label,
@@ -34,7 +36,7 @@ impl Ui {
 
     fn render(&self, snapshot: AppSnapshot) {
         self.updating.set(true);
-        let documents_changed = self.snapshot.borrow().documents != snapshot.documents;
+        let results_changed = self.snapshot.borrow().search_results != snapshot.search_results;
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         self.heading.set_label(
             snapshot
@@ -42,6 +44,15 @@ impl Ui {
                 .as_deref()
                 .unwrap_or("Open a workspace"),
         );
+        if self.search.text().as_str() != snapshot.search_query.0 {
+            self.search.set_text(&snapshot.search_query.0);
+        }
+        self.files_placeholder
+            .set_label(if snapshot.workspace_name.is_none() {
+                "Open a workspace"
+            } else {
+                "No matching files"
+            });
         self.counter
             .set_label(&format!("Counter: {}", snapshot.diagnostic_counter));
         self.save.set_sensitive(
@@ -75,10 +86,10 @@ impl Ui {
                 self.recent_list.append(&button);
             }
         }
-        if documents_changed {
+        if results_changed {
             self.files.remove_all();
             let section = adw::SidebarSection::new();
-            for document in &snapshot.documents {
+            for document in &snapshot.search_results {
                 let item = adw::SidebarItem::new(&document.title);
                 item.set_icon_paintable(Some(&icon_for(document.id.as_str())));
                 if document.dirty {
@@ -90,7 +101,7 @@ impl Ui {
         }
         if let Some(active) = snapshot.active_document.as_ref() {
             if let Some(index) = snapshot
-                .documents
+                .search_results
                 .iter()
                 .position(|doc| doc.id == active.id)
             {
@@ -193,7 +204,18 @@ fn build_window(app: &adw::Application) {
     let files = adw::Sidebar::new();
     files.add_css_class("compact-files");
     files.set_size_request(220, -1);
-    files.set_placeholder(Some(&gtk::Label::new(Some("Open a workspace"))));
+    let files_placeholder = gtk::Label::new(Some("Open a workspace"));
+    files.set_placeholder(Some(&files_placeholder));
+    let search = gtk::SearchEntry::new();
+    search.set_placeholder_text(Some("Search files"));
+    search.set_margin_top(8);
+    search.set_margin_bottom(8);
+    search.set_margin_start(8);
+    search.set_margin_end(8);
+    let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sidebar_content.append(&search);
+    files.set_vexpand(true);
+    sidebar_content.append(&files);
     let sidebar_style = gtk::CssProvider::new();
     sidebar_style.load_from_data(include_str!("sidebar.css"));
     gtk::style_context_add_provider_for_display(
@@ -214,7 +236,7 @@ fn build_window(app: &adw::Application) {
     editor_scroll.set_child(Some(&editor));
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&sidebar_header);
-    sidebar_view.set_content(Some(&files));
+    sidebar_view.set_content(Some(&sidebar_content));
     let content_view = adw::ToolbarView::new();
     content_view.add_top_bar(&content_header);
     content_view.set_content(Some(&editor_scroll));
@@ -245,6 +267,8 @@ fn build_window(app: &adw::Application) {
         core: Rc::new(RefCell::new(core)),
         snapshot: Rc::new(RefCell::new(Application::new().snapshot())),
         files,
+        search,
+        files_placeholder,
         editor,
         buffer,
         heading,
@@ -284,6 +308,14 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
+        ui.search.clone().connect_search_changed(move |search| {
+            if !ui.updating.get() {
+                ui.dispatch(AppCommand::SetSearchQuery(search.text().to_string()));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
         ui.files.clone().connect_selected_notify(move |sidebar| {
             if ui.updating.get() {
                 return;
@@ -291,7 +323,7 @@ fn build_window(app: &adw::Application) {
             let id = ui
                 .snapshot
                 .borrow()
-                .documents
+                .search_results
                 .get(sidebar.selected() as usize)
                 .map(|doc| doc.id.clone());
             if let Some(id) = id {
@@ -378,6 +410,11 @@ fn build_window(app: &adw::Application) {
             ui.buffer.set_text("GTK Phase 1 smoke content");
             ui.save.emit_clicked();
             assert_eq!(ui.status.text(), "Saved");
+            ui.dispatch(AppCommand::SetSearchQuery("unlikely-no-match".into()));
+            assert!(ui.snapshot.borrow().search_results.is_empty());
+            assert_eq!(ui.search.text(), "unlikely-no-match");
+            ui.dispatch(AppCommand::SetSearchQuery(String::new()));
+            assert_eq!(ui.snapshot.borrow().search_results.len(), 1);
             println!("GTK workspace edit/save smoke test passed");
         }
         app.quit();

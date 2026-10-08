@@ -19,6 +19,8 @@ pub mod qobject {
         #[qproperty(u64, counter)]
         #[qproperty(u64, revision)]
         #[qproperty(QString, workspace_name)]
+        #[qproperty(QString, search_query)]
+        #[qproperty(QStringList, search_result_ids)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
         #[qproperty(QStringList, recent_workspace_paths)]
@@ -33,6 +35,8 @@ pub mod qobject {
         fn increment(self: Pin<&mut Self>);
         #[qinvokable]
         fn initialize_persistence(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn search_files(self: Pin<&mut Self>, query: &QString);
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
@@ -49,6 +53,8 @@ pub struct AppControllerRust {
     counter: u64,
     revision: u64,
     workspace_name: QString,
+    search_query: QString,
+    search_result_ids: QStringList,
     document_ids: QStringList,
     dirty_document_ids: QStringList,
     recent_workspace_paths: QStringList,
@@ -75,6 +81,15 @@ impl qobject::AppController {
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
         self.as_mut().set_revision(snapshot.revision);
         self.as_mut().set_counter(snapshot.diagnostic_counter);
+        self.as_mut()
+            .set_search_query(QString::from(snapshot.search_query.0));
+        self.as_mut().set_search_result_ids(
+            snapshot
+                .search_results
+                .iter()
+                .map(|result| QString::from(result.id.as_str()))
+                .collect(),
+        );
         self.as_mut().set_recent_workspace_paths(
             snapshot
                 .recent_workspaces
@@ -124,6 +139,10 @@ impl qobject::AppController {
 
     pub fn increment(self: Pin<&mut Self>) {
         self.dispatch(AppCommand::IncrementDiagnostic);
+    }
+
+    pub fn search_files(self: Pin<&mut Self>, query: &QString) {
+        self.dispatch(AppCommand::SetSearchQuery(query.to_string()));
     }
 
     pub fn initialize_persistence(mut self: Pin<&mut Self>) {

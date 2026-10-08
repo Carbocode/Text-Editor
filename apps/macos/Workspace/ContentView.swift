@@ -7,28 +7,57 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            List {
-                ForEach(store.documents, id: \.id) { document in
-                    Button {
-                        store.openDocument(document.id)
-                    } label: {
-                        HStack(spacing: 8) {
-                            if let icon = WorkspaceIcons.image(for: document.id) {
-                                Image(nsImage: icon)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .frame(width: 20, height: 20)
-                            }
-                            Text(document.title)
-                            Spacer(minLength: 0)
-                            if document.dirty {
-                                Circle().fill(.secondary).frame(width: 6, height: 6)
-                            }
+            VStack(spacing: 0) {
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search files", text: Binding(
+                        get: { store.searchQuery },
+                        set: { store.setSearchQuery($0) }
+                    ))
+                    .textFieldStyle(.plain)
+                    if !store.searchQuery.isEmpty {
+                        Button("Clear search", systemImage: "xmark.circle.fill") {
+                            store.setSearchQuery("")
                         }
-                        .contentShape(Rectangle())
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    .listRowBackground(store.activeDocument?.id == document.id ? Color.accentColor.opacity(0.12) : Color.clear)
+                }
+                .padding(8)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                .padding(.horizontal, 10)
+                .padding(.top, 8)
+                .disabled(store.workspaceName == nil)
+                List {
+                    ForEach(store.searchResults, id: \.id) { document in
+                        Button {
+                            store.openDocument(document.id)
+                        } label: {
+                            HStack(spacing: 8) {
+                                if let icon = WorkspaceIcons.image(for: document.id) {
+                                    Image(nsImage: icon)
+                                        .resizable()
+                                        .interpolation(.high)
+                                        .frame(width: 20, height: 20)
+                                }
+                                Text(document.title)
+                                Spacer(minLength: 0)
+                                if document.dirty {
+                                    Circle().fill(.secondary).frame(width: 6, height: 6)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(store.activeDocument?.id == document.id ? Color.accentColor.opacity(0.12) : Color.clear)
+                    }
+                }
+                .overlay {
+                    if store.workspaceName != nil && store.searchResults.isEmpty {
+                        Text(store.searchQuery.isEmpty ? "No files" : "No matching files")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .navigationTitle(store.workspaceName ?? "Workspace")

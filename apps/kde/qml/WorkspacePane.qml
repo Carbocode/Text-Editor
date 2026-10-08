@@ -93,11 +93,23 @@ Item {
                         text: root.controller.workspace_name || "Files"
                         font.bold: true
                     }
+                    TextField {
+                        Layout.fillWidth: true
+                        text: root.controller.search_query
+                        placeholderText: "Search files"
+                        enabled: root.controller.workspace_name.length > 0
+                        onTextEdited: root.controller.search_files(text)
+                    }
                     ListView {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: root.controller.document_ids
+                        model: root.controller.search_result_ids
+                        Label {
+                            anchors.centerIn: parent
+                            text: root.controller.search_query.length > 0 ? "No matching files" : "No files"
+                            visible: root.controller.workspace_name.length > 0 && root.controller.search_result_ids.length === 0
+                        }
                         delegate: ItemDelegate {
                             width: ListView.view.width
                             highlighted: root.controller.active_document_id === modelData

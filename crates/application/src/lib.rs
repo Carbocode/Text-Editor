@@ -10,6 +10,7 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     IncrementDiagnostic,
+    SetSearchQuery(String),
     OpenWorkspace(PathBuf),
     OpenDocument(DocumentId),
     CloseDocument(DocumentId),
@@ -21,6 +22,7 @@ pub enum AppCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
     DiagnosticIncremented,
+    SearchQueryChanged(SearchQuery),
     WorkspaceOpened {
         workspace: Workspace,
         documents: Vec<DocumentId>,
@@ -60,6 +62,17 @@ pub struct DocumentSnapshot {
     pub dirty: bool,
 }
 
+/// A filename query, kept as entered so frontends can render the same text.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SearchQuery(pub String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchResult {
+    pub id: DocumentId,
+    pub title: String,
+    pub dirty: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppSnapshot {
     pub revision: u64,
@@ -67,6 +80,8 @@ pub struct AppSnapshot {
     pub workspace_name: Option<String>,
     pub workspace_root: Option<PathBuf>,
     pub recent_workspaces: Vec<RecentWorkspace>,
+    pub search_query: SearchQuery,
+    pub search_results: Vec<SearchResult>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
 }
@@ -117,6 +132,7 @@ pub struct AppState {
     diagnostic: DiagnosticState,
     workspace: Option<Workspace>,
     recent_workspaces: Vec<RecentWorkspace>,
+    search_query: SearchQuery,
     documents: Vec<DocumentEntry>,
     active_document: Option<DocumentId>,
 }
@@ -148,6 +164,8 @@ impl AppState {
                 .as_ref()
                 .map(|workspace| workspace.root.clone()),
             recent_workspaces: self.recent_workspaces.clone(),
+            search_query: self.search_query.clone(),
+            search_results: self.search_results(),
             documents: self
                 .documents
                 .iter()
@@ -161,6 +179,19 @@ impl AppState {
         }
     }
 
+    fn search_results(&self) -> Vec<SearchResult> {
+        let needle = self.search_query.0.trim().to_lowercase();
+        self.documents
+            .iter()
+            .filter(|entry| needle.is_empty() || entry.id.as_str().to_lowercase().contains(&needle))
+            .map(|entry| SearchResult {
+                id: entry.id.clone(),
+                title: entry.id.as_str().to_owned(),
+                dirty: entry.dirty(),
+            })
+            .collect()
+    }
+
     fn apply(&mut self, event: &AppEvent) {
         match event {
             AppEvent::DiagnosticIncremented => {
@@ -168,12 +199,14 @@ impl AppState {
                     .increment()
                     .expect("diagnostic overflow checked before producing event");
             }
+            AppEvent::SearchQueryChanged(query) => self.search_query = query.clone(),
             AppEvent::WorkspaceOpened {
                 workspace,
                 documents,
                 recent_workspaces,
             } => {
                 self.workspace = Some(workspace.clone());
+                self.search_query = SearchQuery::default();
                 self.recent_workspaces = recent_workspaces.clone();
                 self.documents = documents
                     .iter()
@@ -289,6 +322,13 @@ impl Application {
                     .checked_add(1)
                     .ok_or(AppError::CounterOverflow)?;
                 vec![AppEvent::DiagnosticIncremented]
+            }
+            AppCommand::SetSearchQuery(query) => {
+                if self.state.search_query.0 == query {
+                    Vec::new()
+                } else {
+                    vec![AppEvent::SearchQueryChanged(SearchQuery(query))]
+                }
             }
             AppCommand::OpenWorkspace(path) => {
                 if self.state.documents.iter().any(DocumentEntry::dirty) {
@@ -487,6 +527,55 @@ mod tests {
             Err(AppError::WorkspaceNotOpen)
         ));
         assert_eq!(app.snapshot().revision, 0);
+    }
+
+    #[test]
+    fn filename_search_filters_in_core_and_keeps_open_document() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("Alpha.md"), "one").unwrap();
+        fs::write(dir.path().join("beta.txt"), "two").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        app.dispatch(AppCommand::OpenDocument(id("beta.txt")))
+            .unwrap();
+        let outcome = app
+            .dispatch_with_events(AppCommand::SetSearchQuery("  ALP  ".into()))
+            .unwrap();
+        assert_eq!(
+            outcome.events,
+            [AppEvent::SearchQueryChanged(SearchQuery("  ALP  ".into()))]
+        );
+        assert_eq!(outcome.snapshot.search_results.len(), 1);
+        assert_eq!(outcome.snapshot.search_results[0].id, id("Alpha.md"));
+        assert_eq!(outcome.snapshot.active_document.unwrap().id, id("beta.txt"));
+        let revision = outcome.snapshot.revision;
+        let unchanged = app
+            .dispatch(AppCommand::SetSearchQuery("  ALP  ".into()))
+            .unwrap();
+        assert_eq!(unchanged.revision, revision);
+        let cleared = app
+            .dispatch(AppCommand::SetSearchQuery(String::new()))
+            .unwrap();
+        assert_eq!(cleared.search_results.len(), 2);
+    }
+
+    #[test]
+    fn opening_workspace_resets_search_query() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        fs::write(first.path().join("first.md"), "one").unwrap();
+        fs::write(second.path().join("second.md"), "two").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(first.path().to_path_buf()))
+            .unwrap();
+        app.dispatch(AppCommand::SetSearchQuery("first".into()))
+            .unwrap();
+        let snapshot = app
+            .dispatch(AppCommand::OpenWorkspace(second.path().to_path_buf()))
+            .unwrap();
+        assert_eq!(snapshot.search_query, SearchQuery::default());
+        assert_eq!(snapshot.search_results[0].id, id("second.md"));
     }
 
     #[test]

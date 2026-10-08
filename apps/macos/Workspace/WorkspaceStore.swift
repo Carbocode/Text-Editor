@@ -6,6 +6,8 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var revision: UInt64 = 0
     @Published private(set) var workspaceName: String?
     @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
+    @Published private(set) var searchQuery = ""
+    @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var documents: [DocumentSummary] = []
     @Published private(set) var activeDocument: DocumentSnapshot?
     @Published private(set) var editorText = ""
@@ -25,6 +27,16 @@ final class WorkspaceStore: ObservableObject {
     func increment() {
         do {
             apply(try core.increment())
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func setSearchQuery(_ query: String) {
+        guard query != searchQuery else { return }
+        do {
+            apply(try core.setSearchQuery(query: query))
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -88,6 +100,8 @@ final class WorkspaceStore: ObservableObject {
         counter = snapshot.counter
         workspaceName = snapshot.workspaceName
         recentWorkspaces = snapshot.recentWorkspaces
+        searchQuery = snapshot.searchQuery
+        searchResults = snapshot.searchResults
         documents = snapshot.documents
         activeDocument = snapshot.activeDocument
         editorText = snapshot.activeDocument?.content ?? ""
