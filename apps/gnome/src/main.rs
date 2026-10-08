@@ -1,6 +1,9 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
-use native_workspace_application::{AppCommand, AppSnapshot, Application, SearchLocation};
+use native_workspace_application::{
+    AppCommand, AppSnapshot, Application, SearchLocation, SearchResult,
+};
+use native_workspace_domain::DocumentId;
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
@@ -13,6 +16,7 @@ struct Ui {
     core: Rc<RefCell<Application>>,
     snapshot: Rc<RefCell<AppSnapshot>>,
     files: adw::Sidebar,
+    sidebar_rows: Rc<RefCell<Vec<SidebarRow>>>,
     search: gtk::SearchEntry,
     files_placeholder: gtk::Label,
     editor: gtk::TextView,
@@ -24,6 +28,28 @@ struct Ui {
     recent_button: gtk::MenuButton,
     recent_list: gtk::Box,
     updating: Rc<Cell<bool>>,
+}
+
+#[derive(Clone)]
+enum SidebarRow {
+    File(DocumentId),
+    Match(SearchResult),
+}
+
+impl SidebarRow {
+    fn id(&self) -> &DocumentId {
+        match self {
+            Self::File(id) => id,
+            Self::Match(result) => &result.id,
+        }
+    }
+
+    fn location(&self) -> Option<&SearchLocation> {
+        match self {
+            Self::File(_) => None,
+            Self::Match(result) => result.location.as_ref(),
+        }
+    }
 }
 
 impl Ui {
@@ -38,9 +64,8 @@ impl Ui {
     fn render(&self, snapshot: AppSnapshot) {
         self.updating.set(true);
         let previous_selection = self
-            .snapshot
+            .sidebar_rows
             .borrow()
-            .search_results
             .get(self.files.selected() as usize)
             .cloned();
         let results_changed = self.snapshot.borrow().search_results != snapshot.search_results;
@@ -101,38 +126,45 @@ impl Ui {
         }
         if results_changed {
             self.files.remove_all();
-            let section = adw::SidebarSection::new();
-            for document in &snapshot.search_results {
-                let title = match &document.location {
-                    Some(location) => {
-                        format!("{} · {}:{}", document.title, location.line, location.column)
-                    }
-                    None => document.title.clone(),
-                };
-                let item = adw::SidebarItem::new(&title);
-                item.set_icon_paintable(Some(&icon_for(document.id.as_str())));
-                item.set_subtitle(document.snippet.as_deref());
+            let mut rows = Vec::new();
+            for group in snapshot
+                .search_results
+                .chunk_by(|left, right| left.id == right.id)
+            {
+                let document = &group[0];
+                let section = adw::SidebarSection::new();
+                let file = adw::SidebarItem::new(&document.title);
+                file.set_icon_paintable(Some(&icon_for(document.id.as_str())));
                 if document.dirty {
-                    item.set_suffix(Some(&gtk::Label::new(Some("●"))));
+                    file.set_suffix(Some(&gtk::Label::new(Some("●"))));
                 }
-                section.append(item);
+                section.append(file);
+                rows.push(SidebarRow::File(document.id.clone()));
+                for result in group.iter().filter(|result| result.location.is_some()) {
+                    let location = result.location.as_ref().unwrap();
+                    let item =
+                        adw::SidebarItem::new(&format!("↳ {}:{}", location.line, location.column));
+                    item.set_subtitle(result.snippet.as_deref());
+                    section.append(item);
+                    rows.push(SidebarRow::Match(result.clone()));
+                }
+                self.files.append(section);
             }
-            self.files.append(section);
+            self.sidebar_rows.replace(rows);
         }
         if let Some(active) = snapshot.active_document.as_ref() {
+            let rows = self.sidebar_rows.borrow();
             let selected_index = previous_selection.as_ref().and_then(|previous| {
-                snapshot.search_results.iter().position(|result| {
-                    result.id == active.id
-                        && result.id == previous.id
-                        && result.location == previous.location
+                rows.iter().position(|row| {
+                    row.id() == &active.id
+                        && row.id() == previous.id()
+                        && row.location() == previous.location()
                 })
             });
             let index = selected_index.or_else(|| {
                 if snapshot.search_query.0.trim().is_empty() {
-                    snapshot
-                        .search_results
-                        .iter()
-                        .position(|doc| doc.id == active.id)
+                    rows.iter()
+                        .position(|row| matches!(row, SidebarRow::File(id) if id == &active.id))
                 } else {
                     None
                 }
@@ -338,6 +370,7 @@ fn build_window(app: &adw::Application) {
         core: Rc::new(RefCell::new(core)),
         snapshot: Rc::new(RefCell::new(Application::new().snapshot())),
         files,
+        sidebar_rows: Rc::new(RefCell::new(Vec::new())),
         search,
         files_placeholder,
         editor,
@@ -391,22 +424,23 @@ fn build_window(app: &adw::Application) {
             if ui.updating.get() {
                 return;
             }
-            let result = ui
-                .snapshot
+            let row = ui
+                .sidebar_rows
                 .borrow()
-                .search_results
                 .get(sidebar.selected() as usize)
                 .cloned();
-            if let Some(result) = result {
-                ui.dispatch(AppCommand::OpenDocument(result.id.clone()));
+            if let Some(row) = row {
+                let id = row.id().clone();
+                let location = row.location().cloned();
+                ui.dispatch(AppCommand::OpenDocument(id.clone()));
                 if ui
                     .snapshot
                     .borrow()
                     .active_document
                     .as_ref()
                     .map(|doc| &doc.id)
-                    == Some(&result.id)
-                    && let Some(location) = &result.location
+                    == Some(&id)
+                    && let Some(location) = &location
                 {
                     ui.select_match(location);
                 }
@@ -416,21 +450,16 @@ fn build_window(app: &adw::Application) {
     {
         let ui = ui.clone();
         ui.files.clone().connect_activated(move |_, index| {
-            let selected = ui
-                .snapshot
-                .borrow()
-                .search_results
-                .get(index as usize)
-                .cloned();
-            if let Some(result) = selected
+            let selected = ui.sidebar_rows.borrow().get(index as usize).cloned();
+            if let Some(row) = selected
                 && ui
                     .snapshot
                     .borrow()
                     .active_document
                     .as_ref()
                     .map(|doc| &doc.id)
-                    == Some(&result.id)
-                && let Some(location) = result.location
+                    == Some(row.id())
+                && let Some(location) = row.location()
             {
                 ui.select_match(&location);
             }
@@ -533,11 +562,13 @@ fn build_window(app: &adw::Application) {
             assert_eq!(ui.status.text(), "Saved");
             ui.dispatch(AppCommand::SetSearchQuery("phase 1".into()));
             assert_eq!(ui.snapshot.borrow().search_results.len(), 2);
+            assert_eq!(ui.sidebar_rows.borrow().len(), 3);
+            assert!(matches!(ui.sidebar_rows.borrow()[0], SidebarRow::File(_)));
             assert_eq!(
                 ui.snapshot.borrow().search_results[0].snippet.as_deref(),
                 Some("GTK Phase 1 smoke content")
             );
-            ui.files.set_selected(1);
+            ui.files.set_selected(2);
             let (start, end) = ui
                 .buffer
                 .selection_bounds()

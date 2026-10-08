@@ -88,6 +88,14 @@ final class WorkspaceStore: ObservableObject {
         searchNavigationRevision &+= 1
     }
 
+    func openSearchFile(_ id: String) {
+        openDocument(id)
+        guard activeDocument?.id == id else { return }
+        selectedSearchLocation = nil
+        selectedSearchResultIndex = nil
+        searchNavigationRevision &+= 1
+    }
+
     func changeDocument(_ content: String) {
         guard let id = activeDocument?.id, content != editorText else { return }
         editorText = content

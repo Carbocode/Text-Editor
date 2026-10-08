@@ -53,6 +53,8 @@ ApplicationWindow {
                 controller.search_files("phase 1")
                 if (controller.search_result_ids.length !== 2 || controller.search_result_snippets[0] !== "QML Phase 1 smoke content")
                     throw new Error("Content search did not return a matching preview")
+                if (workspacePane.searchFileCount !== 1)
+                    throw new Error("Search matches were not grouped by file")
                 workspacePane.openSearchResult(1, controller.document_ids[0])
                 Qt.callLater(function() {
                     if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)

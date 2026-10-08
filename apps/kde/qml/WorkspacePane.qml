@@ -11,6 +11,7 @@ Item {
     property alias editorText: editor.text
     property alias editorSelectedText: editor.selectedText
     property real editorScrollY: editorScroll.contentItem.contentY
+    property int searchFileCount: fileIds().length
     signal browseRequested()
 
     function flushEditor() {
@@ -57,6 +58,25 @@ Item {
         if (lower === "readme.md") return base + "readme.png"
         if (lower.endsWith(".md")) return base + "markdown.png"
         return base + "document.png"
+    }
+
+    function fileIds() {
+        var ids = controller.search_result_ids
+        var files = []
+        for (var i = 0; i < ids.length; ++i) {
+            if (files.indexOf(ids[i]) === -1)
+                files.push(ids[i])
+        }
+        return files
+    }
+
+    function matchIndicesForFile(id) {
+        var indices = []
+        for (var i = 0; i < controller.search_result_ids.length; ++i) {
+            if (controller.search_result_ids[i] === id && controller.search_result_lines[i] !== "")
+                indices.push(i)
+        }
+        return indices
     }
 
     ColumnLayout {
@@ -132,47 +152,58 @@ Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: root.controller.search_result_ids
+                        model: root.fileIds()
                         Label {
                             anchors.centerIn: parent
                             text: root.controller.search_query.length > 0 ? "No matching files" : "No files"
                             visible: root.controller.workspace_name.length > 0 && root.controller.search_result_ids.length === 0
                         }
-                        delegate: ItemDelegate {
+                        delegate: Column {
+                            id: fileGroup
                             width: ListView.view.width
-                            highlighted: root.selectedResultIndex === index
-                            onClicked: root.openSearchResult(index, modelData)
-                            contentItem: RowLayout {
-                                Image {
-                                    source: root.iconFor(modelData)
-                                    sourceSize.width: 20
-                                    sourceSize.height: 20
-                                    fillMode: Image.PreserveAspectFit
-                                    Layout.preferredWidth: 20
-                                    Layout.preferredHeight: 20
+                            property string fileId: modelData
+                            ItemDelegate {
+                                width: parent.width
+                                highlighted: root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
+                                onClicked: {
+                                    if (root.flushEditor()) {
+                                        root.controller.open_document(fileGroup.fileId)
+                                        root.selectedResultIndex = -1
+                                    }
                                 }
-                                ColumnLayout {
-                                    Layout.fillWidth: true
-                                    spacing: 0
+                                contentItem: RowLayout {
+                                    Image {
+                                        source: root.iconFor(fileGroup.fileId)
+                                        sourceSize.width: 20
+                                        sourceSize.height: 20
+                                        fillMode: Image.PreserveAspectFit
+                                        Layout.preferredWidth: 20
+                                        Layout.preferredHeight: 20
+                                    }
                                     Label {
-                                        text: modelData + (root.controller.search_result_lines[index] !== ""
-                                            ? " · " + root.controller.search_result_lines[index] + ":" + root.controller.search_result_columns[index]
-                                            : "")
+                                        text: fileGroup.fileId
                                         Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
                                     Label {
-                                        text: root.controller.search_result_snippets[index] || ""
-                                        visible: text.length > 0
-                                        color: palette.placeholderText
+                                        text: "●"
+                                        visible: root.controller.dirty_document_ids.indexOf(fileGroup.fileId) !== -1
+                                    }
+                                }
+                            }
+                            Repeater {
+                                model: root.matchIndicesForFile(fileGroup.fileId)
+                                delegate: ItemDelegate {
+                                    property int resultIndex: modelData
+                                    width: fileGroup.width
+                                    leftPadding: 32
+                                    highlighted: root.selectedResultIndex === resultIndex
+                                    onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)
+                                    contentItem: Label {
+                                        text: "↳ " + root.controller.search_result_lines[resultIndex] + ":" + root.controller.search_result_columns[resultIndex] + "  " + (root.controller.search_result_snippets[resultIndex] || "")
                                         font.pointSize: 9
-                                        Layout.fillWidth: true
                                         elide: Text.ElideRight
                                     }
-                                }
-                                Label {
-                                    text: "●"
-                                    visible: root.controller.dirty_document_ids.indexOf(modelData) !== -1
                                 }
                             }
                         }

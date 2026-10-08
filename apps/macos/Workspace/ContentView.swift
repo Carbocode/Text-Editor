@@ -5,6 +5,36 @@ struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
     @State private var choosingWorkspace = false
 
+    private struct SearchMatchRow {
+        let index: Int
+        let result: SearchResult
+    }
+
+    private struct SearchFileGroup {
+        let id: String
+        let file: SearchResult
+        var matches: [SearchMatchRow] = []
+    }
+
+    private var searchFileGroups: [SearchFileGroup] {
+        var groups: [SearchFileGroup] = []
+        var indicesByID: [String: Int] = [:]
+        for (index, result) in store.searchResults.enumerated() {
+            if let groupIndex = indicesByID[result.id] {
+                if result.location != nil {
+                    groups[groupIndex].matches.append(SearchMatchRow(index: index, result: result))
+                }
+            } else {
+                indicesByID[result.id] = groups.count
+                groups.append(SearchFileGroup(id: result.id, file: result))
+                if result.location != nil {
+                    groups[groups.count - 1].matches.append(SearchMatchRow(index: index, result: result))
+                }
+            }
+        }
+        return groups
+    }
+
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
@@ -30,47 +60,59 @@ struct ContentView: View {
                 .padding(.top, 8)
                 .disabled(store.workspaceName == nil)
                 List {
-                    ForEach(store.searchResults.indices, id: \.self) { index in
-                        let document = store.searchResults[index]
-                        Button {
-                            store.openSearchResult(document, at: index)
-                        } label: {
-                            HStack(spacing: 8) {
-                                if let icon = WorkspaceIcons.image(for: document.id) {
-                                    Image(nsImage: icon)
-                                        .resizable()
-                                        .interpolation(.high)
-                                        .frame(width: 20, height: 20)
+                    ForEach(searchFileGroups, id: \.id) { group in
+                        Section {
+                            Button {
+                                store.openSearchFile(group.id)
+                            } label: {
+                                HStack(spacing: 8) {
+                                    if let icon = WorkspaceIcons.image(for: group.id) {
+                                        Image(nsImage: icon)
+                                            .resizable()
+                                            .interpolation(.high)
+                                            .frame(width: 20, height: 20)
+                                    }
+                                    Text(group.file.title)
+                                    Spacer(minLength: 0)
+                                    if group.file.dirty {
+                                        Circle().fill(.secondary).frame(width: 6, height: 6)
+                                    }
                                 }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    HStack(spacing: 4) {
-                                        Text(document.title)
-                                        if let location = document.location {
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .listRowBackground(
+                                store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
+                                    ? Color.accentColor.opacity(0.12) : Color.clear
+                            )
+
+                            ForEach(group.matches, id: \.index) { match in
+                                Button {
+                                    store.openSearchResult(match.result, at: match.index)
+                                } label: {
+                                    HStack(alignment: .top, spacing: 8) {
+                                        if let location = match.result.location {
                                             Text("\(location.line):\(location.column)")
-                                                .font(.caption)
+                                                .font(.caption.monospacedDigit())
                                                 .foregroundStyle(.secondary)
                                         }
+                                        if let snippet = match.result.snippet {
+                                            Text(snippet)
+                                                .font(.caption)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer(minLength: 0)
                                     }
-                                    if let snippet = document.snippet {
-                                        Text(snippet)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
-                                    }
+                                    .padding(.leading, 28)
+                                    .contentShape(Rectangle())
                                 }
-                                Spacer(minLength: 0)
-                                if document.dirty {
-                                    Circle().fill(.secondary).frame(width: 6, height: 6)
-                                }
+                                .buttonStyle(.plain)
+                                .listRowBackground(
+                                    store.selectedSearchResultIndex == match.index
+                                        ? Color.accentColor.opacity(0.12) : Color.clear
+                                )
                             }
-                            .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .listRowBackground(
-                            (store.selectedSearchResultIndex == index ||
-                             (store.selectedSearchResultIndex == nil && store.searchQuery.isEmpty && store.activeDocument?.id == document.id))
-                                ? Color.accentColor.opacity(0.12) : Color.clear
-                        )
                     }
                 }
                 .overlay {
