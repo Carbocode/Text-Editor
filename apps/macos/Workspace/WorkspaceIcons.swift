@@ -31,11 +31,8 @@ enum WorkspaceIcons {
         if isDirectory {
             let key = expanded ? "folderNamesExpanded" : "folderNames"
             let fallback = expanded ? "folderExpanded" : "folder"
-            let selected = (manifest[key] as? [String: String])?[name]
-            if selected == "folder-macos" || selected == "folder-macos-open" {
-                return (manifest[fallback] as? String) ?? "folder"
-            }
-            return selected ?? (manifest[fallback] as? String) ?? "folder"
+            return (manifest[key] as? [String: String])?[name]
+                ?? (manifest[fallback] as? String) ?? "folder"
         }
         let names = manifest["fileNames"] as? [String: String] ?? [:]
         let lowerPath = path.lowercased()

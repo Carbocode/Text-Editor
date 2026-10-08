@@ -81,7 +81,7 @@ pub fn file_icon_name(path: &str) -> &'static str {
 pub fn folder_icon_name(path: &str, expanded: bool) -> &'static str {
     let manifest = manifest();
     let name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
-    let icon = if expanded {
+    if expanded {
         manifest
             .folder_names_expanded
             .get(&name)
@@ -91,15 +91,6 @@ pub fn folder_icon_name(path: &str, expanded: bool) -> &'static str {
             .folder_names
             .get(&name)
             .unwrap_or(&manifest.default_folder)
-    };
-    if icon == "folder-macos" || icon == "folder-macos-open" {
-        if expanded {
-            &manifest.default_folder_expanded
-        } else {
-            &manifest.default_folder
-        }
-    } else {
-        icon
     }
 }
 
@@ -115,9 +106,5 @@ mod tests {
         assert_eq!(file_icon_name(".ncurc.json"), "dependencies-update");
         assert_eq!(folder_icon_name("project/src", false), "folder-src");
         assert_eq!(folder_icon_name("project/src", true), "folder-src-open");
-        assert_eq!(folder_icon_name("apps/macos", false), "folder");
-        assert_eq!(folder_icon_name("apps/macos", true), "folder-open");
-        assert_eq!(folder_icon_name("vendor/apple", false), "folder");
-        assert_eq!(folder_icon_name("vendor/osx", false), "folder");
     }
 }
