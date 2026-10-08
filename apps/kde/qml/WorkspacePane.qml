@@ -521,6 +521,7 @@ Item {
                     TextArea {
                         id: editor
                         font.family: "monospace"
+                        textFormat: TextEdit.PlainText
                         wrapMode: TextEdit.NoWrap
                         EditorSyntaxHighlighter {
                             id: syntaxHighlighter
@@ -542,19 +543,26 @@ Item {
                     id: minimap
                     Layout.preferredWidth: 100
                     Layout.fillHeight: true
-                    property real usedHeight: Math.min(height, root.minimapLines.length * 2)
+                    clip: true
+                    property real contentHeight: root.minimapLines.length * 2
+                    property real viewportTop: editorScroll.contentItem.contentY
+                        / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                    property real viewportHeight: editorScroll.contentItem.height
+                        / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                    property int mapOffset: Math.floor(Math.max(0,
+                        Math.min(contentHeight - height, viewportTop - (height - viewportHeight) / 2)))
+                    onMapOffsetChanged: requestPaint()
+                    onHeightChanged: requestPaint()
                     onPaint: {
                         var ctx = getContext("2d")
                         ctx.clearRect(0, 0, width, height)
                         var lines = root.minimapLines
-                        var count = Math.max(1, lines.length)
-                        var shortDocument = count * 2 <= height
-                        var rows = shortDocument ? count : Math.max(1, Math.floor(height))
                         var palette = ["#9ba4ae", "#aa70d3", "#d88b44", "#5eb569", "#858e97", "#569ae0"]
-                        for (var row = 0; row < rows; ++row) {
-                            var line = shortDocument ? row : Math.floor(row * (count - 1) / Math.max(1, rows - 1))
+                        var first = Math.max(0, Math.floor(mapOffset / 2))
+                        var last = Math.min(lines.length, Math.ceil((mapOffset + height) / 2))
+                        for (var line = first; line < last; ++line) {
                             var offset = root.minimapOffsets[line]
-                            var y = shortDocument ? row * 2 : row
+                            var y = line * 2 - mapOffset
                             var x = 4
                             var source = lines[line]
                             for (var column = 0; column < source.length && x < width - 4; ++column) {
@@ -567,18 +575,13 @@ Item {
                                         var glyphIndex = (code >= 32 && code <= 126 ? code - 32 : 95) * 2
                                         var top = root.minimapGlyphs[glyphIndex] || 0
                                         var bottom = root.minimapGlyphs[glyphIndex + 1] || 0
-                                        if (shortDocument) {
-                                            if (top > 0) {
-                                                ctx.globalAlpha = Math.min(1, top / 128)
-                                                ctx.fillRect(x, y, 1, 1)
-                                            }
-                                            if (bottom > 0) {
-                                                ctx.globalAlpha = Math.min(1, bottom / 128)
-                                                ctx.fillRect(x, y + 1, 1, 1)
-                                            }
-                                        } else {
-                                            ctx.globalAlpha = Math.min(1, Math.max(top, bottom) / 128)
+                                        if (top > 0) {
+                                            ctx.globalAlpha = Math.min(1, top / 128)
                                             ctx.fillRect(x, y, 1, 1)
+                                        }
+                                        if (bottom > 0) {
+                                            ctx.globalAlpha = Math.min(1, bottom / 128)
+                                            ctx.fillRect(x, y + 1, 1, 1)
                                         }
                                         ctx.globalAlpha = 1
                                     }
@@ -589,18 +592,29 @@ Item {
                     }
                     Rectangle {
                         width: minimap.width
-                        y: editorScroll.contentItem.contentY / Math.max(1, editorScroll.contentItem.contentHeight) * minimap.usedHeight
-                        height: Math.max(8, editorScroll.contentItem.height / Math.max(1, editorScroll.contentItem.contentHeight) * minimap.usedHeight)
-                        color: "#80808044"
+                        y: minimap.viewportTop - minimap.mapOffset
+                        height: Math.max(8, minimap.viewportHeight)
+                        color: Qt.rgba(0.5, 0.5, 0.5, 0.2)
                     }
                     MouseArea {
                         anchors.fill: parent
-                        onPressed: moveTo(mouseY)
-                        onPositionChanged: if (pressed) moveTo(mouseY)
-                        function moveTo(y) {
+                        property real dragOffset: 0
+                        onPressed: {
+                            dragOffset = minimap.mapOffset
+                            moveTo(mouseY, dragOffset)
+                        }
+                        onPositionChanged: if (pressed) moveTo(mouseY, dragOffset)
+                        onWheel: function(wheel) {
                             var flick = editorScroll.contentItem
                             flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
-                                y / Math.max(1, minimap.usedHeight) * flick.contentHeight - flick.height / 2))
+                                flick.contentY - wheel.angleDelta.y / 120 * editorMetrics.height * 3))
+                            wheel.accepted = true
+                        }
+                        function moveTo(y, offset) {
+                            var flick = editorScroll.contentItem
+                            flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                (y + offset) / Math.max(1, minimap.contentHeight)
+                                    * flick.contentHeight - flick.height / 2))
                         }
                     }
                 }
@@ -645,7 +659,7 @@ Item {
 
     Connections {
         target: root.controller
-        function onActive_document_idChanged() { root.updateHighlight() }
+        function onActive_document_idChanged() { Qt.callLater(root.updateHighlight) }
         function onActive_document_textChanged() {
             if (editor.text !== root.controller.active_document_text) {
                 root.selectedResultIndex = -1

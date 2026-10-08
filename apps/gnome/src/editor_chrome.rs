@@ -7,13 +7,30 @@ use std::{
 
 fn scroll_to_map_position(
     y: f64,
-    map_height: i32,
     line_count: usize,
+    map_offset: f64,
     adjustment: &gtk::Adjustment,
 ) {
-    let used_height = map_height.min((line_count * 2) as i32).max(1) as f64;
-    let target = y / used_height * adjustment.upper() - adjustment.page_size() / 2.0;
+    let content_height = (line_count * 2).max(1) as f64;
+    let target =
+        (y + map_offset) / content_height * adjustment.upper() - adjustment.page_size() / 2.0;
     adjustment.set_value(target.clamp(0.0, (adjustment.upper() - adjustment.page_size()).max(0.0)));
+}
+
+fn minimap_offset(
+    map_height: i32,
+    line_count: usize,
+    scroll_top: f64,
+    scroll_height: f64,
+    page_height: f64,
+) -> f64 {
+    let content_height = (line_count * 2) as f64;
+    let total = scroll_height.max(1.0);
+    let viewport_top = scroll_top / total * content_height;
+    let viewport_height = page_height / total * content_height;
+    (viewport_top - (f64::from(map_height) - viewport_height) / 2.0)
+        .clamp(0.0, (content_height - f64::from(map_height)).max(0.0))
+        .floor()
 }
 
 #[derive(Default)]
@@ -64,7 +81,7 @@ pub struct EditorChrome {
     model: Rc<RefCell<MinimapModel>>,
     buffer: gtk::TextBuffer,
     minimap: gtk::DrawingArea,
-    cache: Rc<RefCell<Option<(i32, i32, gtk::cairo::ImageSurface)>>>,
+    cache: Rc<RefCell<Option<(i32, i32, i32, gtk::cairo::ImageSurface)>>>,
 }
 
 impl EditorChrome {
@@ -90,12 +107,14 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     minimap.set_content_width(100);
 
     let view = editor.clone();
-    gutter.set_draw_func(move |_, context, _, height| {
+    gutter.set_draw_func(move |_, context, width, height| {
         let visible = view.visible_rect();
         let first = view
-            .iter_at_location(0, visible.y())
+            .iter_at_location(visible.x(), visible.y())
             .map_or(0, |iter| iter.line());
         let buffer = view.buffer();
+        context.rectangle(0.0, 0.0, f64::from(width), f64::from(height));
+        context.clip();
         context.set_source_rgb(0.5, 0.5, 0.5);
         context.select_font_face(
             "monospace",
@@ -108,9 +127,12 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
                 break;
             };
             let (y, line_height) = view.line_yrange(&iter);
-            let draw_y = y - visible.y();
-            if draw_y > height {
+            let (_, draw_y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
+            if draw_y >= height {
                 break;
+            }
+            if draw_y + line_height <= 0 {
+                continue;
             }
             let label = (line + 1).to_string();
             let width = context
@@ -127,19 +149,25 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     let model = Rc::new(RefCell::new(MinimapModel::default()));
     let file_name = Rc::new(RefCell::new(String::new()));
     let model_draw = model.clone();
-    let cache: Rc<RefCell<Option<(i32, i32, gtk::cairo::ImageSurface)>>> =
+    let cache: Rc<RefCell<Option<(i32, i32, i32, gtk::cairo::ImageSurface)>>> =
         Rc::new(RefCell::new(None));
     let cache_draw = cache.clone();
     minimap.set_draw_func(move |_, context, width, height| {
         let count = model_draw.borrow().lines.len().max(1);
-        let used_height = height.min((count * 2) as i32).max(1);
+        let offset = minimap_offset(
+            height,
+            count,
+            adjustment_draw.value(),
+            adjustment_draw.upper(),
+            adjustment_draw.page_size(),
+        ) as i32;
         let surface = cache_draw
             .borrow()
             .as_ref()
-            .filter(|(cached_width, cached_height, _)| {
-                *cached_width == width && *cached_height == height
+            .filter(|(cached_width, cached_height, cached_offset, _)| {
+                *cached_width == width && *cached_height == height && *cached_offset == offset
             })
-            .map(|(_, _, surface)| surface.clone());
+            .map(|(_, _, _, surface)| surface.clone());
         let surface = surface.or_else(|| {
             let surface = gtk::cairo::ImageSurface::create(
                 gtk::cairo::Format::ARgb32,
@@ -149,25 +177,11 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
             .ok()?;
             let paint = gtk::cairo::Context::new(&surface).ok()?;
             let model = model_draw.borrow();
-            let cell_height = if count * 2 <= height as usize {
-                2.0
-            } else {
-                1.0
-            };
-            let rows = if model.lines.is_empty() {
-                0
-            } else if cell_height == 2.0 {
-                count
-            } else {
-                height.max(1) as usize
-            };
-            for row in 0..rows {
-                let line = if cell_height == 2.0 {
-                    row
-                } else {
-                    row * (count - 1) / (rows - 1).max(1)
-                };
-                let y = row as f64 * cell_height;
+            let first_line = (offset.max(0) as usize) / 2;
+            let last_line =
+                ((offset.max(0) as usize + height.max(0) as usize + 1) / 2).min(model.lines.len());
+            for line in first_line..last_line {
+                let y = (line * 2) as f64 - f64::from(offset);
                 for (column, kind, top, bottom) in &model.lines[line] {
                     let (red, green, blue) = match kind {
                         1 => (0.67, 0.44, 0.83),
@@ -177,27 +191,22 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
                         5 => (0.34, 0.60, 0.88),
                         _ => (0.61, 0.64, 0.68),
                     };
-                    let coverages = if cell_height == 1.0 {
-                        [(*top).max(*bottom), 0]
-                    } else {
-                        [*top, *bottom]
-                    };
-                    for (row, coverage) in coverages.into_iter().enumerate() {
-                        if coverage == 0 {
+                    for (dy, alpha) in [*top, *bottom].into_iter().enumerate() {
+                        if alpha == 0 {
                             continue;
                         }
                         paint.set_source_rgba(
                             red,
                             green,
                             blue,
-                            (f64::from(coverage) / 128.0).min(1.0),
+                            (f64::from(alpha) / 128.0).min(1.0),
                         );
-                        paint.rectangle(4.0 + *column as f64, y + row as f64, 1.0, 1.0);
+                        paint.rectangle(4.0 + *column as f64, y + dy as f64, 1.0, 1.0);
                         let _ = paint.fill();
                     }
                 }
             }
-            cache_draw.replace(Some((width, height, surface.clone())));
+            cache_draw.replace(Some((width, height, offset, surface.clone())));
             Some(surface)
         });
         if let Some(surface) = surface {
@@ -205,12 +214,13 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
             let _ = context.paint();
         }
         let total = adjustment_draw.upper().max(1.0);
-        context.set_source_rgba(0.5, 0.5, 0.5, 0.3);
+        let content_height = (count * 2) as f64;
+        context.set_source_rgba(0.5, 0.5, 0.5, 0.2);
         context.rectangle(
             0.0,
-            adjustment_draw.value() / total * f64::from(used_height),
+            adjustment_draw.value() / total * content_height - f64::from(offset),
             f64::from(width),
-            (adjustment_draw.page_size() / total * f64::from(used_height)).max(8.0),
+            (adjustment_draw.page_size() / total * content_height).max(8.0),
         );
         let _ = context.fill();
     });
@@ -221,39 +231,65 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     click.connect_pressed(move |_, _, _, y| {
         scroll_to_map_position(
             y,
-            map_for_click.height(),
             model_click.borrow().lines.len(),
+            minimap_offset(
+                map_for_click.height(),
+                model_click.borrow().lines.len(),
+                scroll_to.value(),
+                scroll_to.upper(),
+                scroll_to.page_size(),
+            ),
             &scroll_to,
         );
     });
     minimap.add_controller(click);
     let drag = gtk::GestureDrag::new();
     let drag_start = Rc::new(Cell::new(0.0));
+    let drag_offset = Rc::new(Cell::new(0.0));
     let start = drag_start.clone();
+    let offset = drag_offset.clone();
     let map_for_drag = minimap.clone();
     let model_drag = model.clone();
     let scroll_drag = adjustment.clone();
     drag.connect_drag_begin(move |_, _, y| {
         start.set(y);
-        scroll_to_map_position(
-            y,
+        offset.set(minimap_offset(
             map_for_drag.height(),
             model_drag.borrow().lines.len(),
+            scroll_drag.value(),
+            scroll_drag.upper(),
+            scroll_drag.page_size(),
+        ));
+        scroll_to_map_position(
+            y,
+            model_drag.borrow().lines.len(),
+            offset.get(),
             &scroll_drag,
         );
     });
-    let map_for_drag = minimap.clone();
     let model_drag = model.clone();
     let scroll_drag = adjustment.clone();
+    let offset = drag_offset.clone();
     drag.connect_drag_update(move |_, _, delta_y| {
         scroll_to_map_position(
             drag_start.get() + delta_y,
-            map_for_drag.height(),
             model_drag.borrow().lines.len(),
+            offset.get(),
             &scroll_drag,
         );
     });
     minimap.add_controller(drag);
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    let scroll_wheel = adjustment.clone();
+    wheel.connect_scroll(move |_, _, dy| {
+        let delta = dy * scroll_wheel.step_increment().max(1.0) * 3.0;
+        scroll_wheel.set_value((scroll_wheel.value() + delta).clamp(
+            0.0,
+            (scroll_wheel.upper() - scroll_wheel.page_size()).max(0.0),
+        ));
+        gtk::glib::Propagation::Stop
+    });
+    minimap.add_controller(wheel);
     let redraw_gutter = gutter.clone();
     let redraw_map = minimap.clone();
     adjustment.connect_value_changed(move |_| {
@@ -291,7 +327,7 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
 
 #[cfg(test)]
 mod tests {
-    use super::MinimapModel;
+    use super::{minimap_offset, MinimapModel};
 
     #[test]
     fn miniature_text_keeps_indentation_and_token_color() {
@@ -301,5 +337,15 @@ mod tests {
         assert_eq!(model.lines[0][0].0, 2);
         assert_eq!(model.lines[0][0].1, 1);
         assert!(model.lines[1].is_empty());
+    }
+
+    #[test]
+    fn long_minimap_scrolls_past_the_viewport() {
+        assert_eq!(minimap_offset(240, 1_000, 0.0, 16_000.0, 600.0), 0.0);
+        assert!(minimap_offset(240, 1_000, 8_000.0, 16_000.0, 600.0) > 800.0);
+        assert_eq!(
+            minimap_offset(240, 1_000, 15_400.0, 16_000.0, 600.0),
+            1_760.0
+        );
     }
 }

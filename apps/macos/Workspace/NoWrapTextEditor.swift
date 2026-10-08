@@ -56,20 +56,23 @@ struct NoWrapTextEditor: NSViewRepresentable {
         let switchedDocument = context.coordinator.documentID != documentID
         if switchedDocument || context.coordinator.textRevision != textRevision {
             context.coordinator.textRevision = textRevision
-            if textView.string != text {
+            if switchedDocument {
+                container.fileName = documentID
+            }
+            let changedText = textView.string != text
+            if changedText {
                 textView.string = text
+            }
+            if switchedDocument {
+                textView.setSelectedRange(NSRange(location: 0, length: 0))
+                scrollView.contentView.scroll(to: .zero)
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+                context.coordinator.documentID = documentID
+            }
+            if changedText || switchedDocument {
                 SyntaxHighlighting.apply(to: textView, fileName: documentID)
                 container.refreshContent()
             }
-        }
-        if switchedDocument {
-            container.fileName = documentID
-            SyntaxHighlighting.apply(to: textView, fileName: documentID)
-            container.refreshContent()
-            textView.setSelectedRange(NSRange(location: 0, length: 0))
-            scrollView.contentView.scroll(to: .zero)
-            scrollView.reflectScrolledClipView(scrollView.contentView)
-            context.coordinator.documentID = documentID
         }
         if context.coordinator.searchNavigationRevision != searchNavigationRevision {
             context.coordinator.searchNavigationRevision = searchNavigationRevision
@@ -126,7 +129,6 @@ final class EditorContainer: NSView {
     private var scrollObserver: NSObjectProtocol?
     private var minimapWork: DispatchWorkItem?
     private var minimapGeneration = 0
-    private var lastMinimapSize: NSSize = .zero
     private var incrementalLineCountReady = false
 
     init(scrollView: NSScrollView, fileName: String) {
@@ -164,10 +166,6 @@ final class EditorContainer: NSView {
         gutter.frame = NSRect(x: 0, y: 0, width: 48, height: bounds.height)
         scrollView.frame = NSRect(x: 48, y: 0, width: max(0, bounds.width - 148), height: bounds.height)
         minimap.frame = NSRect(x: max(48, bounds.width - 100), y: 0, width: 100, height: bounds.height)
-        if minimap.bounds.size != lastMinimapSize {
-            lastMinimapSize = minimap.bounds.size
-            scheduleMinimap()
-        }
         refreshChrome()
     }
 
@@ -193,16 +191,12 @@ final class EditorContainer: NSView {
         minimapWork?.cancel()
         minimapGeneration += 1
         let generation = minimapGeneration
-        guard minimap.bounds.width > 0, minimap.bounds.height > 0 else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.minimapGeneration == generation, let textView = self.textView else { return }
             let content = textView.string
             let name = self.fileName
-            let width = Int(self.minimap.bounds.width)
-            let height = Int(self.minimap.bounds.height)
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let raster = EditorMinimapRaster.build(text: content, fileName: name,
-                                                        width: width, height: height)
+                let raster = EditorMinimapRaster.build(text: content, fileName: name)
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.minimapGeneration == generation else { return }
                     self.minimap.setRaster(raster)
@@ -255,28 +249,39 @@ private final class EditorMinimap: NSView {
     weak var container: EditorContainer?
     private var raster: EditorMinimapRaster?
     private var rasterImage: NSImage?
+    private var rasterOffset = -1
+    private var rasterSize: NSSize = .zero
+    private var dragOffset: CGFloat?
     override var isFlipped: Bool { true }
 
     func setRaster(_ value: EditorMinimapRaster) {
         raster = value
-        rasterImage = value.image()
+        rasterOffset = -1
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        guard let container else { return }
+        guard let container, let raster else { return }
+        let clip = container.scrollView.contentView
+        let visibleHeight = min(CGFloat(raster.contentHeight), clip.bounds.height / container.lineHeight * 2)
+        let top = min(max(0, CGFloat(raster.contentHeight) - visibleHeight),
+                      max(0, clip.bounds.origin.y / container.lineHeight * 2))
+        let maxOffset = max(0, CGFloat(raster.contentHeight) - bounds.height)
+        let offset = Int(min(maxOffset, max(0, top - (bounds.height - visibleHeight) / 2)))
+        if offset != rasterOffset || rasterSize != bounds.size {
+            rasterImage = raster.image(width: Int(bounds.width), height: Int(bounds.height), offset: offset)
+            rasterOffset = offset
+            rasterSize = bounds.size
+        }
         rasterImage?.draw(in: bounds, from: .zero, operation: .sourceOver,
                           fraction: 1, respectFlipped: true, hints: nil)
-        let clip = container.scrollView.contentView
-        let scale = CGFloat(raster?.usedHeight ?? 0) / CGFloat(max(1, raster?.lineCount ?? 1))
-        let top = clip.bounds.origin.y / container.lineHeight * scale
-        let visibleHeight = clip.bounds.height / container.lineHeight * scale
         NSColor.secondaryLabelColor.withAlphaComponent(0.2).setFill()
-        NSRect(x: 0, y: max(0, top), width: bounds.width,
+        NSRect(x: 0, y: max(0, top - CGFloat(offset)), width: bounds.width,
                height: max(8, min(bounds.height, visibleHeight))).fill()
     }
 
     override func mouseDown(with event: NSEvent) {
+        dragOffset = CGFloat(max(0, rasterOffset))
         scrollTo(event)
     }
 
@@ -284,12 +289,20 @@ private final class EditorMinimap: NSView {
         scrollTo(event)
     }
 
+    override func mouseUp(with event: NSEvent) {
+        dragOffset = nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        container?.scrollView.scrollWheel(with: event)
+    }
+
     private func scrollTo(_ event: NSEvent) {
-        guard let container, let textView = container.textView, let raster else { return }
+        guard let container, let textView = container.textView, raster != nil else { return }
         let y = convert(event.locationInWindow, from: nil).y
         let clip = container.scrollView.contentView
         let limit = max(0, textView.bounds.height - clip.bounds.height)
-        let targetLine = y / CGFloat(max(1, raster.usedHeight)) * CGFloat(raster.lineCount)
+        let targetLine = (y + (dragOffset ?? CGFloat(max(0, rasterOffset)))) / 2
         let target = min(limit, max(0, targetLine * container.lineHeight - clip.bounds.height / 2))
         clip.scroll(to: NSPoint(x: clip.bounds.origin.x, y: target))
         container.scrollView.reflectScrolledClipView(clip)

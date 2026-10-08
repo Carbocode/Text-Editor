@@ -384,7 +384,33 @@ impl qobject::AppController {
 
     pub fn open_document(mut self: Pin<&mut Self>, id: &QString) {
         match DocumentId::parse(id.to_string()) {
-            Ok(id) => self.dispatch(AppCommand::OpenDocument(id)),
+            Ok(id) => {
+                if !self.rust().search_query.to_string().trim().is_empty() {
+                    self.dispatch(AppCommand::OpenDocument(id));
+                    return;
+                }
+                let result = self
+                    .as_mut()
+                    .rust_mut()
+                    .application
+                    .dispatch(AppCommand::OpenDocument(id));
+                match result {
+                    Ok(snapshot) => {
+                        self.as_mut().set_error_message(QString::default());
+                        self.as_mut().set_revision(snapshot.revision);
+                        if let Some(doc) = snapshot.active_document {
+                            self.as_mut()
+                                .set_active_document_id(QString::from(doc.id.as_str()));
+                            self.as_mut()
+                                .set_active_document_text(QString::from(doc.content));
+                            self.as_mut().set_active_document_dirty(doc.dirty);
+                            self.as_mut()
+                                .set_active_document_external_change(doc.external_change);
+                        }
+                    }
+                    Err(error) => self.set_error_message(QString::from(error.to_string())),
+                }
+            }
             Err(_) => self
                 .as_mut()
                 .set_error_message(QString::from("Invalid document name")),

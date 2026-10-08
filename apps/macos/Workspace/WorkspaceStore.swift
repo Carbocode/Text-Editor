@@ -107,7 +107,17 @@ final class WorkspaceStore: ObservableObject {
     func openDocument(_ id: String) {
         do {
             try flushLocalEdits()
-            apply(try core.openDocument(id: id))
+            if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let opened = try core.openDocumentFast(id: id)
+                revision = opened.revision
+                activeDocument = opened.document
+                if editorText != opened.document.content {
+                    editorContentRevision &+= 1
+                    editorText = opened.document.content
+                }
+            } else {
+                apply(try core.openDocument(id: id))
+            }
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription

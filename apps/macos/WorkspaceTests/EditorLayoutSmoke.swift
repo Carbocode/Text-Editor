@@ -34,18 +34,19 @@ struct EditorLayoutSmoke {
         precondition(codeTextView.string == "let value = 42")
         let keywordColor = codeTextView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
         precondition(keywordColor == .systemPurple)
-        let shortMap = EditorMinimapRaster.build(text: "  let x = 1\n", fileName: "main.rs", width: 100, height: 240)
-        precondition(shortMap.usedHeight == 4)
-        precondition(shortMap.pixels[(0 * 100 + 4) * 4 + 3] == 0)
-        precondition(shortMap.pixels[(0 * 100 + 6) * 4 + 3] > 0)
-        let longMap = EditorMinimapRaster.build(text: String(repeating: "let x = 1\n", count: 400),
-                                                fileName: "main.rs", width: 100, height: 240)
-        precondition(longMap.usedHeight == 240)
-        let fullySampled = EditorMinimapRaster.build(
-            text: Array(repeating: "let x = 1", count: 601).joined(separator: "\n"),
-            fileName: "main.rs", width: 100, height: 240
+        let shortMap = EditorMinimapRaster.build(text: "  let x = 1\n", fileName: "main.rs")
+        precondition(shortMap.contentHeight == 4)
+        let shortBitmap = shortMap.image(width: 100, height: 240, offset: 0)!.representations[0] as! NSBitmapImageRep
+        precondition(shortBitmap.colorAt(x: 4, y: 0)!.alphaComponent == 0)
+        precondition(shortBitmap.colorAt(x: 6, y: 0)!.alphaComponent > 0)
+        let alternating = EditorMinimapRaster.build(
+            text: String(repeating: "MMMMMMMMMMMMMMMM\n\n", count: 400), fileName: "bun.lock"
         )
-        precondition(fullySampled.pixels[((240 - 1) * 100 + 4) * 4 + 3] > 0)
+        precondition(alternating.contentHeight > 240)
+        let middle = alternating.image(width: 100, height: 20, offset: 400)!.representations[0] as! NSBitmapImageRep
+        precondition(middle.colorAt(x: 4, y: 0)!.alphaComponent > 0)
+        precondition(middle.colorAt(x: 4, y: 2)!.alphaComponent == 0)
+        precondition(middle.colorAt(x: 4, y: 4)!.alphaComponent > 0)
         let searchable = String(repeating: "filler\n", count: 80) + "needle"
         let searchView = NoWrapTextEditor.makeScrollView(text: searchable)
         searchView.frame = NSRect(x: 0, y: 0, width: 320, height: 240)
