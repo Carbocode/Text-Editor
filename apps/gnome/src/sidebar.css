@@ -1,11 +1,15 @@
-list.compact-files row {
-  min-height: 24px;
-  padding-top: 0;
-  padding-bottom: 0;
+.workspace-sidebar,
+scrolledwindow.workspace-files-scroll,
+scrolledwindow.workspace-files-scroll > viewport,
+listview.compact-files {
+  background: transparent;
 }
 
-list.compact-files row > box {
+listview.compact-files row {
+  min-height: 24px;
+  padding: 0;
+}
+
+listview.compact-files row > box {
   min-height: 0;
-  padding-top: 3px;
-  padding-bottom: 3px;
 }
