@@ -22,6 +22,10 @@ pub mod qobject {
         #[qproperty(QString, search_query)]
         #[qproperty(QStringList, search_result_ids)]
         #[qproperty(QStringList, search_result_snippets)]
+        #[qproperty(QStringList, search_result_lines)]
+        #[qproperty(QStringList, search_result_columns)]
+        #[qproperty(QStringList, search_result_starts)]
+        #[qproperty(QStringList, search_result_ends)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
         #[qproperty(QStringList, recent_workspace_paths)]
@@ -57,6 +61,10 @@ pub struct AppControllerRust {
     search_query: QString,
     search_result_ids: QStringList,
     search_result_snippets: QStringList,
+    search_result_lines: QStringList,
+    search_result_columns: QStringList,
+    search_result_starts: QStringList,
+    search_result_ends: QStringList,
     document_ids: QStringList,
     dirty_document_ids: QStringList,
     recent_workspace_paths: QStringList,
@@ -97,6 +105,66 @@ impl qobject::AppController {
                 .search_results
                 .iter()
                 .map(|result| QString::from(result.snippet.as_deref().unwrap_or("")))
+                .collect(),
+        );
+        self.as_mut().set_search_result_lines(
+            snapshot
+                .search_results
+                .iter()
+                .map(|result| {
+                    QString::from(
+                        result
+                            .location
+                            .as_ref()
+                            .map(|location| location.line.to_string())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        );
+        self.as_mut().set_search_result_columns(
+            snapshot
+                .search_results
+                .iter()
+                .map(|result| {
+                    QString::from(
+                        result
+                            .location
+                            .as_ref()
+                            .map(|location| location.column.to_string())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        );
+        self.as_mut().set_search_result_starts(
+            snapshot
+                .search_results
+                .iter()
+                .map(|result| {
+                    QString::from(
+                        result
+                            .location
+                            .as_ref()
+                            .map(|location| location.start_utf16.to_string())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        );
+        self.as_mut().set_search_result_ends(
+            snapshot
+                .search_results
+                .iter()
+                .map(|result| {
+                    QString::from(
+                        result
+                            .location
+                            .as_ref()
+                            .map(|location| location.end_utf16.to_string())
+                            .unwrap_or_default(),
+                    )
+                })
                 .collect(),
         );
         self.as_mut().set_recent_workspace_paths(

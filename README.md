@@ -8,7 +8,7 @@ Phase 2 separates frontend commands, successful application events, authoritativ
 
 Phase 3 adds a versioned SQLite metadata store for recent workspaces. Each frontend shows the same recent-workspace list and can reopen a directory from it. Document contents remain in their original files. The database location follows the platform application-data directory; `NATIVE_WORKSPACE_STATE_DB` overrides the path for development.
 
-Phase 4 adds a search field inside each sidebar. The Rust application core matches filenames and file contents without case sensitivity; matching content lines appear as previews. Unsaved edits are searchable. SQLite indexing is a later step.
+Phase 4 adds a search field inside each sidebar. The Rust application core matches filenames and every occurrence in file contents without case sensitivity. Each occurrence has its own preview and opens at the matching text in the editor. Unsaved edits are searchable. SQLite indexing is a later step.
 
 Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build or start a frontend with cargo xtask build-macos, build-gnome, build-kde or their run-* counterparts. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
 

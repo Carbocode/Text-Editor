@@ -7,7 +7,10 @@ Item {
     property var controller
     property bool enableBrowse: false
     property bool syncingEditor: false
+    property int selectedResultIndex: -1
     property alias editorText: editor.text
+    property alias editorSelectedText: editor.selectedText
+    property real editorScrollY: editorScroll.contentItem.contentY
     signal browseRequested()
 
     function flushEditor() {
@@ -20,6 +23,32 @@ Item {
 
     function saveActive() {
         if (flushEditor()) controller.save_document()
+    }
+
+    function openSearchResult(index, id) {
+        if (!flushEditor()) return
+        var start = controller.search_result_starts[index]
+        var end = controller.search_result_ends[index]
+        controller.open_document(id)
+        if (controller.active_document_id !== id) return
+        selectedResultIndex = index
+        if (start !== "") {
+            Qt.callLater(function() {
+                var position = Number(start)
+                editor.select(position, Number(end))
+                editor.forceActiveFocus()
+                var flick = editorScroll.contentItem
+                var rect = editor.positionToRectangle(position)
+                if (rect.y < flick.contentY)
+                    flick.contentY = rect.y
+                else if (rect.y + rect.height > flick.contentY + flick.height)
+                    flick.contentY = rect.y + rect.height - flick.height
+                if (rect.x < flick.contentX)
+                    flick.contentX = rect.x
+                else if (rect.x + rect.width > flick.contentX + flick.width)
+                    flick.contentX = rect.x + rect.width - flick.width
+            })
+        }
     }
 
     function iconFor(name) {
@@ -94,7 +123,10 @@ Item {
                         text: root.controller.search_query
                         placeholderText: "Search files"
                         enabled: root.controller.workspace_name.length > 0
-                        onTextEdited: root.controller.search_files(text)
+                        onTextEdited: {
+                            root.selectedResultIndex = -1
+                            root.controller.search_files(text)
+                        }
                     }
                     ListView {
                         Layout.fillWidth: true
@@ -108,8 +140,8 @@ Item {
                         }
                         delegate: ItemDelegate {
                             width: ListView.view.width
-                            highlighted: root.controller.active_document_id === modelData
-                            onClicked: if (root.flushEditor()) root.controller.open_document(modelData)
+                            highlighted: root.selectedResultIndex === index
+                            onClicked: root.openSearchResult(index, modelData)
                             contentItem: RowLayout {
                                 Image {
                                     source: root.iconFor(modelData)
@@ -122,7 +154,13 @@ Item {
                                 ColumnLayout {
                                     Layout.fillWidth: true
                                     spacing: 0
-                                    Label { text: modelData; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    Label {
+                                        text: modelData + (root.controller.search_result_lines[index] !== ""
+                                            ? " · " + root.controller.search_result_lines[index] + ":" + root.controller.search_result_columns[index]
+                                            : "")
+                                        Layout.fillWidth: true
+                                        elide: Text.ElideRight
+                                    }
                                     Label {
                                         text: root.controller.search_result_snippets[index] || ""
                                         visible: text.length > 0
@@ -142,6 +180,7 @@ Item {
                 }
             }
             ScrollView {
+                id: editorScroll
                 SplitView.fillWidth: true
                 TextArea {
                     id: editor
@@ -149,8 +188,10 @@ Item {
                     enabled: root.controller.active_document_id.length > 0
                     placeholderText: "Select a document"
                     onTextChanged: {
-                        if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text)
+                        if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
+                            root.selectedResultIndex = -1
                             root.controller.change_document(text)
+                        }
                     }
                 }
             }

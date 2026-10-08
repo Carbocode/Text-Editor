@@ -75,51 +75,115 @@ pub struct SearchResult {
     pub title: String,
     pub dirty: bool,
     pub snippet: Option<String>,
+    pub location: Option<SearchLocation>,
 }
 
-fn search_result(
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SearchLocation {
+    pub line: u64,
+    pub column: u64,
+    pub start_char: u64,
+    pub end_char: u64,
+    pub start_utf16: u64,
+    pub end_utf16: u64,
+}
+
+fn preview(line: &str, match_start: usize) -> String {
+    let leading = line.chars().take_while(|ch| ch.is_whitespace()).count();
+    let line = line.trim();
+    let match_start = match_start.saturating_sub(leading);
+    let start = match_start.saturating_sub(40);
+    let mut chars = line.chars().skip(start);
+    let text: String = chars.by_ref().take(160).collect();
+    format!(
+        "{}{}{}",
+        if start > 0 { "…" } else { "" },
+        text,
+        if chars.next().is_some() { "…" } else { "" }
+    )
+}
+
+fn search_results_for(
     entry: &DocumentEntry,
     needle: &str,
     content: Option<&str>,
-) -> Option<SearchResult> {
-    let matching_line = if needle.is_empty() {
-        None
-    } else {
-        content.and_then(|content| {
-            content
-                .lines()
-                .find(|line| line.to_lowercase().contains(needle))
-        })
-    };
-    if !needle.is_empty()
-        && !entry.id.as_str().to_lowercase().contains(needle)
-        && matching_line.is_none()
-    {
-        return None;
+) -> Vec<SearchResult> {
+    let mut results = Vec::new();
+    if needle.is_empty() || entry.id.as_str().to_lowercase().contains(needle) {
+        results.push(SearchResult {
+            id: entry.id.clone(),
+            title: entry.id.as_str().to_owned(),
+            dirty: entry.dirty(),
+            snippet: None,
+            location: None,
+        });
     }
-    let snippet = matching_line.map(|line| {
-        let line = line.trim();
-        let lowercase = line.to_lowercase();
-        let match_start = lowercase
-            .find(needle)
-            .map(|byte_index| lowercase[..byte_index].chars().count())
-            .unwrap_or(0);
-        let start = match_start.saturating_sub(40);
-        let mut chars = line.chars().skip(start);
-        let preview: String = chars.by_ref().take(160).collect();
-        format!(
-            "{}{}{}",
-            if start > 0 { "…" } else { "" },
-            preview,
-            if chars.next().is_some() { "…" } else { "" }
-        )
-    });
-    Some(SearchResult {
-        id: entry.id.clone(),
-        title: entry.id.as_str().to_owned(),
-        dirty: entry.dirty(),
-        snippet,
-    })
+    if needle.is_empty() {
+        return results;
+    }
+    let Some(content) = content else {
+        return results;
+    };
+    let mut line_start_char = 0usize;
+    let mut line_start_utf16 = 0usize;
+    for (line_index, raw_line) in content.split_inclusive('\n').enumerate() {
+        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let mut folded = String::new();
+        let mut positions = Vec::new();
+        let mut char_offset = line_start_char;
+        let mut utf16_offset = line_start_utf16;
+        for ch in line.chars() {
+            let next_char = char_offset + 1;
+            let next_utf16 = utf16_offset + ch.len_utf16();
+            for lower in ch.to_lowercase() {
+                positions.push((
+                    folded.len(),
+                    char_offset,
+                    next_char,
+                    utf16_offset,
+                    next_utf16,
+                ));
+                folded.push(lower);
+            }
+            char_offset = next_char;
+            utf16_offset = next_utf16;
+        }
+        let mut search_from = 0;
+        while search_from < folded.len() {
+            let Some(relative) = folded[search_from..].find(needle) else {
+                break;
+            };
+            let start_byte = search_from + relative;
+            let start_index = positions
+                .binary_search_by_key(&start_byte, |position| position.0)
+                .expect("match starts at a character boundary");
+            let end_byte = start_byte + needle.len();
+            let end_index = positions
+                .binary_search_by_key(&end_byte, |position| position.0)
+                .unwrap_or_else(|index| index);
+            let (_, start_char, _, start_utf16, _) = positions[start_index];
+            let (_, _, end_char, _, end_utf16) = positions[end_index - 1];
+            let column = start_char - line_start_char + 1;
+            results.push(SearchResult {
+                id: entry.id.clone(),
+                title: entry.id.as_str().to_owned(),
+                dirty: entry.dirty(),
+                snippet: Some(preview(line, column - 1)),
+                location: Some(SearchLocation {
+                    line: (line_index + 1) as u64,
+                    column: column as u64,
+                    start_char: start_char as u64,
+                    end_char: end_char as u64,
+                    start_utf16: start_utf16 as u64,
+                    end_utf16: end_utf16 as u64,
+                }),
+            });
+            search_from = start_byte + folded[start_byte..].chars().next().unwrap().len_utf8();
+        }
+        line_start_char += raw_line.chars().count();
+        line_start_utf16 += raw_line.encode_utf16().count();
+    }
+    results
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -260,7 +324,7 @@ impl AppState {
                 self.search_results = self
                     .documents
                     .iter()
-                    .filter_map(|entry| search_result(entry, "", None))
+                    .flat_map(|entry| search_results_for(entry, "", None))
                     .collect();
                 self.active_document = None;
             }
@@ -302,16 +366,16 @@ impl AppState {
             .position(|entry| &entry.id == id)
             .expect("document validated before producing event");
         let entry = &self.documents[index];
-        let result = search_result(entry, &needle, entry.content.as_deref());
+        let results = search_results_for(entry, &needle, entry.content.as_deref());
         self.search_results.retain(|result| &result.id != id);
-        if let Some(result) = result {
+        if !results.is_empty() {
             let position = self.search_results.partition_point(|existing| {
                 self.documents
                     .iter()
                     .position(|entry| entry.id == existing.id)
                     .is_some_and(|existing_index| existing_index < index)
             });
-            self.search_results.insert(position, result);
+            self.search_results.splice(position..position, results);
         }
     }
 }
@@ -406,7 +470,7 @@ impl Application {
                         .state
                         .documents
                         .iter()
-                        .filter_map(|entry| {
+                        .flat_map(|entry| {
                             let disk_content = if needle.is_empty() || entry.content.is_some() {
                                 None
                             } else {
@@ -414,7 +478,7 @@ impl Application {
                                     self.filesystem.read_document_for_search(root, &entry.id)
                                 })
                             };
-                            search_result(
+                            search_results_for(
                                 entry,
                                 &needle,
                                 entry.content.as_deref().or(disk_content.as_deref()),
@@ -720,6 +784,111 @@ mod tests {
                 .as_deref()
                 .unwrap()
                 .contains("needle")
+        );
+    }
+
+    #[test]
+    fn search_returns_each_occurrence_with_editor_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("note.md"), "A 💡 café café\ncafé").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let found = app
+            .dispatch(AppCommand::SetSearchQuery("CAFÉ".into()))
+            .unwrap();
+        assert_eq!(found.search_results.len(), 3);
+        let locations: Vec<_> = found
+            .search_results
+            .iter()
+            .map(|result| result.location.clone().unwrap())
+            .collect();
+        assert_eq!(
+            (
+                locations[0].line,
+                locations[0].column,
+                locations[0].start_char,
+                locations[0].start_utf16
+            ),
+            (1, 5, 4, 5)
+        );
+        assert_eq!(
+            (
+                locations[1].line,
+                locations[1].column,
+                locations[1].start_char,
+                locations[1].start_utf16
+            ),
+            (1, 10, 9, 10)
+        );
+        assert_eq!(
+            (
+                locations[2].line,
+                locations[2].column,
+                locations[2].start_char,
+                locations[2].start_utf16
+            ),
+            (2, 1, 14, 15)
+        );
+        assert_eq!(locations[2].end_utf16, 19);
+    }
+
+    #[test]
+    fn filename_hit_and_content_occurrences_remain_individually_selectable() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("note.md"), "note note").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let found = app
+            .dispatch(AppCommand::SetSearchQuery("note".into()))
+            .unwrap();
+        assert_eq!(found.search_results.len(), 3);
+        assert!(found.search_results[0].location.is_none());
+        assert_eq!(
+            found.search_results[1]
+                .location
+                .as_ref()
+                .unwrap()
+                .start_char,
+            0
+        );
+        assert_eq!(
+            found.search_results[2]
+                .location
+                .as_ref()
+                .unwrap()
+                .start_char,
+            5
+        );
+    }
+
+    #[test]
+    fn overlapping_text_occurrences_are_both_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("text.md"), "banana").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let found = app
+            .dispatch(AppCommand::SetSearchQuery("ana".into()))
+            .unwrap();
+        assert_eq!(found.search_results.len(), 2);
+        assert_eq!(
+            found.search_results[0]
+                .location
+                .as_ref()
+                .unwrap()
+                .start_char,
+            1
+        );
+        assert_eq!(
+            found.search_results[1]
+                .location
+                .as_ref()
+                .unwrap()
+                .start_char,
+            3
         );
     }
 

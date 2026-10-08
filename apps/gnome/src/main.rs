@@ -1,6 +1,6 @@
 use adw::prelude::*;
 use gtk::{gio, glib};
-use native_workspace_application::{AppCommand, AppSnapshot, Application};
+use native_workspace_application::{AppCommand, AppSnapshot, Application, SearchLocation};
 use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
@@ -37,6 +37,12 @@ impl Ui {
 
     fn render(&self, snapshot: AppSnapshot) {
         self.updating.set(true);
+        let previous_selection = self
+            .snapshot
+            .borrow()
+            .search_results
+            .get(self.files.selected() as usize)
+            .cloned();
         let results_changed = self.snapshot.borrow().search_results != snapshot.search_results;
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         self.window.set_title(Some(
@@ -97,7 +103,13 @@ impl Ui {
             self.files.remove_all();
             let section = adw::SidebarSection::new();
             for document in &snapshot.search_results {
-                let item = adw::SidebarItem::new(&document.title);
+                let title = match &document.location {
+                    Some(location) => {
+                        format!("{} · {}:{}", document.title, location.line, location.column)
+                    }
+                    None => document.title.clone(),
+                };
+                let item = adw::SidebarItem::new(&title);
                 item.set_icon_paintable(Some(&icon_for(document.id.as_str())));
                 item.set_subtitle(document.snippet.as_deref());
                 if document.dirty {
@@ -108,12 +120,27 @@ impl Ui {
             self.files.append(section);
         }
         if let Some(active) = snapshot.active_document.as_ref() {
-            if let Some(index) = snapshot
-                .search_results
-                .iter()
-                .position(|doc| doc.id == active.id)
-            {
+            let selected_index = previous_selection.as_ref().and_then(|previous| {
+                snapshot.search_results.iter().position(|result| {
+                    result.id == active.id
+                        && result.id == previous.id
+                        && result.location == previous.location
+                })
+            });
+            let index = selected_index.or_else(|| {
+                if snapshot.search_query.0.trim().is_empty() {
+                    snapshot
+                        .search_results
+                        .iter()
+                        .position(|doc| doc.id == active.id)
+                } else {
+                    None
+                }
+            });
+            if let Some(index) = index {
                 self.files.set_selected(index as u32);
+            } else {
+                self.files.set_selected(u32::MAX);
             }
         } else {
             self.files.set_selected(u32::MAX);
@@ -129,6 +156,18 @@ impl Ui {
         }
         self.snapshot.replace(snapshot);
         self.updating.set(false);
+    }
+
+    fn select_match(&self, location: &SearchLocation) {
+        let start = self
+            .buffer
+            .iter_at_offset(location.start_char.min(i32::MAX as u64) as i32);
+        let mut end = self
+            .buffer
+            .iter_at_offset(location.end_char.min(i32::MAX as u64) as i32);
+        self.buffer.select_range(&start, &end);
+        self.editor.grab_focus();
+        self.editor.scroll_to_iter(&mut end, 0.2, false, 0.0, 0.0);
     }
 }
 
@@ -352,14 +391,48 @@ fn build_window(app: &adw::Application) {
             if ui.updating.get() {
                 return;
             }
-            let id = ui
+            let result = ui
                 .snapshot
                 .borrow()
                 .search_results
                 .get(sidebar.selected() as usize)
-                .map(|doc| doc.id.clone());
-            if let Some(id) = id {
-                ui.dispatch(AppCommand::OpenDocument(id));
+                .cloned();
+            if let Some(result) = result {
+                ui.dispatch(AppCommand::OpenDocument(result.id.clone()));
+                if ui
+                    .snapshot
+                    .borrow()
+                    .active_document
+                    .as_ref()
+                    .map(|doc| &doc.id)
+                    == Some(&result.id)
+                    && let Some(location) = &result.location
+                {
+                    ui.select_match(location);
+                }
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.files.clone().connect_activated(move |_, index| {
+            let selected = ui
+                .snapshot
+                .borrow()
+                .search_results
+                .get(index as usize)
+                .cloned();
+            if let Some(result) = selected
+                && ui
+                    .snapshot
+                    .borrow()
+                    .active_document
+                    .as_ref()
+                    .map(|doc| &doc.id)
+                    == Some(&result.id)
+                && let Some(location) = result.location
+            {
+                ui.select_match(&location);
             }
         });
     }
@@ -452,15 +525,32 @@ fn build_window(app: &adw::Application) {
                 }
             }
             assert!(horizontal.upper() > horizontal.page_size());
-            ui.buffer.set_text("GTK Phase 1 smoke content");
+            ui.buffer.set_text(&format!(
+                "GTK Phase 1 smoke content\n{}💡 Another Phase 1 match",
+                "filler\n".repeat(80)
+            ));
             ui.save.emit_clicked();
             assert_eq!(ui.status.text(), "Saved");
             ui.dispatch(AppCommand::SetSearchQuery("phase 1".into()));
-            assert_eq!(ui.snapshot.borrow().search_results.len(), 1);
+            assert_eq!(ui.snapshot.borrow().search_results.len(), 2);
             assert_eq!(
                 ui.snapshot.borrow().search_results[0].snippet.as_deref(),
                 Some("GTK Phase 1 smoke content")
             );
+            ui.files.set_selected(1);
+            let (start, end) = ui
+                .buffer
+                .selection_bounds()
+                .expect("selected search occurrence");
+            assert_eq!(ui.buffer.text(&start, &end, false), "Phase 1");
+            let vertical = editor_scroll.vadjustment();
+            for _ in 0..100 {
+                glib::MainContext::default().iteration(false);
+                if vertical.value() > 0.0 {
+                    break;
+                }
+            }
+            assert!(vertical.value() > 0.0);
             ui.dispatch(AppCommand::SetSearchQuery("unlikely-no-match".into()));
             assert!(ui.snapshot.borrow().search_results.is_empty());
             assert_eq!(ui.search.text(), "unlikely-no-match");

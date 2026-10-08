@@ -44,16 +44,21 @@ ApplicationWindow {
                     throw new Error("Filename search did not filter results")
                 controller.search_files("")
                 controller.open_document(controller.document_ids[0])
-                workspacePane.editorText = "QML Phase 1 smoke content"
+                workspacePane.editorText = "QML Phase 1 smoke content\n" + "filler\n".repeat(80) + "💡 Another Phase 1 match"
                 if (!controller.active_document_dirty)
                     throw new Error("Document did not become dirty")
                 workspacePane.saveActive()
                 if (controller.active_document_dirty)
                     throw new Error("Document remained dirty after save")
                 controller.search_files("phase 1")
-                if (controller.search_result_ids.length !== 1 || controller.search_result_snippets[0] !== "QML Phase 1 smoke content")
+                if (controller.search_result_ids.length !== 2 || controller.search_result_snippets[0] !== "QML Phase 1 smoke content")
                     throw new Error("Content search did not return a matching preview")
-                console.log("QML workspace edit/save smoke test passed")
+                workspacePane.openSearchResult(1, controller.document_ids[0])
+                Qt.callLater(function() {
+                    if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)
+                        throw new Error("Selecting a search occurrence did not select its text")
+                    console.log("QML workspace edit/save smoke test passed")
+                })
             }
         }
     }

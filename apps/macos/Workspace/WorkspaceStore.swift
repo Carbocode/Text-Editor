@@ -8,6 +8,16 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
     @Published private(set) var searchQuery = ""
     @Published private(set) var searchResults: [SearchResult] = []
+    @Published private(set) var selectedSearchLocation: SearchLocation?
+    @Published private(set) var selectedSearchResultIndex: Int?
+    @Published private(set) var searchNavigationRevision: UInt64 = 0
+
+    var selectedSearchRange: NSRange? {
+        guard let location = selectedSearchLocation,
+              let start = Int(exactly: location.startUtf16),
+              let end = Int(exactly: location.endUtf16), end >= start else { return nil }
+        return NSRange(location: start, length: end - start)
+    }
     @Published private(set) var documents: [DocumentSummary] = []
     @Published private(set) var activeDocument: DocumentSnapshot?
     @Published private(set) var editorText = ""
@@ -37,6 +47,7 @@ final class WorkspaceStore: ObservableObject {
         guard query != searchQuery else { return }
         do {
             apply(try core.setSearchQuery(query: query))
+            selectedSearchResultIndex = nil
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -52,6 +63,7 @@ final class WorkspaceStore: ObservableObject {
         do {
             try flushLocalEdits()
             apply(try core.openWorkspace(path: url.path))
+            selectedSearchResultIndex = nil
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -68,9 +80,18 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func openSearchResult(_ result: SearchResult, at index: Int) {
+        openDocument(result.id)
+        guard activeDocument?.id == result.id else { return }
+        selectedSearchLocation = result.location
+        selectedSearchResultIndex = index
+        searchNavigationRevision &+= 1
+    }
+
     func changeDocument(_ content: String) {
         guard let id = activeDocument?.id, content != editorText else { return }
         editorText = content
+        selectedSearchResultIndex = nil
         do {
             apply(try core.changeDocument(id: id, content: content))
             errorMessage = nil

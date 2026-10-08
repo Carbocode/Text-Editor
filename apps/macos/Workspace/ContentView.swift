@@ -30,9 +30,10 @@ struct ContentView: View {
                 .padding(.top, 8)
                 .disabled(store.workspaceName == nil)
                 List {
-                    ForEach(store.searchResults, id: \.id) { document in
+                    ForEach(store.searchResults.indices, id: \.self) { index in
+                        let document = store.searchResults[index]
                         Button {
-                            store.openDocument(document.id)
+                            store.openSearchResult(document, at: index)
                         } label: {
                             HStack(spacing: 8) {
                                 if let icon = WorkspaceIcons.image(for: document.id) {
@@ -42,7 +43,14 @@ struct ContentView: View {
                                         .frame(width: 20, height: 20)
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(document.title)
+                                    HStack(spacing: 4) {
+                                        Text(document.title)
+                                        if let location = document.location {
+                                            Text("\(location.line):\(location.column)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
                                     if let snippet = document.snippet {
                                         Text(snippet)
                                             .font(.caption)
@@ -58,7 +66,11 @@ struct ContentView: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .listRowBackground(store.activeDocument?.id == document.id ? Color.accentColor.opacity(0.12) : Color.clear)
+                        .listRowBackground(
+                            (store.selectedSearchResultIndex == index ||
+                             (store.selectedSearchResultIndex == nil && store.searchQuery.isEmpty && store.activeDocument?.id == document.id))
+                                ? Color.accentColor.opacity(0.12) : Color.clear
+                        )
                     }
                 }
                 .overlay {
@@ -91,7 +103,8 @@ struct ContentView: View {
                     NoWrapTextEditor(documentID: active.id, text: Binding(
                         get: { store.editorText },
                         set: { store.changeDocument($0) }
-                    ))
+                    ), searchRange: store.selectedSearchRange,
+                       searchNavigationRevision: store.searchNavigationRevision)
                 } else {
                     VStack(spacing: 16) {
                         ContentUnavailableView(

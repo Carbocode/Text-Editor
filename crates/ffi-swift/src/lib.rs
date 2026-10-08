@@ -33,6 +33,17 @@ pub struct SearchResult {
     pub title: String,
     pub dirty: bool,
     pub snippet: Option<String>,
+    pub location: Option<SearchLocation>,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct SearchLocation {
+    pub line: u64,
+    pub column: u64,
+    pub start_char: u64,
+    pub end_char: u64,
+    pub start_utf16: u64,
+    pub end_utf16: u64,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -74,6 +85,14 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                     title: result.title,
                     dirty: result.dirty,
                     snippet: result.snippet,
+                    location: result.location.map(|location| SearchLocation {
+                        line: location.line,
+                        column: location.column,
+                        start_char: location.start_char,
+                        end_char: location.end_char,
+                        start_utf16: location.start_utf16,
+                        end_utf16: location.end_utf16,
+                    }),
                 })
                 .collect(),
             documents: snapshot

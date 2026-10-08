@@ -4,6 +4,8 @@ import SwiftUI
 struct NoWrapTextEditor: NSViewRepresentable {
     let documentID: String
     @Binding var text: String
+    let searchRange: NSRange?
+    let searchNavigationRevision: UInt64
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -53,11 +55,27 @@ struct NoWrapTextEditor: NSViewRepresentable {
             scrollView.reflectScrolledClipView(scrollView.contentView)
             context.coordinator.documentID = documentID
         }
+        if context.coordinator.searchNavigationRevision != searchNavigationRevision {
+            context.coordinator.searchNavigationRevision = searchNavigationRevision
+            if let range = searchRange,
+               range.location + range.length <= textView.string.utf16.count {
+                Self.selectSearchRange(range, in: textView)
+            } else if searchRange == nil {
+                textView.setSelectedRange(NSRange(location: textView.selectedRange().location, length: 0))
+            }
+        }
+    }
+
+    static func selectSearchRange(_ range: NSRange, in textView: NSTextView) {
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
+        textView.window?.makeFirstResponder(textView)
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NoWrapTextEditor
         var documentID: String
+        var searchNavigationRevision: UInt64 = 0
 
         init(_ parent: NoWrapTextEditor) {
             self.parent = parent
