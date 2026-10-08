@@ -1,10 +1,15 @@
 //! Shared application commands, events, state, and owned snapshots.
 
 use native_workspace_domain::{DiagnosticState, DocumentId, Workspace};
-use native_workspace_filesystem::{FilesystemError, RealFilesystem, WorkspaceFilesystem};
+use native_workspace_filesystem::{
+    FilesystemError, RealFilesystem, WorkspaceFilesystem, WorkspaceWatcher,
+};
 pub use native_workspace_storage::RecentWorkspace;
 use native_workspace_storage::{MemoryStorage, MetadataStorage, SqliteStorage, StorageError};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 /// An intention requested by a frontend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,6 +18,7 @@ pub enum AppCommand {
     SetSearchQuery(String),
     OpenWorkspace(PathBuf),
     RefreshWorkspace,
+    PollWorkspaceChanges,
     OpenDocument(DocumentId),
     CloseDocument(DocumentId),
     ChangeDocument { id: DocumentId, content: String },
@@ -415,6 +421,8 @@ pub struct Application {
     state: AppState,
     filesystem: Box<dyn WorkspaceFilesystem>,
     storage: Box<dyn MetadataStorage>,
+    watcher: Option<WorkspaceWatcher>,
+    last_reconcile: Instant,
 }
 
 impl Application {
@@ -427,6 +435,8 @@ impl Application {
             state: AppState::default(),
             filesystem,
             storage: Box::new(MemoryStorage::default()),
+            watcher: None,
+            last_reconcile: Instant::now(),
         }
     }
 
@@ -463,7 +473,10 @@ impl Application {
                 let disk_content = if needle.is_empty() || entry.content.is_some() {
                     None
                 } else {
-                    root.and_then(|root| self.filesystem.read_document_for_search(root, &entry.id))
+                    root.and_then(|root| {
+                        self.filesystem
+                            .read_document_if_matching(root, &entry.id, &needle)
+                    })
                 };
                 search_results_for(
                     entry,
@@ -528,11 +541,32 @@ impl Application {
                 }
                 let (workspace, documents) = self.filesystem.open_workspace(&path)?;
                 let recent_workspaces = self.storage.record_workspace(&workspace)?;
+                self.watcher = WorkspaceWatcher::new(&workspace.root).ok();
+                self.last_reconcile = Instant::now();
                 vec![AppEvent::WorkspaceOpened {
                     workspace,
                     documents,
                     recent_workspaces,
                 }]
+            }
+            AppCommand::PollWorkspaceChanges => {
+                if self.state.workspace.is_none() {
+                    return Ok(Vec::new());
+                }
+                let interval = if self.watcher.is_some() {
+                    Duration::from_secs(30)
+                } else {
+                    Duration::from_secs(2)
+                };
+                let changed = self
+                    .watcher
+                    .as_ref()
+                    .is_some_and(WorkspaceWatcher::has_changes);
+                if changed || self.last_reconcile.elapsed() >= interval {
+                    self.last_reconcile = Instant::now();
+                    return self.resolve(AppCommand::RefreshWorkspace);
+                }
+                Vec::new()
             }
             AppCommand::RefreshWorkspace => {
                 let workspace = self
@@ -807,6 +841,37 @@ mod tests {
             app.dispatch(AppCommand::RefreshWorkspace).unwrap().revision,
             revision
         );
+    }
+
+    #[test]
+    fn watcher_refreshes_workspace_after_external_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.md");
+        fs::write(&path, "before").unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        assert!(app.watcher.is_some(), "native watcher should start");
+        app.dispatch(AppCommand::OpenDocument(id("note.md")))
+            .unwrap();
+        let initial_revision = app.snapshot().revision;
+        assert_eq!(
+            app.dispatch(AppCommand::PollWorkspaceChanges)
+                .unwrap()
+                .revision,
+            initial_revision
+        );
+        fs::write(&path, "after").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = app.dispatch(AppCommand::PollWorkspaceChanges).unwrap();
+            if snapshot.revision != initial_revision {
+                assert_eq!(snapshot.active_document.unwrap().content, "after");
+                break;
+            }
+            assert!(Instant::now() < deadline, "watcher did not report the edit");
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]

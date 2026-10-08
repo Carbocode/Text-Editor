@@ -8,9 +8,9 @@ Phase 2 separates frontend commands, successful application events, authoritativ
 
 Phase 3 adds a versioned SQLite metadata store for recent workspaces. Each frontend shows the same recent-workspace list and can reopen a directory from it. Document contents remain in their original files. The database location follows the platform application-data directory; `NATIVE_WORKSPACE_STATE_DB` overrides the path for development.
 
-Phase 4 adds a search field inside each sidebar. The Rust application core matches filenames and every occurrence in file contents without case sensitivity. Each occurrence has its own preview and opens at the matching text in the editor. Unsaved edits are searchable. SQLite indexing is a later step.
+Phase 4 adds a search field inside each sidebar. The Rust application core matches filenames and every occurrence in file contents without case sensitivity. Ripgrep's search crates filter unopened files; the core computes exact previews and editor positions, and searches unsaved buffers directly. SQLite indexing is not used.
 
-Phase 5 checks the open workspace every two seconds for files added, removed, or changed outside the app. Clean open documents reload automatically, while local edits are preserved when the disk version changes. A conflict notice offers an explicit choice to reload from disk or overwrite it. Normal Save refuses to replace a changed disk version, including changes detected before the next check.
+Phase 5 watches the open workspace with `notify` for files added, removed, or changed outside the app. Frontends collect events every 250 ms; the core also reconciles every 30 seconds, or every two seconds if a native watcher cannot start. Clean open documents reload automatically, while local edits are preserved when the disk version changes. A conflict notice offers an explicit choice to reload from disk or overwrite it. Normal Save refuses to replace a changed disk version, including changes detected before the next check.
 
 Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build or start a frontend with cargo xtask build-macos, build-gnome, build-kde or their run-* counterparts. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
 

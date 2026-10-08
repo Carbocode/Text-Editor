@@ -216,8 +216,8 @@ struct ContentView: View {
         } message: {
             Text("Choose which version to keep. Reloading discards your local edits.")
         }
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            store.refreshWorkspace()
+        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
+            store.pollWorkspaceChanges()
         }
         .frame(minWidth: 680, minHeight: 420)
     }

@@ -80,10 +80,10 @@ Item {
     }
 
     Timer {
-        interval: 2000
+        interval: 250
         repeat: true
         running: root.controller && root.controller.workspace_name.length > 0
-        onTriggered: if (root.flushEditor()) root.controller.refresh_workspace()
+        onTriggered: if (root.flushEditor()) root.controller.poll_workspace_changes()
     }
 
     ColumnLayout {

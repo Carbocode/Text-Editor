@@ -573,10 +573,20 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
-        glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+        glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
             let has_workspace = ui.snapshot.borrow().workspace_root.is_some();
             if has_workspace {
-                ui.dispatch(AppCommand::RefreshWorkspace);
+                let result = ui
+                    .core
+                    .borrow_mut()
+                    .dispatch(AppCommand::PollWorkspaceChanges);
+                match result {
+                    Ok(snapshot) if snapshot.revision != ui.snapshot.borrow().revision => {
+                        ui.render(snapshot)
+                    }
+                    Ok(_) => {}
+                    Err(error) => ui.status.set_label(&error.to_string()),
+                }
             }
             glib::ControlFlow::Continue
         });

@@ -208,6 +208,10 @@ impl WorkspaceApplication {
         self.dispatch(AppCommand::RefreshWorkspace)
     }
 
+    pub fn poll_workspace_changes(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::PollWorkspaceChanges)
+    }
+
     pub fn open_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
         self.dispatch(AppCommand::OpenDocument(Self::parse_id(id)?))
     }

@@ -1,11 +1,46 @@
 //! The concrete filesystem boundary for local workspaces.
 
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::{SearcherBuilder, sinks::UTF8};
 use native_workspace_domain::{DocumentId, Workspace};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver},
 };
+
+/// Delivers relevant filesystem events without rescanning the workspace on each UI tick.
+pub struct WorkspaceWatcher {
+    _watcher: RecommendedWatcher,
+    events: Receiver<notify::Result<Event>>,
+}
+
+impl WorkspaceWatcher {
+    pub fn new(root: &Path) -> notify::Result<Self> {
+        let (sender, events) = mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |event| {
+            let _ = sender.send(event);
+        })?;
+        watcher.watch(root, RecursiveMode::NonRecursive)?;
+        Ok(Self {
+            _watcher: watcher,
+            events,
+        })
+    }
+
+    pub fn has_changes(&self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.events.try_recv() {
+            changed |= match event {
+                Ok(event) => !matches!(event.kind, EventKind::Access(_)),
+                Err(_) => true,
+            };
+        }
+        changed
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum FilesystemError {
@@ -26,6 +61,15 @@ pub trait WorkspaceFilesystem: Send {
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError>;
     fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
         self.read_document(root, id).ok()
+    }
+    fn read_document_if_matching(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        needle: &str,
+    ) -> Option<String> {
+        let content = self.read_document_for_search(root, id)?;
+        content.to_lowercase().contains(needle).then_some(content)
     }
     fn write_document(
         &self,
@@ -115,6 +159,46 @@ impl WorkspaceFilesystem for RealFilesystem {
         String::from_utf8(bytes).ok()
     }
 
+    fn read_document_if_matching(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        needle: &str,
+    ) -> Option<String> {
+        if !needle.is_ascii() || needle.chars().any(char::is_control) {
+            return self.read_document_for_search(root, id);
+        }
+        const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
+        let path = Self::document_path(root, id).ok()?;
+        if fs::metadata(&path).ok()?.len() > MAX_SEARCH_BYTES {
+            return None;
+        }
+        let matcher = RegexMatcherBuilder::new()
+            .case_insensitive(true)
+            // Rust's lowercase expansion can match text that Unicode regex case
+            // folding does not (for example, `i` in `İ`). Inspect such files
+            // with the exact matcher in the application core.
+            .build(&format!("(?:{}|[^\\x00-\\x7F])", regex::escape(needle)))
+            .ok()?;
+        let mut found = false;
+        let mut searcher = SearcherBuilder::new().build();
+        searcher
+            .search_path(
+                &matcher,
+                &path,
+                UTF8(|_, _| {
+                    found = true;
+                    Ok::<bool, io::Error>(false)
+                }),
+            )
+            .ok()?;
+        if found {
+            self.read_document_for_search(root, id)
+        } else {
+            None
+        }
+    }
+
     fn write_document(
         &self,
         root: &Path,
@@ -190,5 +274,21 @@ mod tests {
                 .read_document_for_search(dir.path(), &id)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn ripgrep_filter_preserves_literal_and_unicode_case_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = DocumentId::parse("note.md").unwrap();
+        fs::write(dir.path().join(id.as_str()), "a.b İ K").unwrap();
+        let filesystem = RealFilesystem;
+        for query in ["a.b", "i", "k"] {
+            assert!(
+                filesystem
+                    .read_document_if_matching(dir.path(), &id, query)
+                    .is_some(),
+                "query {query:?}"
+            );
+        }
     }
 }

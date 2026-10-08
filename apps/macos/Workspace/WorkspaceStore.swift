@@ -71,10 +71,18 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func refreshWorkspace() {
+        updateWorkspace { try core.refreshWorkspace() }
+    }
+
+    func pollWorkspaceChanges() {
+        updateWorkspace { try core.pollWorkspaceChanges() }
+    }
+
+    private func updateWorkspace(_ refresh: () throws -> WorkspaceSnapshot) {
         guard workspaceName != nil else { return }
         do {
             try flushLocalEdits()
-            let snapshot = try core.refreshWorkspace()
+            let snapshot = try refresh()
             if snapshot.revision != revision {
                 if snapshot.activeDocument?.content != activeDocument?.content {
                     selectedSearchLocation = nil

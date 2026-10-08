@@ -49,6 +49,8 @@ pub mod qobject {
         #[qinvokable]
         fn refresh_workspace(self: Pin<&mut Self>);
         #[qinvokable]
+        fn poll_workspace_changes(self: Pin<&mut Self>);
+        #[qinvokable]
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
@@ -269,6 +271,22 @@ impl qobject::AppController {
             .rust_mut()
             .application
             .dispatch(AppCommand::RefreshWorkspace);
+        match result {
+            Ok(snapshot) if snapshot.revision != self.rust().revision => {
+                self.as_mut().set_error_message(QString::default());
+                self.update_snapshot(snapshot);
+            }
+            Ok(_) => {}
+            Err(error) => self.set_error_message(QString::from(error.to_string())),
+        }
+    }
+
+    pub fn poll_workspace_changes(mut self: Pin<&mut Self>) {
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .dispatch(AppCommand::PollWorkspaceChanges);
         match result {
             Ok(snapshot) if snapshot.revision != self.rust().revision => {
                 self.as_mut().set_error_message(QString::default());
