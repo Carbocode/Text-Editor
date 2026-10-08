@@ -172,12 +172,18 @@ fn build_window(app: &adw::Application) {
         .default_height(600)
         .build();
     let sidebar_header = adw::HeaderBar::new();
-    sidebar_header.set_show_end_title_buttons(false);
     sidebar_header.set_title_widget(Some(&gtk::Label::new(None)));
     let content_header = adw::HeaderBar::new();
-    content_header.set_show_start_title_buttons(false);
     let toggle_sidebar = gtk::ToggleButton::new();
-    toggle_sidebar.set_icon_name("view-list-symbolic");
+    let icons = gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("GTK display"));
+    let sidebar_icon = if icons.has_icon("adw-sidebar-symbolic") {
+        "adw-sidebar-symbolic"
+    } else if icons.has_icon("sidebar-show-symbolic") {
+        "sidebar-show-symbolic"
+    } else {
+        "view-list-symbolic"
+    };
+    toggle_sidebar.set_icon_name(sidebar_icon);
     toggle_sidebar.set_tooltip_text(Some("Toggle Sidebar"));
     content_header.pack_start(&toggle_sidebar);
     let open = gtk::Button::from_icon_name("document-open-symbolic");
@@ -389,10 +395,13 @@ fn build_window(app: &adw::Application) {
     }
     window.present();
     if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_some() {
-        let icons = gtk::IconTheme::for_display(&gtk::gdk::Display::default().unwrap());
         assert!(icons.has_icon("document-open-symbolic"));
         assert!(icons.has_icon("document-save-symbolic"));
-        assert!(icons.has_icon("view-list-symbolic"));
+        assert!(icons.has_icon(sidebar_icon));
+        assert!(sidebar_header.shows_start_title_buttons());
+        assert!(sidebar_header.shows_end_title_buttons());
+        assert!(content_header.shows_start_title_buttons());
+        assert!(content_header.shows_end_title_buttons());
         let initial = split.shows_sidebar();
         toggle_sidebar.emit_clicked();
         assert_ne!(split.shows_sidebar(), initial);
