@@ -173,7 +173,7 @@ fn build_window(app: &adw::Application) {
         .build();
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.set_show_end_title_buttons(false);
-    sidebar_header.set_title_widget(Some(&gtk::Label::new(Some("Files"))));
+    sidebar_header.set_title_widget(Some(&gtk::Label::new(None)));
     let content_header = adw::HeaderBar::new();
     content_header.set_show_start_title_buttons(false);
     let open = gtk::Button::from_icon_name("document-open-symbolic");
