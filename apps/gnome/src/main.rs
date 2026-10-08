@@ -176,6 +176,10 @@ fn build_window(app: &adw::Application) {
     sidebar_header.set_title_widget(Some(&gtk::Label::new(None)));
     let content_header = adw::HeaderBar::new();
     content_header.set_show_start_title_buttons(false);
+    let toggle_sidebar = gtk::ToggleButton::new();
+    toggle_sidebar.set_icon_name("view-list-symbolic");
+    toggle_sidebar.set_tooltip_text(Some("Toggle Sidebar"));
+    content_header.pack_start(&toggle_sidebar);
     let open = gtk::Button::from_icon_name("document-open-symbolic");
     open.set_tooltip_text(Some("Open Workspace"));
     let save = gtk::Button::new();
@@ -245,6 +249,19 @@ fn build_window(app: &adw::Application) {
     split.set_content(Some(&content_view));
     split.set_sidebar_width_fraction(0.28);
     split.set_vexpand(true);
+    toggle_sidebar.set_active(split.shows_sidebar());
+    {
+        let split = split.clone();
+        toggle_sidebar.connect_toggled(move |button| {
+            split.set_show_sidebar(button.is_active());
+        });
+    }
+    {
+        let toggle_sidebar = toggle_sidebar.clone();
+        split.connect_show_sidebar_notify(move |split| {
+            toggle_sidebar.set_active(split.shows_sidebar());
+        });
+    }
     let status = gtk::Label::new(Some("Select a document"));
     let counter = gtk::Label::new(Some("Counter: 0"));
     let diagnostic = gtk::Button::with_label("Increment");
@@ -375,6 +392,12 @@ fn build_window(app: &adw::Application) {
         let icons = gtk::IconTheme::for_display(&gtk::gdk::Display::default().unwrap());
         assert!(icons.has_icon("document-open-symbolic"));
         assert!(icons.has_icon("document-save-symbolic"));
+        assert!(icons.has_icon("view-list-symbolic"));
+        let initial = split.shows_sidebar();
+        toggle_sidebar.emit_clicked();
+        assert_ne!(split.shows_sidebar(), initial);
+        toggle_sidebar.emit_clicked();
+        assert_eq!(split.shows_sidebar(), initial);
         diagnostic.emit_clicked();
         assert_eq!(ui.counter.text(), "Counter: 1");
         println!("GTK → Rust smoke test passed");
