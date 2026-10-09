@@ -1755,6 +1755,7 @@ version = "0.1.0"
 dependencies = [
  "native-workspace-application",
  "native-workspace-domain",
+ "native-workspace-syntax",
  "thiserror 2.0.21",
  "uniffi",
 ]
@@ -1780,6 +1781,7 @@ dependencies = [
  "libadwaita",
  "native-workspace-application",
  "native-workspace-domain",
+ "native-workspace-syntax",
 ]
 
 [[package]]
@@ -1792,6 +1794,7 @@ dependencies = [
  "cxx-qt-lib",
  "native-workspace-application",
  "native-workspace-domain",
+ "native-workspace-syntax",
  "qt-build-utils",
  "qt-version",
 ]
@@ -1805,6 +1808,13 @@ dependencies = [
  "rusqlite",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "native-workspace-syntax"
+version = "0.1.0"
+dependencies = [
+ "regex",
 ]
 
 [[package]]

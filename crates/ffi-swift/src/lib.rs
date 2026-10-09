@@ -6,6 +6,30 @@ use std::{path::PathBuf, sync::Mutex};
 
 uniffi::setup_scaffolding!();
 
+#[uniffi::export]
+pub fn minimap_glyphs() -> Vec<u8> {
+    native_workspace_syntax::minimap_glyphs().to_vec()
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct SyntaxToken {
+    pub start_utf16: u64,
+    pub end_utf16: u64,
+    pub kind: u8,
+}
+
+#[uniffi::export]
+pub fn highlight_document(file_name: String, text: String) -> Vec<SyntaxToken> {
+    native_workspace_syntax::highlight(&file_name, &text)
+        .into_iter()
+        .map(|token| SyntaxToken {
+            start_utf16: token.start_utf16 as u64,
+            end_utf16: token.end_utf16 as u64,
+            kind: token.kind.code(),
+        })
+        .collect()
+}
+
 #[derive(Clone, uniffi::Record)]
 pub struct DocumentSummary {
     pub id: String,
@@ -21,6 +45,12 @@ pub struct DocumentSnapshot {
     pub content: String,
     pub dirty: bool,
     pub external_change: bool,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct OpenedDocument {
+    pub revision: u64,
+    pub document: DocumentSnapshot,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -222,6 +252,28 @@ impl WorkspaceApplication {
 
     pub fn open_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
         self.dispatch(AppCommand::OpenDocument(Self::parse_id(id)?))
+    }
+
+    pub fn open_document_fast(&self, id: String) -> Result<OpenedDocument, WorkspaceError> {
+        let id = Self::parse_id(id)?;
+        let mut app = self
+            .inner
+            .lock()
+            .map_err(|_| WorkspaceError::LockPoisoned)?;
+        let snapshot = app.dispatch(AppCommand::OpenDocument(id.clone()))?;
+        let document = snapshot
+            .active_document
+            .ok_or_else(|| WorkspaceError::DocumentNotOpen(id.as_str().to_owned()))?;
+        Ok(OpenedDocument {
+            revision: snapshot.revision,
+            document: DocumentSnapshot {
+                id: document.id.as_str().to_owned(),
+                title: document.title,
+                content: document.content,
+                dirty: document.dirty,
+                external_change: document.external_change,
+            },
+        })
     }
 
     pub fn change_document(

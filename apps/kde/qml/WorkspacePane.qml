@@ -2,12 +2,20 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQml.Models
+import org.nativeworkspace.Syntax 1.0
 
 Item {
     id: root
     property var controller
     property bool enableBrowse: false
     property bool syncingEditor: false
+    property bool updatingHighlight: false
+    property var minimapLines: [""]
+    property var minimapOffsets: [0]
+    property var minimapKinds: []
+    property var minimapGlyphs: []
+    property string minimapSource: ""
+    property var minimapSpans: []
     property int selectedResultIndex: -1
     property alias editorText: editor.text
     property alias editorSelectedText: editor.selectedText
@@ -30,6 +38,12 @@ Item {
         onTriggered: if (root.sidebarEntriesDirty) root.rebuildOrderedEntries()
     }
 
+    Timer {
+        id: minimapUpdate
+        interval: 180
+        onTriggered: root.rebuildMinimap()
+    }
+
     Connections {
         target: root.controller
         function onWorkspace_rootChanged() {
@@ -44,7 +58,50 @@ Item {
         function onSearch_queryChanged() { root.scheduleSidebarUpdate() }
     }
 
-    Component.onCompleted: scheduleSidebarUpdate()
+    Component.onCompleted: {
+        scheduleSidebarUpdate()
+        var encoded = root.controller ? root.controller.minimap_glyphs() : ""
+        var glyphs = []
+        for (var glyph = 0; glyph < encoded.length; glyph += 2)
+            glyphs.push(parseInt(encoded.slice(glyph, glyph + 2), 16))
+        minimapGlyphs = glyphs
+        updateHighlight()
+    }
+
+    function updateHighlight() {
+        if (updatingHighlight || !root.controller) return
+        updatingHighlight = true
+        var source = editor.text
+        var spans = root.controller.highlight_document(source)
+        syntaxHighlighter.spans = spans
+        minimapSource = source
+        minimapSpans = spans
+        minimapUpdate.restart()
+        updatingHighlight = false
+    }
+
+    function rebuildMinimap() {
+        var source = minimapSource
+        var spans = minimapSpans
+        var kinds = []
+        for (var index = 0; index < spans.length; ++index) {
+            var parts = spans[index].split(":")
+            var end = Math.min(source.length, Number(parts[1]))
+            for (var position = Number(parts[0]); position < end; ++position)
+                kinds[position] = Number(parts[2])
+        }
+        minimapKinds = kinds
+        var lines = source.split("\n")
+        var offsets = []
+        var nextOffset = 0
+        for (var line = 0; line < lines.length; ++line) {
+            offsets.push(nextOffset)
+            nextOffset += lines[line].length + 1
+        }
+        minimapOffsets = offsets
+        minimapLines = lines
+        minimap.requestPaint()
+    }
 
     function scheduleSidebarUpdate() {
         sidebarEntriesDirty = true
@@ -435,19 +492,136 @@ Item {
                     }
                 }
             }
-            ScrollView {
-                id: editorScroll
+            RowLayout {
                 SplitView.fillWidth: true
-                TextArea {
-                    id: editor
-                    font.family: "monospace"
-                    enabled: root.controller.active_document_id.length > 0
-                    placeholderText: "Select a document"
-                    onTextChanged: {
-                        if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
-                            root.selectedResultIndex = -1
-                            root.controller.change_document(text)
+                spacing: 0
+                FontMetrics { id: editorMetrics; font: editor.font }
+                Canvas {
+                    id: lineNumbers
+                    Layout.preferredWidth: 48
+                    Layout.fillHeight: true
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        ctx.fillStyle = "#808080"
+                        ctx.font = (editorMetrics.font.pixelSize > 0 ? editorMetrics.font.pixelSize : 12) + "px monospace"
+                        ctx.textAlign = "right"
+                        var lineHeight = editorMetrics.height
+                        var scrollY = editorScroll.contentItem.contentY
+                        var first = Math.max(0, Math.floor(scrollY / lineHeight) - 1)
+                        var last = Math.min(editor.lineCount, first + Math.ceil(height / lineHeight) + 3)
+                        for (var line = first; line < last; ++line)
+                            ctx.fillText(String(line + 1), width - 8, editor.topPadding + (line + 1) * lineHeight - scrollY)
+                    }
+                }
+                ScrollView {
+                    id: editorScroll
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    TextArea {
+                        id: editor
+                        font.family: "monospace"
+                        textFormat: TextEdit.PlainText
+                        wrapMode: TextEdit.NoWrap
+                        EditorSyntaxHighlighter {
+                            id: syntaxHighlighter
+                            textDocument: editor.textDocument
                         }
+                        enabled: root.controller.active_document_id.length > 0
+                        placeholderText: "Select a document"
+                        onTextChanged: {
+                            root.updateHighlight()
+                            lineNumbers.requestPaint()
+                            if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
+                                root.selectedResultIndex = -1
+                                root.controller.change_document(text)
+                            }
+                        }
+                    }
+                }
+                Canvas {
+                    id: minimap
+                    Layout.preferredWidth: 100
+                    Layout.fillHeight: true
+                    clip: true
+                    property real contentHeight: root.minimapLines.length * 2
+                    property real viewportTop: editorScroll.contentItem.contentY
+                        / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                    property real viewportHeight: editorScroll.contentItem.height
+                        / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                    property int mapOffset: Math.floor(Math.max(0,
+                        Math.min(contentHeight - height, viewportTop - (height - viewportHeight) / 2)))
+                    onMapOffsetChanged: requestPaint()
+                    onHeightChanged: requestPaint()
+                    onPaint: {
+                        var ctx = getContext("2d")
+                        ctx.clearRect(0, 0, width, height)
+                        var lines = root.minimapLines
+                        var palette = ["#9ba4ae", "#aa70d3", "#d88b44", "#5eb569", "#858e97", "#569ae0"]
+                        var first = Math.max(0, Math.floor(mapOffset / 2))
+                        var last = Math.min(lines.length, Math.ceil((mapOffset + height) / 2))
+                        for (var line = first; line < last; ++line) {
+                            var offset = root.minimapOffsets[line]
+                            var y = line * 2 - mapOffset
+                            var x = 4
+                            var source = lines[line]
+                            for (var column = 0; column < source.length && x < width - 4; ++column) {
+                                var code = source.charCodeAt(column)
+                                if (code === 9) {
+                                    x += 4 - (x - 4) % 4
+                                } else {
+                                    if (code > 32) {
+                                        ctx.fillStyle = palette[root.minimapKinds[offset + column] || 0]
+                                        var glyphIndex = (code >= 32 && code <= 126 ? code - 32 : 95) * 2
+                                        var top = root.minimapGlyphs[glyphIndex] || 0
+                                        var bottom = root.minimapGlyphs[glyphIndex + 1] || 0
+                                        if (top > 0) {
+                                            ctx.globalAlpha = Math.min(1, top / 128)
+                                            ctx.fillRect(x, y, 1, 1)
+                                        }
+                                        if (bottom > 0) {
+                                            ctx.globalAlpha = Math.min(1, bottom / 128)
+                                            ctx.fillRect(x, y + 1, 1, 1)
+                                        }
+                                        ctx.globalAlpha = 1
+                                    }
+                                    ++x
+                                }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        width: minimap.width
+                        y: minimap.viewportTop - minimap.mapOffset
+                        height: Math.max(8, minimap.viewportHeight)
+                        color: Qt.rgba(0.5, 0.5, 0.5, 0.2)
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        property real dragOffset: 0
+                        onPressed: {
+                            dragOffset = minimap.mapOffset
+                            moveTo(mouseY, dragOffset)
+                        }
+                        onPositionChanged: if (pressed) moveTo(mouseY, dragOffset)
+                        onWheel: function(wheel) {
+                            var flick = editorScroll.contentItem
+                            flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                flick.contentY - wheel.angleDelta.y / 120 * editorMetrics.height * 3))
+                            wheel.accepted = true
+                        }
+                        function moveTo(y, offset) {
+                            var flick = editorScroll.contentItem
+                            flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                (y + offset) / Math.max(1, minimap.contentHeight)
+                                    * flick.contentHeight - flick.height / 2))
+                        }
+                    }
+                }
+                Connections {
+                    target: editorScroll.contentItem
+                    function onContentYChanged() {
+                        lineNumbers.requestPaint()
                     }
                 }
             }
@@ -485,6 +659,7 @@ Item {
 
     Connections {
         target: root.controller
+        function onActive_document_idChanged() { Qt.callLater(root.updateHighlight) }
         function onActive_document_textChanged() {
             if (editor.text !== root.controller.active_document_text) {
                 root.selectedResultIndex = -1
