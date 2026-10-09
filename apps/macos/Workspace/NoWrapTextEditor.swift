@@ -83,7 +83,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
                 textView.setSelectedRange(NSRange(location: textView.selectedRange().location, length: 0))
             }
         }
-        container.refreshChrome()
+        if switchedDocument { container.refreshChrome() }
     }
 
     static func selectSearchRange(_ range: NSRange, in textView: NSTextView) {
@@ -127,6 +127,7 @@ final class EditorContainer: NSView {
     private let gutter = EditorGutter()
     private let minimap = EditorMinimap()
     private var scrollObserver: NSObjectProtocol?
+    private var highlightWork: DispatchWorkItem?
     private var minimapWork: DispatchWorkItem?
     private var minimapGeneration = 0
     private var incrementalLineCountReady = false
@@ -135,6 +136,8 @@ final class EditorContainer: NSView {
         self.scrollView = scrollView
         self.fileName = fileName
         super.init(frame: .zero)
+        gutter.wantsLayer = true
+        gutter.layer?.masksToBounds = true
         addSubview(gutter)
         addSubview(scrollView)
         addSubview(minimap)
@@ -147,9 +150,7 @@ final class EditorContainer: NSView {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            if let textView = self.textView {
-                SyntaxHighlighting.apply(to: textView, fileName: self.fileName)
-            }
+            self.scheduleHighlight()
             self.refreshChrome()
         }
     }
@@ -159,6 +160,7 @@ final class EditorContainer: NSView {
     deinit {
         if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
         minimapWork?.cancel()
+        highlightWork?.cancel()
     }
 
     override func layout() {
@@ -185,6 +187,16 @@ final class EditorContainer: NSView {
         incrementalLineCountReady = false
         scheduleMinimap()
         refreshChrome()
+    }
+
+    private func scheduleHighlight() {
+        highlightWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, let textView = self.textView else { return }
+            SyntaxHighlighting.apply(to: textView, fileName: self.fileName)
+        }
+        highlightWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04, execute: work)
     }
 
     private func scheduleMinimap() {
@@ -227,6 +239,9 @@ private final class EditorGutter: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let container, let textView = container.textView else { return }
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: bounds).addClip()
+        defer { NSGraphicsContext.restoreGraphicsState() }
         let lineHeight = container.lineHeight
         let scrollY = container.scrollView.contentView.bounds.origin.y
         let count = lineCount
@@ -240,6 +255,7 @@ private final class EditorGutter: NSView {
             let label = String(line + 1) as NSString
             let size = label.size(withAttributes: attributes)
             let y = textView.textContainerInset.height + CGFloat(line) * lineHeight - scrollY
+            guard y + size.height > 0 && y < bounds.height else { continue }
             label.draw(at: NSPoint(x: bounds.width - size.width - 8, y: y), withAttributes: attributes)
         }
     }

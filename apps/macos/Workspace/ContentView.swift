@@ -16,6 +16,12 @@ struct ContentView: View {
     @State private var currentWorkspaceRoot: String?
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
     @State private var sidebarRows: [SidebarOutlineRow] = []
+    @State private var sidebarCache: [Int: SidebarIndex] = [:]
+
+    private struct SidebarIndex {
+        let children: [String: [SidebarOutlineRow]]
+        let rows: [SidebarOutlineRow]
+    }
 
     private struct SearchMatchRow {
         let index: Int
@@ -41,6 +47,11 @@ struct ContentView: View {
     }
 
     private func rebuildSidebarIndex() {
+        if let cached = sidebarCache[sidebarTab] {
+            sidebarChildren = cached.children
+            sidebarRows = cached.rows
+            return
+        }
         let textMode = sidebarTab == 1
         let needle = fileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let searching = textMode || !needle.isEmpty
@@ -109,6 +120,7 @@ struct ContentView: View {
         }
         sidebarChildren = children
         refreshSidebarRows()
+        sidebarCache[sidebarTab] = SidebarIndex(children: children, rows: sidebarRows)
     }
 
     private func refreshSidebarRows() {
@@ -155,6 +167,7 @@ struct ContentView: View {
             end += 1
         }
         sidebarRows.replaceSubrange(index + 1..<end, with: opening ? visibleChildren(of: path) : [])
+        sidebarCache[0] = SidebarIndex(children: sidebarChildren, rows: sidebarRows)
     }
 
     @ViewBuilder private func sidebarRow(_ row: SidebarOutlineRow) -> some View {
@@ -221,7 +234,125 @@ struct ContentView: View {
     }
 
     var body: some View {
-        Group {
+        ZStack {
+        if store.workspaceName != nil {
+        NavigationSplitView {
+            VStack(spacing: 0) {
+                List {
+                    Color.clear.frame(height: sidebarTab == 1 ? 112 : 58)
+                        .listRowSeparator(.hidden)
+                    ForEach(sidebarRows) { row in
+                        sidebarRow(row)
+                    }
+                    if sidebarTab == 0 {
+                        Color.clear.frame(height: 52).listRowSeparator(.hidden)
+                    }
+                }
+                .onReceive(store.$workspaceRoot) { root in
+                    if currentWorkspaceRoot != root {
+                        currentWorkspaceRoot = root
+                        expandedDirectories.removeAll()
+                        sidebarCache.removeAll()
+                        rebuildSidebarIndex()
+                    }
+                }
+                .onReceive(store.$sidebarRevision) { _ in
+                    DispatchQueue.main.async {
+                        sidebarCache.removeAll()
+                        rebuildSidebarIndex()
+                    }
+                }
+                .onChange(of: fileNameQuery) { _, _ in
+                    sidebarCache.removeValue(forKey: 0)
+                    rebuildSidebarIndex()
+                }
+                .overlay {
+                    if store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
+                        Text(sidebarTab == 1
+                             ? (store.searchQuery.isEmpty ? "Search file contents" : "No text matches")
+                             : (fileNameQuery.isEmpty ? "No files" : "No matching names"))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .overlay(alignment: .top) {
+                    VStack(spacing: 8) {
+                        Picker("Sidebar", selection: $sidebarTab) {
+                            Image(systemName: "folder").accessibilityLabel("Files").tag(0)
+                            Image(systemName: "magnifyingglass").accessibilityLabel("Search").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+                        .controlSize(.large)
+                        .labelsHidden()
+                        .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
+                        if sidebarTab == 1 {
+                            HStack(spacing: 8) {
+                                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                                TextField("Search in files", text: Binding(
+                                    get: { store.searchQuery },
+                                    set: { store.setSearchQuery($0) }
+                                ))
+                                .textFieldStyle(.plain)
+                                if store.searchInProgress { ProgressView().controlSize(.small) }
+                            }
+                            .padding(10)
+                            .glassEffect(.regular, in: Capsule())
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+                }
+                .overlay(alignment: .bottom) {
+                    if sidebarTab == 0 {
+                    HStack(spacing: 8) {
+                        Menu {
+                            Button("New File", systemImage: "doc.badge.plus") {
+                                creatingDirectory = false
+                                newEntryPath = ""
+                                creatingEntry = true
+                            }
+                            Button("New Folder", systemImage: "folder.badge.plus") {
+                                creatingDirectory = true
+                                newEntryPath = ""
+                                creatingEntry = true
+                            }
+                        } label: {
+                            Image(systemName: "plus")
+                                .frame(width: 20, height: 20)
+                                .padding(8)
+                        }
+                        .menuIndicator(.hidden)
+                        .buttonStyle(.plain)
+                        .help("Add file or folder")
+                        .glassEffect(.regular, in: Circle())
+                        HStack(spacing: 6) {
+                            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                            TextField("Filter names", text: $fileNameQuery)
+                                .textFieldStyle(.plain)
+                            if !fileNameQuery.isEmpty {
+                                Button("Clear search", systemImage: "xmark.circle.fill") {
+                                    fileNameQuery = ""
+                                }
+                                .labelStyle(.iconOnly)
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(10)
+                        .glassEffect(.regular, in: Capsule())
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 8)
+                    }
+                }
+            }
+            .toolbar {
+                Button("Home", systemImage: "house") { showingHome = true }
+            }
+        } detail: {
+            editorDetail
+        }
+        .opacity(showingHome ? 0 : 1)
+        .allowsHitTesting(!showingHome)
+        }
         if showingHome || store.workspaceName == nil {
             VStack(alignment: .leading, spacing: 24) {
                 Label("Native Workspace", systemImage: "folder")
@@ -262,107 +393,41 @@ struct ContentView: View {
             }
             .padding(32)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        } else {
-        NavigationSplitView {
-            VStack(spacing: 0) {
-                Picker("Sidebar", selection: $sidebarTab) {
-                    Image(systemName: "folder")
-                        .accessibilityLabel("Files")
-                        .tag(0)
-                    Image(systemName: "magnifyingglass")
-                        .accessibilityLabel("Search")
-                        .tag(1)
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.large)
-                .labelsHidden()
-                .padding(8)
-                .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
-                if sidebarTab == 1 {
-                    HStack {
-                        TextField("Search in files", text: Binding(
-                            get: { store.searchQuery },
-                            set: { store.setSearchQuery($0) }
-                        ))
-                        if store.searchInProgress { ProgressView().controlSize(.small) }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
-                }
-                List {
-                    ForEach(sidebarRows) { row in
-                        sidebarRow(row)
-                    }
-                    if sidebarTab == 0 {
-                        Color.clear.frame(height: 52).listRowSeparator(.hidden)
-                    }
-                }
-                .onReceive(store.$workspaceRoot) { root in
-                    if currentWorkspaceRoot != root {
-                        currentWorkspaceRoot = root
-                        expandedDirectories.removeAll()
-                    }
-                }
-                .onReceive(store.$sidebarRevision) { _ in
-                    DispatchQueue.main.async { rebuildSidebarIndex() }
-                }
-                .onChange(of: fileNameQuery) { _, _ in rebuildSidebarIndex() }
-                .overlay {
-                    if store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
-                        Text(sidebarTab == 1
-                             ? (store.searchQuery.isEmpty ? "Search file contents" : "No text matches")
-                             : (fileNameQuery.isEmpty ? "No files" : "No matching names"))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .overlay(alignment: .bottom) {
-                    if sidebarTab == 0 {
-                    HStack(spacing: 8) {
-                        Menu {
-                            Button("New File", systemImage: "doc.badge.plus") {
-                                creatingDirectory = false
-                                newEntryPath = ""
-                                creatingEntry = true
-                            }
-                            Button("New Folder", systemImage: "folder.badge.plus") {
-                                creatingDirectory = true
-                                newEntryPath = ""
-                                creatingEntry = true
-                            }
-                        } label: {
-                            Image(systemName: "plus")
-                                .frame(width: 20, height: 20)
-                                .padding(8)
-                        }
-                        .menuIndicator(.hidden)
-                        .buttonStyle(.plain)
-                        .help("Add file or folder")
-                        .glassEffect(.regular, in: Circle())
-                        HStack(spacing: 6) {
-                            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                            TextField("Filter names", text: $fileNameQuery)
-                            .textFieldStyle(.plain)
-                            if !fileNameQuery.isEmpty {
-                                Button("Clear search", systemImage: "xmark.circle.fill") {
-                                    fileNameQuery = ""
-                                }
-                                .labelStyle(.iconOnly)
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(10)
-                        .glassEffect(.regular, in: Capsule())
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 8)
-                    }
-                }
+        }
+        }
+        .background(WindowTitleView(title: store.workspaceName ?? "Native Workspace"))
+        .fileImporter(isPresented: $choosingWorkspace, allowedContentTypes: [.folder]) { result in
+            switch result {
+            case .success(let url): openWorkspace(url)
+            case .failure: break
             }
-            .navigationTitle(store.workspaceName ?? "Native Workspace")
-            .toolbar {
-                Button("Home", systemImage: "house") { showingHome = true }
+        }
+        .confirmationDialog("This file changed on disk", isPresented: $resolvingExternalChange) {
+            Button("Reload from Disk", role: .destructive) { store.reloadDocument() }
+            Button("Keep Mine and Overwrite", role: .destructive) { store.overwriteDocument() }
+        } message: {
+            Text("Choose which version to keep. Reloading discards your local edits.")
+        }
+        .alert(creatingDirectory ? "New Folder" : "New File", isPresented: $creatingEntry) {
+            TextField("Path relative to workspace", text: $newEntryPath)
+            Button("Create") {
+                store.createEntry(newEntryPath.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  directory: creatingDirectory)
             }
-        } detail: {
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Enter a name or a path inside an existing folder.")
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            store.pollWorkspaceChanges()
+        }
+        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
+            store.pollSearchResults()
+        }
+        .frame(minWidth: 680, minHeight: 420)
+    }
+
+    private var editorDetail: some View {
             VStack(spacing: 0) {
                 if let active = store.activeDocument {
                     if active.externalChange {
@@ -414,39 +479,39 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
             }
-        }
-        }
-        }
-        .fileImporter(isPresented: $choosingWorkspace, allowedContentTypes: [.folder]) { result in
-            switch result {
-            case .success(let url): openWorkspace(url)
-            case .failure: break
-            }
-        }
-        .confirmationDialog("This file changed on disk", isPresented: $resolvingExternalChange) {
-            Button("Reload from Disk", role: .destructive) { store.reloadDocument() }
-            Button("Keep Mine and Overwrite", role: .destructive) { store.overwriteDocument() }
-        } message: {
-            Text("Choose which version to keep. Reloading discards your local edits.")
-        }
-        .alert(creatingDirectory ? "New Folder" : "New File", isPresented: $creatingEntry) {
-            TextField("Path relative to workspace", text: $newEntryPath)
-            Button("Create") {
-                store.createEntry(newEntryPath.trimmingCharacters(in: .whitespacesAndNewlines),
-                                  directory: creatingDirectory)
-            }
-            Button("Cancel", role: .cancel) { }
-        } message: {
-            Text("Enter a name or a path inside an existing folder.")
-        }
-        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
-            store.pollWorkspaceChanges()
-        }
-        .frame(minWidth: 680, minHeight: 420)
     }
 
     private func openWorkspace(_ url: URL) {
         store.openWorkspace(url)
         if store.workspaceRoot == url.path { showingHome = false }
+    }
+}
+
+private struct WindowTitleView: NSViewRepresentable {
+    let title: String
+
+    func makeNSView(context: Context) -> TitleView {
+        let view = TitleView()
+        view.title = title
+        return view
+    }
+
+    func updateNSView(_ view: TitleView, context: Context) {
+        view.title = title
+        view.updateTitle()
+    }
+
+    final class TitleView: NSView {
+        var title = ""
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            updateTitle()
+        }
+
+        func updateTitle() {
+            guard let window, window.title != title else { return }
+            window.title = title
+        }
     }
 }
