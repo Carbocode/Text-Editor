@@ -93,6 +93,10 @@ final class WorkspaceStore: ObservableObject {
 
     func pollWorkspaceChanges() {
         updateWorkspace { try core.pollWorkspaceChanges() }
+    }
+
+    func pollSearchResults() {
+        guard searchInProgress else { return }
         updateWorkspace { try core.pollSearchResults() }
     }
 
@@ -208,6 +212,7 @@ final class WorkspaceStore: ObservableObject {
         let sidebarChanged = searchQuery != snapshot.searchQuery
             || searchResults != snapshot.searchResults
             || directories != snapshot.directories
+            || documents != snapshot.documents
         revision = snapshot.revision
         counter = snapshot.counter
         workspaceName = snapshot.workspaceName
