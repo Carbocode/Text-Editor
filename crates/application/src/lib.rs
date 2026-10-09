@@ -29,6 +29,7 @@ pub enum AppCommand {
     QueueSearchQuery(String),
     PollSearchResults,
     OpenWorkspace(PathBuf),
+    CreateEntry { id: DocumentId, directory: bool },
     RefreshWorkspace,
     PollWorkspaceChanges,
     OpenDocument(DocumentId),
@@ -865,6 +866,16 @@ impl Application {
                     }]
                 }
             }
+            AppCommand::CreateEntry { id, directory } => {
+                let workspace = self
+                    .state
+                    .workspace
+                    .as_ref()
+                    .ok_or(AppError::WorkspaceNotOpen)?;
+                self.filesystem
+                    .create_entry(&workspace.root, &id, directory)?;
+                self.resolve(AppCommand::RefreshWorkspace)?
+            }
             AppCommand::OpenDocument(id) => {
                 let root = &self
                     .state
@@ -1037,6 +1048,49 @@ mod tests {
             app.dispatch_if_changed(AppCommand::PollSearchResults)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn creates_files_and_folders_without_overwriting_existing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let snapshot = app
+            .dispatch(AppCommand::CreateEntry {
+                id: id("notes"),
+                directory: true,
+            })
+            .unwrap();
+        assert_eq!(snapshot.directories, ["notes"]);
+        let snapshot = app
+            .dispatch(AppCommand::CreateEntry {
+                id: id("notes/todo.md"),
+                directory: false,
+            })
+            .unwrap();
+        assert!(
+            snapshot
+                .documents
+                .iter()
+                .any(|entry| entry.id == id("notes/todo.md"))
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes/todo.md")).unwrap(),
+            ""
+        );
+        fs::write(dir.path().join("notes/todo.md"), "keep me").unwrap();
+        assert!(
+            app.dispatch(AppCommand::CreateEntry {
+                id: id("notes/todo.md"),
+                directory: false,
+            })
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes/todo.md")).unwrap(),
+            "keep me"
         );
     }
 
