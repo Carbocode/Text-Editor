@@ -27,6 +27,12 @@ struct Ui {
     all_entries: Rc<RefCell<Vec<SidebarEntry>>>,
     visible_entries: Rc<RefCell<Vec<SidebarEntry>>>,
     search: gtk::SearchEntry,
+    file_search: gtk::SearchEntry,
+    search_mode: Rc<Cell<bool>>,
+    file_query: Rc<RefCell<String>>,
+    force_sidebar_rebuild: Rc<Cell<bool>>,
+    file_search_row: gtk::Box,
+    text_search_row: gtk::Box,
     search_spinner: gtk::Spinner,
     files_placeholder: gtk::Label,
     conflict_banner: gtk::Box,
@@ -36,9 +42,9 @@ struct Ui {
     heading: gtk::Label,
     status: gtk::Label,
     counter: gtk::Label,
-    save: gtk::Button,
-    recent_button: gtk::MenuButton,
+    pages: gtk::Stack,
     recent_list: gtk::Box,
+    recent_empty: gtk::Label,
     updating: Rc<Cell<bool>>,
     collapsed_directories: Rc<RefCell<std::collections::HashSet<String>>>,
 }
@@ -77,10 +83,39 @@ impl SidebarRow {
 }
 
 impl Ui {
+    fn create_entry(&self, name: &str, directory: bool) {
+        let id = match DocumentId::parse(name.to_owned()) {
+            Ok(id) => id,
+            Err(_) => {
+                self.status.set_label("Invalid relative path");
+                return;
+            }
+        };
+        let result = self.core.borrow_mut().dispatch(AppCommand::CreateEntry {
+            id: id.clone(),
+            directory,
+        });
+        match result {
+            Ok(snapshot) => {
+                self.render(snapshot);
+                if !directory {
+                    self.dispatch(AppCommand::OpenDocument(id));
+                }
+            }
+            Err(error) => self.status.set_label(&error.to_string()),
+        }
+    }
+
     fn dispatch(&self, command: AppCommand) {
+        let opening_workspace = matches!(command, AppCommand::OpenWorkspace(_));
         let result = self.core.borrow_mut().dispatch(command);
         match result {
-            Ok(snapshot) => self.render(snapshot),
+            Ok(snapshot) => {
+                self.render(snapshot);
+                if opening_workspace {
+                    self.pages.set_visible_child_name("workspace");
+                }
+            }
             Err(error) => self.status.set_label(&error.to_string()),
         }
     }
@@ -94,8 +129,10 @@ impl Ui {
             .cloned();
         let results_changed = {
             let previous = self.snapshot.borrow();
-            previous.search_results != snapshot.search_results
-                || previous.search_query != snapshot.search_query
+            self.force_sidebar_rebuild.replace(false)
+                || (self.search_mode.get()
+                    && (previous.search_results != snapshot.search_results
+                        || previous.search_query != snapshot.search_query))
                 || previous.documents != snapshot.documents
                 || previous.directories != snapshot.directories
         };
@@ -116,6 +153,10 @@ impl Ui {
             }
         }
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
+        let workspace_changed = self.snapshot.borrow().workspace_root != snapshot.workspace_root;
+        if workspace_changed && snapshot.workspace_root.is_some() {
+            self.pages.set_visible_child_name("workspace");
+        }
         self.window.set_title(Some(
             snapshot
                 .workspace_name
@@ -133,12 +174,21 @@ impl Ui {
         }
         self.search_spinner
             .set_spinning(snapshot.search_in_progress);
-        self.search_spinner.set_visible(snapshot.search_in_progress);
+        self.search_spinner
+            .set_visible(self.search_mode.get() && snapshot.search_in_progress);
         self.files_placeholder
             .set_label(if snapshot.workspace_name.is_none() {
                 "Open a workspace"
+            } else if self.search_mode.get() {
+                if snapshot.search_query.0.is_empty() {
+                    "Search file contents"
+                } else {
+                    "No text matches"
+                }
+            } else if !self.file_query.borrow().is_empty() {
+                "No matching names"
             } else {
-                "No matching files"
+                "No files"
             });
         self.conflict_banner.set_visible(
             snapshot
@@ -148,12 +198,6 @@ impl Ui {
         );
         self.counter
             .set_label(&format!("Counter: {}", snapshot.diagnostic_counter));
-        self.save.set_sensitive(
-            snapshot
-                .active_document
-                .as_ref()
-                .is_some_and(|doc| doc.dirty),
-        );
         self.editor.set_editable(snapshot.active_document.is_some());
         self.status
             .set_label(match snapshot.active_document.as_ref() {
@@ -161,15 +205,22 @@ impl Ui {
                 Some(_) => "Saved",
                 None => "Select a document",
             });
-        self.recent_button
-            .set_sensitive(!snapshot.recent_workspaces.is_empty());
         if recent_changed {
             while let Some(child) = self.recent_list.first_child() {
                 self.recent_list.remove(&child);
             }
             for workspace in &snapshot.recent_workspaces {
-                let button = gtk::Button::with_label(&workspace.name);
-                button.set_tooltip_text(Some(&workspace.root.to_string_lossy()));
+                let button = gtk::Button::new();
+                let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                let name = gtk::Label::new(Some(&workspace.name));
+                name.set_xalign(0.0);
+                let path_label = gtk::Label::new(Some(&workspace.root.to_string_lossy()));
+                path_label.set_xalign(0.0);
+                path_label.add_css_class("dim-label");
+                path_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+                labels.append(&name);
+                labels.append(&path_label);
+                button.set_child(Some(&labels));
                 button.add_css_class("flat");
                 button.set_halign(gtk::Align::Fill);
                 let ui = self.clone();
@@ -179,31 +230,70 @@ impl Ui {
                 self.recent_list.append(&button);
             }
         }
+        self.recent_empty
+            .set_visible(snapshot.recent_workspaces.is_empty());
         if results_changed {
             let mut entries = Vec::new();
-            let conflicted: std::collections::HashSet<_> = snapshot
+            let text_mode = self.search_mode.get();
+            let needle = self.file_query.borrow().trim().to_lowercase();
+            let documents: std::collections::HashMap<_, _> = snapshot
                 .documents
                 .iter()
-                .filter(|entry| entry.external_change)
-                .map(|entry| &entry.id)
+                .map(|entry| (entry.id.as_str().to_owned(), entry))
                 .collect();
-            let groups: std::collections::HashMap<_, _> = snapshot
+            let groups: std::collections::HashMap<String, Vec<&SearchResult>> = snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
-                .map(|group| (group[0].id.as_str().to_owned(), group))
+                .filter_map(|group| {
+                    let matches: Vec<_> = group
+                        .iter()
+                        .filter(|result| result.location.is_some())
+                        .collect();
+                    (!matches.is_empty()).then(|| (group[0].id.as_str().to_owned(), matches))
+                })
                 .collect();
             let mut paths: Vec<(String, bool)> = Vec::new();
-            if snapshot.search_query.0.is_empty() {
+            if text_mode {
+                paths.extend(groups.keys().cloned().map(|path| (path, false)));
+            } else {
+                paths.extend(
+                    snapshot
+                        .documents
+                        .iter()
+                        .filter(|entry| {
+                            needle.is_empty()
+                                || entry
+                                    .id
+                                    .as_str()
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_lowercase()
+                                    .contains(&needle)
+                        })
+                        .map(|entry| (entry.id.as_str().to_owned(), false)),
+                );
                 paths.extend(
                     snapshot
                         .directories
                         .iter()
+                        .filter(|path| {
+                            needle.is_empty()
+                                || path
+                                    .rsplit('/')
+                                    .next()
+                                    .unwrap_or("")
+                                    .to_lowercase()
+                                    .contains(&needle)
+                        })
                         .cloned()
                         .map(|path| (path, true)),
                 );
-            } else {
-                for id in groups.keys() {
-                    let mut parent = std::path::Path::new(id).parent();
+            }
+            if text_mode || !needle.is_empty() {
+                let matched_paths = paths.clone();
+                for (id, _) in matched_paths {
+                    let mut parent = std::path::Path::new(&id).parent();
                     while let Some(path) = parent.and_then(|path| path.to_str()) {
                         if path.is_empty() {
                             break;
@@ -213,7 +303,6 @@ impl Ui {
                     }
                 }
             }
-            paths.extend(groups.keys().cloned().map(|path| (path, false)));
             let directories: std::collections::HashSet<_> = paths
                 .iter()
                 .filter(|(_, is_directory)| *is_directory)
@@ -234,11 +323,10 @@ impl Ui {
                     });
                     continue;
                 }
-                let Some(group) = groups.get(&path) else {
+                let Some(document) = documents.get(&path) else {
                     continue;
                 };
-                let document = &group[0];
-                let suffix = if conflicted.contains(&document.id) {
+                let suffix = if document.external_change {
                     Some("⚠")
                 } else if document.dirty {
                     Some("●")
@@ -252,7 +340,7 @@ impl Ui {
                     depth,
                     suffix,
                 });
-                for result in group.iter().filter(|result| result.location.is_some()) {
+                for result in groups.get(&path).into_iter().flatten() {
                     let location = result.location.as_ref().unwrap();
                     let title = match result.snippet.as_deref() {
                         Some(snippet) => {
@@ -261,7 +349,7 @@ impl Ui {
                         None => format!("↳ {}:{}", location.line, location.column),
                     };
                     entries.push(SidebarEntry {
-                        row: SidebarRow::Match(result.clone()),
+                        row: SidebarRow::Match((**result).clone()),
                         path: path.clone(),
                         title,
                         depth: depth + 1,
@@ -270,7 +358,7 @@ impl Ui {
                 }
             }
             self.all_entries.replace(entries);
-            self.rebuild_visible_sidebar(&snapshot);
+            self.rebuild_visible_sidebar();
         }
         if let Some(active) = snapshot.active_document.as_ref() {
             let rows = self.sidebar_rows.borrow();
@@ -282,7 +370,7 @@ impl Ui {
                 })
             });
             let index = selected_index.or_else(|| {
-                if snapshot.search_query.0.trim().is_empty() {
+                if !self.search_mode.get() && self.file_query.borrow().trim().is_empty() {
                     rows.iter()
                         .position(|row| matches!(row, SidebarRow::File(id) if id == &active.id))
                 } else {
@@ -323,8 +411,8 @@ impl Ui {
         self.updating.set(false);
     }
 
-    fn rebuild_visible_sidebar(&self, snapshot: &AppSnapshot) {
-        let searching = !snapshot.search_query.0.is_empty();
+    fn rebuild_visible_sidebar(&self) {
+        let searching = self.search_mode.get() || !self.file_query.borrow().trim().is_empty();
         let collapsed = self.collapsed_directories.borrow();
         let mut hidden_prefix: Option<String> = None;
         let mut visible = Vec::new();
@@ -353,7 +441,7 @@ impl Ui {
     }
 
     fn toggle_directory(&self, path: &str) {
-        if !self.snapshot.borrow().search_query.0.is_empty() {
+        if self.search_mode.get() || !self.file_query.borrow().trim().is_empty() {
             return;
         }
         let Some(visible_index) = self
@@ -638,32 +726,24 @@ fn build_window(app: &adw::Application) {
     toggle_sidebar.set_icon_name(sidebar_icon);
     toggle_sidebar.set_tooltip_text(Some("Toggle Sidebar"));
     content_header.pack_start(&toggle_sidebar);
-    let open = gtk::Button::from_icon_name("document-open-symbolic");
-    open.set_tooltip_text(Some("Open Workspace"));
-    let save = gtk::Button::new();
-    let save_content = adw::ButtonContent::new();
-    save_content.set_icon_name("document-save-symbolic");
-    save_content.set_label("Save");
-    save.set_child(Some(&save_content));
-    save.set_sensitive(false);
-    sidebar_header.pack_start(&open);
-    let recent_button = gtk::MenuButton::new();
-    recent_button.set_icon_name("document-open-recent-symbolic");
-    recent_button.set_tooltip_text(Some("Recent Workspaces"));
-    recent_button.set_sensitive(false);
+    let open = gtk::Button::with_label("Open Folder…");
+    let home_button = gtk::Button::new();
+    let home_icon = gtk::Image::from_paintable(Some(&texture_for_icon("folder-home")));
+    home_icon.set_pixel_size(16);
+    home_button.set_child(Some(&home_icon));
+    home_button.set_tooltip_text(Some("Home"));
+    sidebar_header.pack_start(&home_button);
     let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
     recent_list.set_margin_top(6);
     recent_list.set_margin_bottom(6);
     recent_list.set_margin_start(6);
     recent_list.set_margin_end(6);
-    let recent_popover = gtk::Popover::new();
-    recent_popover.set_child(Some(&recent_list));
-    recent_button.set_popover(Some(&recent_popover));
-    sidebar_header.pack_start(&recent_button);
-    content_header.pack_end(&save);
     let heading = gtk::Label::new(Some("Open a workspace"));
     content_header.set_title_widget(Some(&heading));
     let current_snapshot = Rc::new(RefCell::new(Application::new().snapshot()));
+    let search_mode = Rc::new(Cell::new(false));
+    let file_query = Rc::new(RefCell::new(String::new()));
+    let force_sidebar_rebuild = Rc::new(Cell::new(false));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let visible_entries: Rc<RefCell<Vec<SidebarEntry>>> = Rc::new(RefCell::new(Vec::new()));
     let file_model = gtk::StringList::new(&[]);
@@ -674,14 +754,15 @@ fn build_window(app: &adw::Application) {
     {
         let visible_entries = visible_entries.clone();
         let collapsed_directories = collapsed_directories.clone();
-        let current_snapshot = current_snapshot.clone();
+        let search_mode = search_mode.clone();
+        let file_query = file_query.clone();
         factory.connect_bind(move |_, item| {
             let item = item
                 .downcast_ref::<gtk::ListItem>()
                 .expect("sidebar list item");
             if let Some(entry) = visible_entries.borrow().get(item.position() as usize) {
                 let collapsed = matches!(&entry.row, SidebarRow::Directory(path)
-                    if current_snapshot.borrow().search_query.0.is_empty()
+                    if !search_mode.get() && file_query.borrow().is_empty()
                         && collapsed_directories.borrow().contains(path));
                 item.set_child(Some(&sidebar_entry_widget(entry, collapsed)));
             }
@@ -702,18 +783,61 @@ fn build_window(app: &adw::Application) {
     let search = gtk::SearchEntry::new();
     let search_spinner = gtk::Spinner::new();
     search_spinner.set_visible(false);
-    search.set_placeholder_text(Some("Search files"));
-    search.set_margin_top(8);
-    search.set_margin_bottom(8);
-    search.set_margin_start(8);
-    search.set_margin_end(8);
+    search.set_placeholder_text(Some("Search in files"));
+    let file_search = gtk::SearchEntry::new();
+    file_search.set_placeholder_text(Some("Filter names"));
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_content.add_css_class("workspace-sidebar");
-    let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tab_row.set_margin_start(8);
+    tab_row.set_margin_end(8);
+    tab_row.set_margin_top(6);
+    tab_row.set_margin_bottom(6);
+    let file_tab = gtk::ToggleButton::new();
+    let file_tab_icon = gtk::Image::from_paintable(Some(&texture_for_icon("folder")));
+    file_tab_icon.set_pixel_size(16);
+    file_tab.set_child(Some(&file_tab_icon));
+    file_tab.set_tooltip_text(Some("Files"));
+    file_tab.set_hexpand(true);
+    file_tab.set_active(true);
+    let text_tab = gtk::ToggleButton::new();
+    let text_tab_icon = gtk::Image::from_paintable(Some(&texture_for_icon("search")));
+    text_tab_icon.set_pixel_size(16);
+    text_tab.set_child(Some(&text_tab_icon));
+    text_tab.set_tooltip_text(Some("Search in files"));
+    text_tab.set_hexpand(true);
+    text_tab.set_group(Some(&file_tab));
+    tab_row.append(&file_tab);
+    tab_row.append(&text_tab);
+    sidebar_content.append(&tab_row);
+    let text_search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    text_search_row.set_margin_start(8);
+    text_search_row.set_margin_end(8);
+    text_search_row.set_margin_bottom(6);
     search.set_hexpand(true);
-    search_row.append(&search);
-    search_row.append(&search_spinner);
-    sidebar_content.append(&search_row);
+    text_search_row.append(&search);
+    text_search_row.append(&search_spinner);
+    text_search_row.set_visible(false);
+    sidebar_content.append(&text_search_row);
+    let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    search_row.set_margin_start(8);
+    search_row.set_margin_end(8);
+    search_row.set_margin_top(8);
+    search_row.set_margin_bottom(8);
+    let add_button = gtk::MenuButton::new();
+    add_button.set_icon_name("list-add-symbolic");
+    add_button.set_tooltip_text(Some("Add file or folder"));
+    let add_menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let new_file = gtk::Button::with_label("New File");
+    let new_folder = gtk::Button::with_label("New Folder");
+    add_menu.append(&new_file);
+    add_menu.append(&new_folder);
+    let add_popover = gtk::Popover::new();
+    add_popover.set_child(Some(&add_menu));
+    add_button.set_popover(Some(&add_popover));
+    search_row.append(&add_button);
+    file_search.set_hexpand(true);
+    search_row.append(&file_search);
     let files_scroll = gtk::ScrolledWindow::new();
     files_scroll.add_css_class("workspace-files-scroll");
     files_scroll.set_vexpand(true);
@@ -723,6 +847,7 @@ fn build_window(app: &adw::Application) {
     files_overlay.set_child(Some(&files_scroll));
     files_overlay.add_overlay(&files_placeholder);
     sidebar_content.append(&files_overlay);
+    sidebar_content.append(&search_row);
     let sidebar_style = gtk::CssProvider::new();
     sidebar_style.load_from_data(include_str!("sidebar.css"));
     gtk::style_context_add_provider_for_display(
@@ -801,7 +926,25 @@ fn build_window(app: &adw::Application) {
         footer.append(&diagnostic);
     }
     content_view.add_bottom_bar(&footer);
-    window.set_content(Some(&split));
+    let home = gtk::Box::new(gtk::Orientation::Vertical, 20);
+    home.set_margin_top(48);
+    home.set_margin_bottom(32);
+    home.set_margin_start(48);
+    home.set_margin_end(48);
+    home.append(&gtk::Label::new(Some("Native Workspace")));
+    home.append(&open);
+    home.append(&gtk::Label::new(Some("Recent Workspaces")));
+    let recent_empty = gtk::Label::new(Some("No recent workspaces"));
+    home.append(&recent_empty);
+    let recent_scroll = gtk::ScrolledWindow::new();
+    recent_scroll.set_vexpand(true);
+    recent_scroll.set_child(Some(&recent_list));
+    home.append(&recent_scroll);
+    let pages = gtk::Stack::new();
+    pages.add_named(&home, Some("home"));
+    pages.add_named(&split, Some("workspace"));
+    pages.set_visible_child_name("home");
+    window.set_content(Some(&pages));
 
     let ui = Ui {
         window: window.clone(),
@@ -814,6 +957,12 @@ fn build_window(app: &adw::Application) {
         all_entries: Rc::new(RefCell::new(Vec::new())),
         visible_entries,
         search,
+        file_search,
+        search_mode,
+        file_query,
+        force_sidebar_rebuild,
+        file_search_row: search_row,
+        text_search_row,
         search_spinner,
         files_placeholder,
         conflict_banner,
@@ -823,13 +972,108 @@ fn build_window(app: &adw::Application) {
         heading,
         status,
         counter,
-        save,
-        recent_button,
+        pages,
         recent_list,
+        recent_empty,
         updating: Rc::new(Cell::new(false)),
         collapsed_directories,
     };
     ui.render(snapshot);
+    {
+        let ui = ui.clone();
+        file_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            ui.search_mode.set(false);
+            ui.file_search_row.set_visible(true);
+            ui.text_search_row.set_visible(false);
+            ui.force_sidebar_rebuild.set(true);
+            let snapshot = ui.snapshot.borrow().clone();
+            ui.render(snapshot);
+        });
+    }
+    {
+        let ui = ui.clone();
+        text_tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            ui.search_mode.set(true);
+            ui.file_search_row.set_visible(false);
+            ui.text_search_row.set_visible(true);
+            ui.force_sidebar_rebuild.set(true);
+            let snapshot = ui.snapshot.borrow().clone();
+            ui.render(snapshot);
+        });
+    }
+    {
+        let ui = ui.clone();
+        ui.file_search
+            .clone()
+            .connect_search_changed(move |search| {
+                if ui.updating.get() {
+                    return;
+                }
+                ui.file_query.replace(search.text().to_string());
+                ui.force_sidebar_rebuild.set(true);
+                let snapshot = ui.snapshot.borrow().clone();
+                ui.render(snapshot);
+            });
+    }
+    for (button, directory) in [(new_file, false), (new_folder, true)] {
+        let ui = ui.clone();
+        let add_popover = add_popover.clone();
+        button.connect_clicked(move |_| {
+            add_popover.popdown();
+            let dialog = gtk::Dialog::builder()
+                .title(if directory { "New Folder" } else { "New File" })
+                .transient_for(&ui.window)
+                .modal(true)
+                .build();
+            dialog.add_button("Cancel", gtk::ResponseType::Cancel);
+            dialog.add_button("Create", gtk::ResponseType::Accept);
+            dialog.set_default_response(gtk::ResponseType::Accept);
+            let entry = gtk::Entry::new();
+            entry.set_placeholder_text(Some("Path relative to workspace"));
+            entry.set_activates_default(true);
+            entry.set_margin_start(12);
+            entry.set_margin_end(12);
+            entry.set_margin_top(12);
+            entry.set_margin_bottom(12);
+            dialog.content_area().append(&entry);
+            let ui = ui.clone();
+            dialog.connect_response(move |dialog, response| {
+                if response == gtk::ResponseType::Accept {
+                    ui.create_entry(entry.text().trim(), directory);
+                }
+                dialog.close();
+            });
+            dialog.present();
+        });
+    }
+    assert_eq!(ui.pages.visible_child_name().as_deref(), Some("home"));
+    {
+        let pages = ui.pages.clone();
+        home_button.connect_clicked(move |_| pages.set_visible_child_name("home"));
+    }
+    {
+        let ui = ui.clone();
+        let save_action = gio::SimpleAction::new("save", None);
+        save_action.connect_activate(move |_, _| {
+            let id = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.clone());
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::SaveDocument(id));
+            }
+        });
+        app.add_action(&save_action);
+        app.set_accels_for_action("app.save", &["<Primary>s"]);
+    }
     if let Some(error) = persistence_error {
         ui.status.set_label(&error);
     }
@@ -949,20 +1193,6 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
-        ui.save.clone().connect_clicked(move |_| {
-            let id = ui
-                .snapshot
-                .borrow()
-                .active_document
-                .as_ref()
-                .map(|doc| doc.id.clone());
-            if let Some(id) = id {
-                ui.dispatch(AppCommand::SaveDocument(id));
-            }
-        });
-    }
-    {
-        let ui = ui.clone();
         reload.connect_clicked(move |_| {
             let id = ui
                 .snapshot
@@ -1025,6 +1255,7 @@ fn build_window(app: &adw::Application) {
         assert!(icons.has_icon("document-open-symbolic"));
         assert!(icons.has_icon("document-save-symbolic"));
         assert!(icons.has_icon(sidebar_icon));
+        assert!(home_icon.paintable().is_some());
         assert!(sidebar_header.shows_start_title_buttons());
         assert!(sidebar_header.shows_end_title_buttons());
         assert!(content_header.shows_start_title_buttons());
@@ -1042,6 +1273,7 @@ fn build_window(app: &adw::Application) {
     if let Some(path) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE") {
         let workspace_path = PathBuf::from(path);
         ui.dispatch(AppCommand::OpenWorkspace(workspace_path.clone()));
+        assert_eq!(ui.pages.visible_child_name().as_deref(), Some("workspace"));
         assert_eq!(files_scroll.hscrollbar_policy(), gtk::PolicyType::Never);
         if ui
             .snapshot
@@ -1115,8 +1347,24 @@ fn build_window(app: &adw::Application) {
                 "GTK Phase 1 smoke content\n{}💡 Another Phase 1 match",
                 "filler\n".repeat(80)
             ));
-            ui.save.emit_clicked();
+            app.activate_action("save", None);
             assert_eq!(ui.status.text(), "Saved");
+            ui.file_search.set_text("main");
+            assert!(ui.sidebar_rows.borrow().iter().any(|row| matches!(row,
+                SidebarRow::File(id) if id.as_str() == "src/main.rs")));
+            assert!(
+                !ui.sidebar_rows
+                    .borrow()
+                    .iter()
+                    .any(|row| matches!(row, SidebarRow::Match(_)))
+            );
+            ui.file_search.set_text("src");
+            assert!(ui.sidebar_rows.borrow().iter().any(|row| matches!(row,
+                SidebarRow::Directory(path) if path == "src")));
+            ui.file_search.set_text("");
+            text_tab.set_active(true);
+            ui.dispatch(AppCommand::SetSearchQuery("README".into()));
+            assert!(ui.sidebar_rows.borrow().is_empty());
             ui.dispatch(AppCommand::SetSearchQuery("phase 1".into()));
             assert_eq!(ui.snapshot.borrow().search_results.len(), 2);
             assert_eq!(ui.sidebar_rows.borrow().len(), 3);
@@ -1156,6 +1404,7 @@ fn build_window(app: &adw::Application) {
             assert!(ui.snapshot.borrow().search_results.is_empty());
             assert_eq!(ui.search.text(), "unlikely-no-match");
             ui.dispatch(AppCommand::SetSearchQuery(String::new()));
+            file_tab.set_active(true);
             assert_eq!(
                 ui.snapshot.borrow().search_results.len(),
                 ui.snapshot.borrow().documents.len()
@@ -1173,7 +1422,7 @@ fn build_window(app: &adw::Application) {
             std::fs::write(&document_path, "external conflict").unwrap();
             ui.dispatch(AppCommand::RefreshWorkspace);
             assert!(ui.conflict_banner.is_visible());
-            ui.save.emit_clicked();
+            app.activate_action("save", None);
             assert_eq!(
                 std::fs::read_to_string(&document_path).unwrap(),
                 "external conflict"
@@ -1184,6 +1433,9 @@ fn build_window(app: &adw::Application) {
                 "local edit"
             );
             assert!(!ui.conflict_banner.is_visible());
+            ui.create_entry("notes", true);
+            ui.create_entry("notes/todo.md", false);
+            assert!(workspace_path.join("notes/todo.md").is_file());
             println!("GTK workspace edit/save smoke test passed");
         }
         app.quit();

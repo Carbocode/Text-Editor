@@ -80,6 +80,17 @@ final class WorkspaceStore: ObservableObject {
         updateWorkspace { try core.refreshWorkspace() }
     }
 
+    func createEntry(_ path: String, directory: Bool) {
+        do {
+            try flushLocalEdits()
+            apply(try core.createEntry(path: path, directory: directory))
+            errorMessage = nil
+            if !directory { openDocument(path) }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func pollWorkspaceChanges() {
         updateWorkspace { try core.pollWorkspaceChanges() }
         updateWorkspace { try core.pollSearchResults() }

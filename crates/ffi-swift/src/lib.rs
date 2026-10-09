@@ -246,6 +246,17 @@ impl WorkspaceApplication {
         self.dispatch(AppCommand::RefreshWorkspace)
     }
 
+    pub fn create_entry(
+        &self,
+        path: String,
+        directory: bool,
+    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::CreateEntry {
+            id: Self::parse_id(path)?,
+            directory,
+        })
+    }
+
     pub fn poll_workspace_changes(&self) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
         self.dispatch_if_changed(AppCommand::PollWorkspaceChanges)
     }

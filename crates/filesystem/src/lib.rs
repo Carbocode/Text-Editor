@@ -87,6 +87,24 @@ pub trait WorkspaceFilesystem: Send + Sync {
         id: &DocumentId,
         content: &str,
     ) -> Result<(), FilesystemError>;
+    fn create_entry(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        directory: bool,
+    ) -> Result<(), FilesystemError> {
+        let path = RealFilesystem::safe_document_location(root, id)?;
+        if directory {
+            fs::create_dir(&path).map_err(|source| FilesystemError::Io { path, source })
+        } else {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map(|_| ())
+                .map_err(|source| FilesystemError::Io { path, source })
+        }
+    }
 }
 
 #[derive(Debug, Default)]

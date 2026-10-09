@@ -13,7 +13,7 @@ Kirigami.ApplicationWindow {
     AppController { id: controller }
     FolderDialog {
         id: folderDialog
-        onAccepted: controller.open_workspace(selectedFolder.toString())
+        onAccepted: workspacePane.openWorkspace(selectedFolder.toString())
     }
     pageStack.initialPage: Kirigami.Page {
         WorkspacePane {
@@ -42,9 +42,14 @@ Kirigami.ApplicationWindow {
                     throw new Error("Workspace documents were not listed")
                 if (title !== controller.workspace_name)
                     throw new Error("Window title did not follow the workspace")
+                workspacePane.sidebarTab = 1
+                workspacePane.scheduleSidebarUpdate()
                 controller.search_files("unlikely-no-match")
                 if (controller.search_result_ids.length !== 0)
                     throw new Error("Filename search did not filter results")
+                controller.search_files("README")
+                if (workspacePane.searchFileCount !== 0)
+                    throw new Error("Text search included a filename-only match")
                 controller.search_files("")
                 controller.open_document(controller.document_ids[0])
                 controller.change_document("Kirigami Phase 1 smoke content\n" + "filler\n".repeat(80) + "💡 Another Phase 1 match")
