@@ -436,14 +436,26 @@ impl AppState {
             .position(|entry| &entry.id == id)
             .expect("document validated before producing event");
         let entry = &self.documents[index];
+        if needle.is_empty()
+            && let Some(result) = self.search_results.get_mut(index)
+            && result.id == *id
+        {
+            result.dirty = entry.dirty();
+            return;
+        }
         let results = search_results_for(entry, &needle, entry.content.as_deref());
         self.search_results.retain(|result| &result.id != id);
         if !results.is_empty() {
+            let order: HashMap<_, _> = self
+                .documents
+                .iter()
+                .enumerate()
+                .map(|(position, document)| (&document.id, position))
+                .collect();
             let position = self.search_results.partition_point(|existing| {
-                self.documents
-                    .iter()
-                    .position(|entry| entry.id == existing.id)
-                    .is_some_and(|existing_index| existing_index < index)
+                order
+                    .get(&existing.id)
+                    .is_some_and(|existing_index| *existing_index < index)
             });
             self.search_results.splice(position..position, results);
         }
@@ -1050,10 +1062,12 @@ mod tests {
             .unwrap();
         assert!(changed.documents[0].dirty);
         assert!(changed.active_document.unwrap().dirty);
+        assert!(changed.search_results[0].dirty);
         let saved = app
             .dispatch(AppCommand::SaveDocument(id("note.md")))
             .unwrap();
         assert!(!saved.documents[0].dirty);
+        assert!(!saved.search_results[0].dirty);
         assert_eq!(
             fs::read_to_string(dir.path().join("note.md")).unwrap(),
             "edited"

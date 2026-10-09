@@ -9,3 +9,4 @@ native-workspace-application = { path = "../../crates/application" }
 native-workspace-domain = { path = "../../crates/domain" }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_8"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_9"] }
+native-workspace-syntax = { path = "../../crates/syntax" }

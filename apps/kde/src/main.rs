@@ -1,8 +1,13 @@
 mod bridge;
 
+unsafe extern "C" {
+    fn register_editor_syntax_highlighter();
+}
+
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 
 fn main() {
+    unsafe { register_editor_syntax_highlighter() };
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
     let qml = if std::env::var_os("NATIVE_WORKSPACE_KIRIGAMI").is_some() {
