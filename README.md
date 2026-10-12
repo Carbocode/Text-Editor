@@ -12,6 +12,20 @@ Phase 4 adds a search field inside each sidebar. The Rust application core match
 
 Phase 5 watches the full directory tree with `notify` for files added, removed, or changed outside the app. Frontends collect events every 250 ms; the core also reconciles every 30 seconds, or every two seconds if a native watcher cannot start. Clean open documents reload automatically, while local edits are preserved when the disk version changes. A conflict notice offers an explicit choice to reload from disk or overwrite it. Normal Save refuses to replace a changed disk version, including changes detected before the next check.
 
+The editors use a monospaced font, line numbers, and a clickable and draggable minimap. The minimap renders 1×2 character glyphs with indentation and syntax colors, samples long documents to fit, and overlays the visible viewport. The glyph atlas comes from VS Code; see [attribution](assets/MINIMAP_ATTRIBUTION.md). A shared Rust syntax crate identifies token ranges for common code formats and Markdown; the native frontends color those ranges without changing document content. On macOS, text styling is limited to visible lines and the minimap raster is prepared in the background so large files stay responsive.
+
+## Planned phases
+
+The following phases are proposed and have not been implemented yet:
+
+6. **Complete file management:** rename, move, and delete files and folders, including safe handling of open documents and unsaved changes.
+7. **Edit multiple files:** show open documents as tabs in all three frontends, mark unsaved changes, switch and close tabs safely, and add Save All. The core already preserves unsaved content when switching documents; this phase makes open documents explicit. Side-by-side editing can follow as a separate extension.
+8. **Find and replace:** replace matches in the current document and across the workspace, with a preview before workspace-wide changes.
+9. **Restore sessions:** reopen the last workspace and its open documents after restarting the app.
+10. **Integrated terminal:** run commands in the current workspace from each native frontend.
+11. **Basic Git integration:** show changed files and diffs before committing.
+12. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
+
 Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build or start a frontend with cargo xtask build-macos, build-gnome, build-kde or their run-* counterparts. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
 
 Measure listing and search latency with `cargo run -p native-workspace-application --release --example search_benchmark -- [workspace] [query]`. Without arguments it creates a temporary nested workspace with 1,000 files. Search timing includes the 150 ms debounce.

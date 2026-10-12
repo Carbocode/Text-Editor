@@ -29,6 +29,7 @@ pub enum AppCommand {
     QueueSearchQuery(String),
     PollSearchResults,
     OpenWorkspace(PathBuf),
+    CreateEntry { id: DocumentId, directory: bool },
     RefreshWorkspace,
     PollWorkspaceChanges,
     OpenDocument(DocumentId),
@@ -436,14 +437,26 @@ impl AppState {
             .position(|entry| &entry.id == id)
             .expect("document validated before producing event");
         let entry = &self.documents[index];
+        if needle.is_empty()
+            && let Some(result) = self.search_results.get_mut(index)
+            && result.id == *id
+        {
+            result.dirty = entry.dirty();
+            return;
+        }
         let results = search_results_for(entry, &needle, entry.content.as_deref());
         self.search_results.retain(|result| &result.id != id);
         if !results.is_empty() {
+            let order: HashMap<_, _> = self
+                .documents
+                .iter()
+                .enumerate()
+                .map(|(position, document)| (&document.id, position))
+                .collect();
             let position = self.search_results.partition_point(|existing| {
-                self.documents
-                    .iter()
-                    .position(|entry| entry.id == existing.id)
-                    .is_some_and(|existing_index| existing_index < index)
+                order
+                    .get(&existing.id)
+                    .is_some_and(|existing_index| *existing_index < index)
             });
             self.search_results.splice(position..position, results);
         }
@@ -853,6 +866,16 @@ impl Application {
                     }]
                 }
             }
+            AppCommand::CreateEntry { id, directory } => {
+                let workspace = self
+                    .state
+                    .workspace
+                    .as_ref()
+                    .ok_or(AppError::WorkspaceNotOpen)?;
+                self.filesystem
+                    .create_entry(&workspace.root, &id, directory)?;
+                self.resolve(AppCommand::RefreshWorkspace)?
+            }
             AppCommand::OpenDocument(id) => {
                 let root = &self
                     .state
@@ -1029,6 +1052,49 @@ mod tests {
     }
 
     #[test]
+    fn creates_files_and_folders_without_overwriting_existing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = Application::new();
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let snapshot = app
+            .dispatch(AppCommand::CreateEntry {
+                id: id("notes"),
+                directory: true,
+            })
+            .unwrap();
+        assert_eq!(snapshot.directories, ["notes"]);
+        let snapshot = app
+            .dispatch(AppCommand::CreateEntry {
+                id: id("notes/todo.md"),
+                directory: false,
+            })
+            .unwrap();
+        assert!(
+            snapshot
+                .documents
+                .iter()
+                .any(|entry| entry.id == id("notes/todo.md"))
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes/todo.md")).unwrap(),
+            ""
+        );
+        fs::write(dir.path().join("notes/todo.md"), "keep me").unwrap();
+        assert!(
+            app.dispatch(AppCommand::CreateEntry {
+                id: id("notes/todo.md"),
+                directory: false,
+            })
+            .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("notes/todo.md")).unwrap(),
+            "keep me"
+        );
+    }
+
+    #[test]
     fn workspace_edit_save_round_trip_and_dirty_state() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("note.md"), "original").unwrap();
@@ -1050,10 +1116,12 @@ mod tests {
             .unwrap();
         assert!(changed.documents[0].dirty);
         assert!(changed.active_document.unwrap().dirty);
+        assert!(changed.search_results[0].dirty);
         let saved = app
             .dispatch(AppCommand::SaveDocument(id("note.md")))
             .unwrap();
         assert!(!saved.documents[0].dirty);
+        assert!(!saved.search_results[0].dirty);
         assert_eq!(
             fs::read_to_string(dir.path().join("note.md")).unwrap(),
             "edited"

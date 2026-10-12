@@ -19,11 +19,24 @@ fn main() {
         QmlModule::new("org.nativeworkspace.Diagnostic")
             .qml_file("qml/Main.qml")
             .qml_file("qml/KirigamiMain.qml")
-            .qml_file("qml/WorkspacePane.qml"),
+            .qml_file("qml/WorkspacePane.qml")
+            .qml_file("tests/SidebarSmoke.qml"),
     )
-    .qrc_resources(["qml/icons/action-open.png", "qml/icons/action-save.png"])
+    .qrc_resources([
+        "qml/icons/action-open.png",
+        "qml/icons/action-save.png",
+        "qml/icons/git-branch.png",
+        "qml/icons/bookmark.png",
+    ])
     .qrc_resources(QResources::new().resource(resources))
     .qt_module("Network")
+    .qt_module("Quick")
+    .cpp_files([
+        "src/syntax_highlighter.h",
+        "src/syntax_highlighter.cpp",
+        "src/editor_fonts.h",
+        "src/editor_fonts.cpp",
+    ])
     .files(["src/bridge.rs"])
     .build();
 }

@@ -10,6 +10,11 @@ struct NativeWorkspaceApp: App {
         }
         .commands {
             CommandGroup(replacing: .newItem) { }
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") { store.saveDocument() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!store.hasDirtyActiveDocument)
+            }
         }
     }
 }

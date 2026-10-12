@@ -10,6 +10,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 native-workspace-application = { path = "../application" }
 native-workspace-domain = { path = "../domain" }
+native-workspace-syntax = { path = "../syntax" }
 uniffi = { version = "0.29", features = ["cli"] }
 thiserror = "2"
 

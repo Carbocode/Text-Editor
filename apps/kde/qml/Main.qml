@@ -10,9 +10,10 @@ ApplicationWindow {
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
 
     AppController { id: controller }
+    Timer { id: benchmarkDelay; interval: 200; repeat: false }
     FolderDialog {
         id: folderDialog
-        onAccepted: controller.open_workspace(selectedFolder.toString())
+        onAccepted: workspacePane.openWorkspace(selectedFolder.toString())
     }
     WorkspacePane {
         id: workspacePane
@@ -33,14 +34,19 @@ ApplicationWindow {
                 var initialAt = Date.now()
                 var initialRows = workspacePane.sidebarEntries()
                 var initialMs = Date.now() - initialAt
-                Qt.callLater(function() {
+                benchmarkDelay.triggered.connect(function() {
+                    if (!workspacePane.treeMatchesSidebarEntries())
+                        throw new Error("Native tree did not show the initial rows")
                     var expandedAt = Date.now()
                     workspacePane.toggleDirectory("src")
                     var expandedRows = workspacePane.sidebarEntries()
+                    var expandedChildPath = expandedRows.find(entry => entry.path.startsWith("src/")).path
                     var expandMs = Date.now() - expandedAt
                     if (expandedRows.length <= initialRows.length)
                         throw new Error("Benchmark directory did not expand; expected a populated src folder")
                     Qt.callLater(function() {
+                        if (!workspacePane.treeMatchesSidebarEntries())
+                            throw new Error("Native tree did not expand with the folder")
                         var expandedSettledMs = Date.now() - expandedAt
                         var collapsedAt = Date.now()
                         workspacePane.toggleDirectory("src")
@@ -49,16 +55,25 @@ ApplicationWindow {
                         if (collapsedRows.length !== initialRows.length)
                             throw new Error("Benchmark directory did not collapse")
                         Qt.callLater(function() {
+                            if (!workspacePane.treeMatchesSidebarEntries() || workspacePane.treeRowForPath(expandedChildPath) !== -1)
+                                throw new Error("Native tree did not collapse with the folder")
                             console.log("KDE tree benchmark files=" + controller.document_ids.length
                                 + " open=" + openMs + "ms initial=" + initialMs + "ms/" + initialRows.length
                                 + " expand=" + expandMs + "ms/" + expandedRows.length
                                 + " expand-next-turn=" + expandedSettledMs + "ms"
                                 + " collapse=" + collapseMs + "ms/" + collapsedRows.length
                                 + " collapse-next-turn=" + (Date.now() - collapsedAt) + "ms")
-                            Qt.quit()
+                            workspacePane.fileNameQuery = expandedChildPath.split("/").pop()
+                            workspacePane.sidebarEntries()
+                            Qt.callLater(function() {
+                                if (!workspacePane.treeMatchesSidebarEntries())
+                                    throw new Error("Native tree did not show filtered files")
+                                Qt.quit()
+                            })
                         })
                     })
                 })
+                benchmarkDelay.start()
                 return
             }
         }
@@ -71,7 +86,11 @@ ApplicationWindow {
         for (var i = 0; i < Qt.application.arguments.length; ++i) {
             var argument = Qt.application.arguments[i]
             if (argument.startsWith("--smoke-workspace=")) {
+                if (!workspacePane.showingHome)
+                    throw new Error("Home was not shown at startup")
                 controller.open_workspace(argument.substring("--smoke-workspace=".length))
+                if (workspacePane.showingHome)
+                    throw new Error("Workspace did not replace Home")
                 if (controller.document_ids.length === 0)
                     throw new Error("Workspace documents were not listed")
                 if (title !== controller.workspace_name)
@@ -97,11 +116,24 @@ ApplicationWindow {
                             throw new Error("Nested directory contents did not appear after expansion")
                     }
                 }
+                workspacePane.fileNameQuery = "main"
+                if (!workspacePane.sidebarEntries().some(entry => entry.path === "src/main.rs")
+                    || workspacePane.sidebarEntries().some(entry => entry.path === "README.md"))
+                    throw new Error("Name filter did not isolate matching files")
+                workspacePane.fileNameQuery = "src"
+                if (!workspacePane.sidebarEntries().some(entry => entry.path === "src"))
+                    throw new Error("Name filter did not find a folder")
+                workspacePane.fileNameQuery = ""
+                workspacePane.sidebarTab = 1
+                workspacePane.scheduleSidebarUpdate()
                 controller.search_files("unlikely-no-match")
                 if (controller.search_result_ids.length !== 0)
                     throw new Error("Filename search did not filter results")
                 if (workspacePane.sidebarEntries().length !== 0)
                     throw new Error("Sidebar kept stale entries after search")
+                controller.search_files("README")
+                if (workspacePane.sidebarEntries().length !== 0)
+                    throw new Error("Text search included a filename-only match")
                 controller.search_files("")
                 controller.open_document(controller.document_ids[0])
                 workspacePane.editorText = "QML Phase 1 smoke content\n" + "filler\n".repeat(80) + "💡 Another Phase 1 match"
@@ -123,6 +155,10 @@ ApplicationWindow {
                 Qt.callLater(function() {
                     if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)
                         throw new Error("Selecting a search occurrence did not select its text")
+                    workspacePane.createEntry("notes", true)
+                    workspacePane.createEntry("notes/todo.md", false)
+                    if (controller.document_ids.indexOf("notes/todo.md") === -1)
+                        throw new Error("New file did not appear in workspace")
                     console.log("QML workspace edit/save smoke test passed")
                 })
             }

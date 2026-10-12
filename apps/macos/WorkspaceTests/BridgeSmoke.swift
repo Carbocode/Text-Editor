@@ -22,8 +22,11 @@ struct BridgeSmoke {
         let missing = try app.setSearchQuery(query: "missing")
         precondition(missing.searchResults.isEmpty)
         _ = try app.setSearchQuery(query: "")
+        let openedFast = try app.openDocumentFast(id: "README.md")
+        precondition(openedFast.document.content == "before")
         let opened = try app.openDocument(id: "README.md")
         precondition(opened.activeDocument?.content == "before")
+        precondition(openedFast.revision == opened.revision)
         let changed = try app.changeDocument(id: "README.md", content: "after 💡 after")
         precondition(changed.activeDocument?.dirty == true)
         let saved = try app.saveDocument(id: "README.md")
@@ -57,6 +60,11 @@ struct BridgeSmoke {
         precondition(overwritten.activeDocument?.externalChange == false)
         let overwrittenContent = try String(contentsOf: file, encoding: .utf8)
         precondition(overwrittenContent == "local edit")
+        let withFolder = try app.createEntry(path: "notes", directory: true)
+        precondition(withFolder.directories.contains("notes"))
+        let withFile = try app.createEntry(path: "notes/todo.md", directory: false)
+        precondition(withFile.documents.contains { $0.id == "notes/todo.md" })
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("notes/todo.md").path))
         print("Swift → UniFFI → Rust workspace smoke test passed")
     }
 }

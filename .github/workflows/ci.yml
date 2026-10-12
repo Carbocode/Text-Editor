@@ -45,6 +45,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo xtask build-kde
       - run: |
+          for style in Basic Fusion; do
+            workspace=$(mktemp -d)
+            mkdir "$workspace/src"
+            printf '// sidebar needle\nfn main() {}\n' > "$workspace/src/main.rs"
+            printf 'before\n' > "$workspace/README.md"
+            timeout 20s xvfb-run -a env QT_QUICK_CONTROLS_STYLE="$style" target/debug/native-workspace-kde "--smoke-sidebar=$workspace" > /tmp/kde-sidebar-smoke.log 2>&1
+            cat /tmp/kde-sidebar-smoke.log
+            grep -q 'KDE sidebar tab/cache/icon smoke test passed' /tmp/kde-sidebar-smoke.log
+          done
+      - run: |
           timeout 10s xvfb-run -a env NATIVE_WORKSPACE_KIRIGAMI=1 target/debug/native-workspace-kde --smoke > /tmp/kde-smoke.log 2>&1 || test "$?" -eq 124
           cat /tmp/kde-smoke.log
           grep -q 'Kirigami.*smoke test passed' /tmp/kde-smoke.log

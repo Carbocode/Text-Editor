@@ -2,32 +2,65 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQml.Models
+import Qt.labs.qmlmodels
+import org.nativeworkspace.Syntax 1.0
+import org.nativeworkspace.Editor 1.0
 
 Item {
     id: root
     property var controller
     property bool enableBrowse: false
+    property bool showingHome: true
+    property bool creatingDirectory: false
+    property int sidebarTab: 0 // 0: files, 1: text search, 2-5: empty tabs
+    property string fileNameQuery: ""
+    onSidebarTabChanged: scheduleSidebarUpdate()
+    onFileNameQueryChanged: invalidateSidebar(0)
     property bool syncingEditor: false
+    property bool updatingHighlight: false
+    property var minimapLines: [""]
+    property var minimapOffsets: [0]
+    property var minimapKinds: []
+    property var minimapGlyphs: []
+    property string minimapSource: ""
+    property var minimapSpans: []
     property int selectedResultIndex: -1
     property alias editorText: editor.text
+    property alias editorFont: editor.font
     property alias editorSelectedText: editor.selectedText
     property real editorScrollY: editorScroll.contentItem.contentY
-    property int searchFileCount: fileIds().length
+    property int searchFileCount: textSearchFileIds().length
     property var collapsedDirectories: ({})
     property var orderedSidebarEntries: []
     property var visibleSidebarEntries: []
+    // Keep Files and Search data independently; tab changes only select a cache.
+    property var sidebarCaches: [null, null]
+    property var searchSidebarEntries: []
+    property bool fileTreeNeedsRestore: false
     property var childEntriesByParent: ({})
+    property var treeIndexPaths: ({})
+    property bool restoringFileTree: false
     property var matchIndicesByFile: ({})
     property bool sidebarEntriesDirty: true
     property string lastWorkspaceRoot: ""
     signal browseRequested()
 
     ListModel { id: sidebarModel }
+    TreeModel {
+        id: fileTreeModel
+        TableModelColumn { display: "name" }
+    }
 
     Timer {
         id: sidebarUpdate
         interval: 0
         onTriggered: if (root.sidebarEntriesDirty) root.rebuildOrderedEntries()
+    }
+
+    Timer {
+        id: minimapUpdate
+        interval: 180
+        onTriggered: root.rebuildMinimap()
     }
 
     Connections {
@@ -37,14 +70,76 @@ Item {
                 root.lastWorkspaceRoot = root.controller.workspace_root
                 root.collapsedDirectories = ({})
             }
-            root.scheduleSidebarUpdate()
+            if (root.controller.workspace_root.length > 0) root.showingHome = false
+            root.invalidateSidebar(0)
+            root.invalidateSidebar(1)
         }
-        function onDirectory_idsChanged() { root.scheduleSidebarUpdate() }
-        function onSearch_result_idsChanged() { root.scheduleSidebarUpdate() }
-        function onSearch_queryChanged() { root.scheduleSidebarUpdate() }
+        function onDirectory_idsChanged() { root.invalidateSidebar(0) }
+        function onDocument_idsChanged() { root.invalidateSidebar(0) }
+        function onSearch_result_idsChanged() { root.invalidateSidebar(1) }
+        function onSearch_result_linesChanged() { root.invalidateSidebar(1) }
+        function onSearch_queryChanged() { root.invalidateSidebar(1) }
     }
 
-    Component.onCompleted: scheduleSidebarUpdate()
+    Component.onCompleted: {
+        scheduleSidebarUpdate()
+        var encoded = root.controller ? root.controller.minimap_glyphs() : ""
+        var glyphs = []
+        for (var glyph = 0; glyph < encoded.length; glyph += 2)
+            glyphs.push(parseInt(encoded.slice(glyph, glyph + 2), 16))
+        minimapGlyphs = glyphs
+        updateHighlight()
+    }
+
+    function updateHighlight() {
+        if (updatingHighlight || !root.controller) return
+        updatingHighlight = true
+        var source = editor.text
+        var spans = root.controller.highlight_document(source)
+        syntaxHighlighter.spans = spans
+        minimapSource = source
+        minimapSpans = spans
+        minimapUpdate.restart()
+        updatingHighlight = false
+    }
+
+    function rebuildMinimap() {
+        var source = minimapSource
+        var spans = minimapSpans
+        var kinds = []
+        for (var index = 0; index < spans.length; ++index) {
+            var parts = spans[index].split(":")
+            var end = Math.min(source.length, Number(parts[1]))
+            for (var position = Number(parts[0]); position < end; ++position)
+                kinds[position] = Number(parts[2])
+        }
+        minimapKinds = kinds
+        var lines = source.split("\n")
+        var offsets = []
+        var nextOffset = 0
+        for (var line = 0; line < lines.length; ++line) {
+            offsets.push(nextOffset)
+            nextOffset += lines[line].length + 1
+        }
+        minimapOffsets = offsets
+        minimapLines = lines
+        minimap.requestPaint()
+    }
+
+    function invalidateSidebar(tab) {
+        sidebarCaches[tab] = null
+        if (sidebarTab === tab) scheduleSidebarUpdate()
+    }
+
+    function cacheCurrentSidebar() {
+        if (sidebarTab >= 2) return
+        sidebarCaches[sidebarTab] = {
+            ordered: orderedSidebarEntries,
+            visible: visibleSidebarEntries,
+            children: childEntriesByParent,
+            matches: matchIndicesByFile
+        }
+    }
 
     function scheduleSidebarUpdate() {
         sidebarEntriesDirty = true
@@ -61,6 +156,44 @@ Item {
 
     function saveActive() {
         if (flushEditor()) controller.save_document()
+    }
+
+    function openWorkspace(path) {
+        if (!flushEditor()) return
+        controller.open_workspace(path)
+        if (controller.error_message.length === 0) showingHome = false
+    }
+
+    function createEntry(path, directory) {
+        controller.create_entry(path, directory)
+        if (!directory && controller.error_message.length === 0)
+            controller.open_document(path)
+    }
+
+    Dialog {
+        id: createEntryDialog
+        anchors.centerIn: parent
+        modal: true
+        title: root.creatingDirectory ? "New Folder" : "New File"
+        standardButtons: Dialog.Ok | Dialog.Cancel
+        contentItem: TextField {
+            id: newEntryPath
+            implicitWidth: 320
+            placeholderText: "Path relative to workspace"
+            onAccepted: createEntryDialog.accept()
+        }
+        onOpened: {
+            newEntryPath.text = ""
+            newEntryPath.forceActiveFocus()
+        }
+        onAccepted: root.createEntry(newEntryPath.text.trim(), root.creatingDirectory)
+    }
+
+    Shortcut {
+        sequences: [StandardKey.Save]
+        enabled: root.controller && root.controller.active_document_dirty
+            && !root.controller.active_document_external_change
+        onActivated: root.saveActive()
     }
 
     function openSearchResult(index, id) {
@@ -89,11 +222,29 @@ Item {
         }
     }
 
-    function fileIds() {
+    function textSearchFileIds() {
         var ids = controller.search_result_ids
+        var lines = controller.search_result_lines
         var files = []
         var seen = ({})
         for (var i = 0; i < ids.length; ++i) {
+            if (lines[i] !== "" && !seen["#" + ids[i]]) {
+                files.push(ids[i])
+                seen["#" + ids[i]] = true
+            }
+        }
+        return files
+    }
+
+    function fileIds() {
+        if (sidebarTab >= 2) return []
+        if (sidebarTab === 1) return textSearchFileIds()
+        var ids = controller.document_ids
+        var files = []
+        var seen = ({})
+        var needle = fileNameQuery.trim().toLowerCase()
+        for (var i = 0; i < ids.length; ++i) {
+            if (sidebarTab === 0 && needle.length > 0 && !ids[i].split("/").pop().toLowerCase().includes(needle)) continue
             if (!seen["#" + ids[i]]) {
                 files.push(ids[i])
                 seen["#" + ids[i]] = true
@@ -102,12 +253,39 @@ Item {
         return files
     }
 
+    function documentThemeIcon(path) {
+        var name = path.split("/").pop().toLowerCase()
+        if (name.endsWith(".md")) return "text-markdown"
+        if (name.endsWith(".json")) return "application-json"
+        if (name.endsWith(".xml")) return "application-xml"
+        if (name.endsWith(".html") || name.endsWith(".htm")) return "text-html"
+        if (name.endsWith(".py")) return "text-x-python"
+        if (name.endsWith(".cpp") || name.endsWith(".cc") || name.endsWith(".cxx")) return "text-x-c++src"
+        if (name.endsWith(".h") || name.endsWith(".hpp")) return "text-x-c++hdr"
+        if (name.endsWith(".js") || name.endsWith(".ts")) return "application-javascript"
+        return "text-x-generic"
+    }
+
     function rebuildOrderedEntries() {
         sidebarEntriesDirty = false
         sidebarUpdate.stop()
+        if (sidebarTab >= 2) {
+            visibleSidebarEntries = []
+            return
+        }
+        var cached = sidebarCaches[sidebarTab]
+        if (cached) {
+            orderedSidebarEntries = cached.ordered
+            visibleSidebarEntries = cached.visible
+            childEntriesByParent = cached.children
+            if (sidebarTab === 1) matchIndicesByFile = cached.matches
+            if (sidebarTab === 0 && fileTreeNeedsRestore)
+                Qt.callLater(root.restoreFileTreeExpansion)
+            return
+        }
         var files = fileIds()
         var matches = ({})
-        if (root.controller.search_query.length > 0) {
+        if (sidebarTab === 1 && root.controller.search_query.length > 0) {
             var resultIds = root.controller.search_result_ids
             var resultLines = root.controller.search_result_lines
             for (var result = 0; result < resultIds.length; ++result) {
@@ -117,17 +295,27 @@ Item {
                 matches[resultKey].push(result)
             }
         }
-        matchIndicesByFile = matches
+        if (sidebarTab === 1) matchIndicesByFile = matches
         var directories = []
         var seenDirectories = ({})
-        if (root.controller.search_query.length === 0) {
+        if (sidebarTab === 0 && fileNameQuery.trim().length === 0) {
             for (var k = 0; k < root.controller.directory_ids.length; ++k) {
                 var directory = root.controller.directory_ids[k]
                 directories.push(directory)
                 seenDirectories["#" + directory] = true
             }
         }
-        if (root.controller.search_query.length > 0) {
+        if (sidebarTab === 0 && fileNameQuery.trim().length > 0) {
+            var folderNeedle = fileNameQuery.trim().toLowerCase()
+            for (var k = 0; k < root.controller.directory_ids.length; ++k) {
+                var namedFolder = root.controller.directory_ids[k]
+                if (namedFolder.split("/").pop().toLowerCase().includes(folderNeedle)) {
+                    directories.push(namedFolder)
+                    seenDirectories["#" + namedFolder] = true
+                }
+            }
+        }
+        if (sidebarTab === 1 || fileNameQuery.trim().length > 0) {
             for (var i = 0; i < files.length; ++i) {
                 var parts = files[i].split("/")
                 for (var j = 1; j < parts.length; ++j) {
@@ -135,6 +323,17 @@ Item {
                     if (!seenDirectories["#" + parent]) {
                         directories.push(parent)
                         seenDirectories["#" + parent] = true
+                    }
+                }
+            }
+            var matchedDirectories = directories.slice()
+            for (var d = 0; d < matchedDirectories.length; ++d) {
+                var folderParts = matchedDirectories[d].split("/")
+                for (var ancestor = 1; ancestor < folderParts.length; ++ancestor) {
+                    var folderParent = folderParts.slice(0, ancestor).join("/")
+                    if (!seenDirectories["#" + folderParent]) {
+                        directories.push(folderParent)
+                        seenDirectories["#" + folderParent] = true
                     }
                 }
             }
@@ -166,6 +365,29 @@ Item {
                 childEntries[fileParent].push({ path: child, directory: false })
         }
         childEntriesByParent = childEntries
+        if (sidebarTab === 0) {
+            var indexPaths = ({})
+            function treeRows(parent, parentIndex) {
+                var entries = childEntries["#" + parent] || []
+                return entries.map(function(entry, row) {
+                    var indexPath = parentIndex.concat([row])
+                    indexPaths["#" + entry.path] = indexPath
+                    var node = {
+                        name: entry.path.split("/").pop(),
+                        path: entry.path,
+                        directory: entry.directory
+                    }
+                    if (entry.directory) node.rows = treeRows(entry.path, indexPath)
+                    return node
+                })
+            }
+            restoringFileTree = true
+            fileTreeNeedsRestore = true
+            var rootRows = treeRows("", [])
+            treeIndexPaths = indexPaths
+            fileTreeModel.rows = rootRows
+            Qt.callLater(root.restoreFileTreeExpansion)
+        }
         var paths = []
         function appendChildren(parent) {
             for (var entry of childEntries["#" + parent] || []) {
@@ -176,10 +398,11 @@ Item {
         appendChildren("")
         orderedSidebarEntries = paths
         updateVisibleEntries()
+        cacheCurrentSidebar()
     }
 
     function updateVisibleEntries() {
-        var searching = root.controller.search_query.length > 0
+        var searching = sidebarTab === 1 || fileNameQuery.trim().length > 0
         var visible = []
         var hiddenPrefix = ""
         for (var i = 0; i < orderedSidebarEntries.length; ++i) {
@@ -192,7 +415,13 @@ Item {
             if (!searching && entry.directory && collapsedDirectories[entry.path] !== false)
                 hiddenPrefix = entry.path + "/"
         }
-        var previous = visibleSidebarEntries
+        // Only Search uses the ListModel. Keep it populated while Files or an
+        // empty panel is selected, rather than removing and reinserting rows.
+        if (sidebarTab !== 1) {
+            visibleSidebarEntries = visible
+            return
+        }
+        var previous = searchSidebarEntries
         var start = 0
         while (start < previous.length && start < visible.length
                && previous[start].path === visible[start].path
@@ -210,12 +439,52 @@ Item {
             sidebarModel.remove(start, oldEnd - start)
         for (var row = start; row < newEnd; ++row)
             sidebarModel.insert(row, visible[row])
+        searchSidebarEntries = visible
         visibleSidebarEntries = visible
     }
 
     function sidebarEntries() {
         if (sidebarEntriesDirty) rebuildOrderedEntries()
         return visibleSidebarEntries
+    }
+
+    function treeMatchesSidebarEntries() {
+        for (var row = 0; row < visibleSidebarEntries.length; ++row) {
+            var indexPath = treeIndexPaths["#" + visibleSidebarEntries[row].path]
+            if (!indexPath || fileTree.rowAtIndex(fileTreeModel.index(indexPath, 0)) !== row)
+                return false
+        }
+        return true
+    }
+
+    function treeRowForPath(path) {
+        var indexPath = treeIndexPaths["#" + path]
+        return indexPath ? fileTree.rowAtIndex(fileTreeModel.index(indexPath, 0)) : -1
+    }
+
+    function restoreFileTreeExpansion() {
+        if (sidebarTab !== 0) {
+            restoringFileTree = false
+            return
+        }
+        if (sidebarTab === 0) {
+            if (fileNameQuery.trim().length > 0) {
+                fileTree.expandRecursively(-1)
+            } else {
+                function expandChildren(parent) {
+                    for (var entry of childEntriesByParent["#" + parent] || []) {
+                        if (!entry.directory || collapsedDirectories[entry.path] !== false) continue
+                        var modelIndex = fileTreeModel.index(treeIndexPaths["#" + entry.path], 0)
+                        var row = fileTree.rowAtIndex(modelIndex)
+                        if (row >= 0 && !fileTree.isExpanded(row)) fileTree.expand(row)
+                        expandChildren(entry.path)
+                    }
+                }
+                expandChildren("")
+            }
+        }
+        fileTreeNeedsRestore = false
+        restoringFileTree = false
     }
 
     function toggleDirectory(path) {
@@ -242,10 +511,25 @@ Item {
         }
         if (expanding) appendVisibleChildren(path)
         var oldCount = oldEnd - index - 1
-        if (oldCount > 0) sidebarModel.remove(index + 1, oldCount)
-        for (var row = 0; row < children.length; ++row)
-            sidebarModel.insert(index + 1 + row, children[row])
+        if (sidebarTab === 1) {
+            if (oldCount > 0) sidebarModel.remove(index + 1, oldCount)
+            for (var row = 0; row < children.length; ++row)
+                sidebarModel.insert(index + 1 + row, children[row])
+        }
         visibleSidebarEntries = visible.slice(0, index + 1).concat(children, visible.slice(oldEnd))
+        if (sidebarTab === 1) {
+            searchSidebarEntries = visibleSidebarEntries
+            invalidateSidebar(0)
+        }
+        cacheCurrentSidebar()
+        if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeIndexPaths["#" + path]) {
+            var treeRow = fileTree.rowAtIndex(fileTreeModel.index(treeIndexPaths["#" + path], 0))
+            if (treeRow >= 0 && fileTree.isExpanded(treeRow) !== expanding) {
+                if (expanding) fileTree.expand(treeRow)
+                else fileTree.collapse(treeRow)
+            }
+            if (expanding) restoreFileTreeExpansion()
+        }
     }
 
     function matchIndicesForFile(id) {
@@ -264,54 +548,92 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        spacing: 8
+        spacing: 20
+        visible: root.showingHome || root.controller.workspace_name.length === 0
+        Item { Layout.fillHeight: true }
+        Label {
+            text: "Native Workspace"
+            font.pixelSize: 30
+            font.bold: true
+            Layout.alignment: Qt.AlignHCenter
+        }
+        Button {
+            text: "Open Folder…"
+            visible: root.enableBrowse
+            Layout.alignment: Qt.AlignHCenter
+            onClicked: root.browseRequested()
+        }
+        Label {
+            text: "Recent Workspaces"
+            font.pixelSize: 20
+            Layout.alignment: Qt.AlignHCenter
+        }
+        Label {
+            text: "No recent workspaces"
+            visible: root.controller.recent_workspace_paths.length === 0
+            Layout.alignment: Qt.AlignHCenter
+        }
+        ListView {
+            Layout.preferredWidth: Math.min(520, parent.width - 40)
+            Layout.preferredHeight: Math.min(260, contentHeight)
+            Layout.alignment: Qt.AlignHCenter
+            clip: true
+            model: root.controller.recent_workspace_paths
+            delegate: ItemDelegate {
+                required property int index
+                required property string modelData
+                width: ListView.view.width
+                height: 54
+                contentItem: ColumnLayout {
+                    spacing: 2
+                    Label {
+                        text: root.controller.recent_workspace_names[index]
+                        font.bold: true
+                        Layout.fillWidth: true
+                        elide: Text.ElideMiddle
+                    }
+                    Label {
+                        text: modelData
+                        opacity: 0.65
+                        font.pixelSize: 11
+                        Layout.fillWidth: true
+                        elide: Text.ElideMiddle
+                    }
+                }
+                onClicked: root.openWorkspace(modelData)
+            }
+        }
+        Label {
+            text: root.controller.error_message
+            visible: text.length > 0
+            Layout.alignment: Qt.AlignHCenter
+        }
+        Item { Layout.fillHeight: true }
+    }
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+        visible: !root.showingHome && root.controller.workspace_name.length > 0
         ToolBar {
             Layout.fillWidth: true
             contentItem: RowLayout {
                 spacing: 8
-                ToolButton {
-                    text: "Open Workspace"
-                    icon.name: "document-open"
-                    icon.source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/action-open.png"
-                    icon.width: 20
-                    icon.height: 20
-                    display: AbstractButton.TextBesideIcon
-                    visible: root.enableBrowse
-                    onClicked: if (root.flushEditor()) root.browseRequested()
-                }
-                ToolButton {
-                    id: recentButton
-                    text: "Recent"
-                    icon.name: "document-open-recent"
-                    display: AbstractButton.TextBesideIcon
-                    enabled: root.controller.recent_workspace_paths.length > 0
-                    onClicked: recentMenu.open()
-                    Menu {
-                        id: recentMenu
-                        y: recentButton.height
-                        Instantiator {
-                            model: root.controller.recent_workspace_paths
-                            delegate: MenuItem {
-                                text: root.controller.recent_workspace_names[index]
-                                onTriggered: if (root.flushEditor()) root.controller.open_workspace(modelData)
-                            }
-                            onObjectAdded: (index, object) => recentMenu.insertItem(index, object)
-                            onObjectRemoved: (index, object) => recentMenu.removeItem(object)
-                        }
-                    }
-                }
                 Item { Layout.fillWidth: true }
                 ToolButton {
-                    text: "Save"
-                    icon.name: "document-save"
-                    icon.source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/action-save.png"
+                    text: "Home"
+                    icon.name: "go-home"
                     icon.width: 20
                     icon.height: 20
                     display: AbstractButton.TextBesideIcon
-                    enabled: root.controller.active_document_dirty && !root.controller.active_document_external_change
-                    onClicked: root.saveActive()
+                    onClicked: if (root.flushEditor()) root.showingHome = true
                 }
             }
+        }
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.preferredHeight: 1
+            color: palette.mid
         }
         SplitView {
             Layout.fillWidth: true
@@ -319,34 +641,203 @@ Item {
             Pane {
                 SplitView.preferredWidth: 240
                 SplitView.minimumWidth: 180
-                ColumnLayout {
+                padding: 0
+                background: Rectangle {
+                    color: palette.window
+                    border.color: palette.mid
+                    border.width: 1
+                }
+                Item {
                     anchors.fill: parent
-                    TextField {
-                        Layout.fillWidth: true
-                        text: root.controller.search_query
-                        placeholderText: "Search files"
-                        enabled: root.controller.workspace_name.length > 0
-                        onTextEdited: {
-                            root.selectedResultIndex = -1
-                            root.controller.search_files(text)
+                    Column {
+                        id: sidebarTabs
+                        anchors.top: parent.top
+                        anchors.left: parent.left
+                        anchors.bottom: parent.bottom
+                        width: 36
+                        spacing: 0
+                        Repeater {
+                            model: [
+                                { title: "Files", icon: "folder", source: "" },
+                                { title: "Search", icon: "edit-find", source: "" },
+                                { title: "Git", icon: "", source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/git-branch.png" },
+                                { title: "Bookmarks", icon: "", source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/bookmark.png" },
+                                { title: "Warnings", icon: "dialog-warning", source: "" },
+                                { title: "Errors", icon: "dialog-error", source: "" }
+                            ]
+                            delegate: ToolButton {
+                                id: tabButton
+                                required property int index
+                                required property var modelData
+                                text: modelData.title
+                                icon.name: modelData.icon
+                                icon.source: modelData.source
+                                icon.width: 16
+                                icon.height: 16
+                                display: AbstractButton.IconOnly
+                                width: sidebarTabs.width
+                                height: 80
+                                leftPadding: 0
+                                rightPadding: 0
+                                topPadding: tabLabel.width + 4
+                                bottomPadding: 0
+                                ToolTip.visible: hovered
+                                ToolTip.text: text
+                                checkable: true
+                                checked: root.sidebarTab === index
+                                Label {
+                                    id: tabLabel
+                                    anchors.centerIn: parent
+                                    anchors.verticalCenterOffset: -10
+                                    width: Math.min(implicitWidth, 58)
+                                    horizontalAlignment: Text.AlignHCenter
+                                    elide: Text.ElideRight
+                                    rotation: -90
+                                    text: tabButton.text
+                                    font.pixelSize: 10
+                                }
+                                onClicked: {
+                                    root.sidebarTab = index
+                                    root.selectedResultIndex = -1
+                                }
+                            }
                         }
                     }
-                    BusyIndicator {
-                        running: root.controller.search_in_progress
-                        visible: running
-                        Layout.alignment: Qt.AlignHCenter
+                    Rectangle {
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        anchors.left: sidebarTabs.right
+                        anchors.right: parent.right
+                        color: palette.base
+                        border.color: palette.mid
+                        border.width: 1
+                    }
+                    RowLayout {
+                        id: textSearchRow
+                        anchors.top: parent.top
+                        anchors.left: sidebarTabs.right
+                        anchors.right: parent.right
+                        anchors.margins: 6
+                        visible: root.sidebarTab === 1
+                        TextField {
+                            Layout.fillWidth: true
+                            text: root.controller.search_query
+                            placeholderText: "Search in files"
+                            onTextEdited: {
+                                root.selectedResultIndex = -1
+                                root.controller.search_files(text)
+                            }
+                        }
+                        BusyIndicator {
+                            running: root.controller.search_in_progress
+                            visible: running
+                            Layout.preferredWidth: 18
+                            Layout.preferredHeight: 18
+                        }
+                    }
+                    TreeView {
+                        id: fileTree
+                        objectName: "fileTree"
+                        anchors.top: parent.top
+                        anchors.left: sidebarTabs.right
+                        anchors.right: parent.right
+                        anchors.bottom: searchRow.top
+                        anchors.bottomMargin: 6
+                        visible: root.sidebarTab === 0
+                        clip: true
+                        model: fileTreeModel
+                        columnWidthProvider: function() { return width }
+                        rowHeightProvider: function() { return 28 }
+                        onWidthChanged: forceLayout()
+                        onExpanded: function(row) {
+                            if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                            var entry = fileTreeModel.getRow(fileTree.index(row, 0))
+                            if (entry && root.collapsedDirectories[entry.path] !== false)
+                                root.toggleDirectory(entry.path)
+                        }
+                        onCollapsed: function(row) {
+                            if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                            var entry = fileTreeModel.getRow(fileTree.index(row, 0))
+                            if (entry && root.collapsedDirectories[entry.path] === false)
+                                root.toggleDirectory(entry.path)
+                        }
+                        Label {
+                            anchors.centerIn: parent
+                            visible: root.visibleSidebarEntries.length === 0
+                            text: root.fileNameQuery.length > 0 ? "No matching names" : "No files"
+                        }
+                        delegate: TreeViewDelegate {
+                            id: treeRow
+                            // Expanding changes the mapping of view rows even
+                            // when a reused delegate keeps the same row number.
+                            property var entry: row < fileTree.rows && model.display !== undefined
+                                ? fileTreeModel.getRow(fileTree.index(row, 0)) : null
+                            text: entry ? entry.name : ""
+                            // TreeViewDelegate styles can provide a text-only
+                            // contentItem, so draw the bundled icon explicitly.
+                            contentItem: RowLayout {
+                                spacing: 4
+                                Image {
+                                    objectName: "fileTreeIcon"
+                                    source: treeRow.entry ? (treeRow.entry.directory
+                                        ? root.controller.folder_icon(treeRow.entry.path, treeRow.expanded)
+                                        : root.controller.file_icon(treeRow.entry.path)) : ""
+                                    sourceSize.width: 32
+                                    sourceSize.height: 32
+                                    fillMode: Image.PreserveAspectFit
+                                    Layout.preferredWidth: 16
+                                    Layout.preferredHeight: 16
+                                }
+                                Label {
+                                    text: treeRow.text
+                                    color: treeRow.highlighted ? treeRow.palette.highlightedText : treeRow.palette.text
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+                            rightPadding: 38
+                            highlighted: entry && !entry.directory && root.controller.active_document_id === entry.path
+                            onClicked: {
+                                if (!entry || entry.directory) return
+                                if (root.flushEditor()) {
+                                    root.controller.open_document(entry.path)
+                                    root.selectedResultIndex = -1
+                                }
+                            }
+                            Row {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 8
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: 4
+                                Label {
+                                    text: "⚠"
+                                    visible: treeRow.entry && !treeRow.entry.directory
+                                        && root.controller.conflicted_document_ids.indexOf(treeRow.entry.path) !== -1
+                                    color: palette.highlight
+                                }
+                                Label {
+                                    text: "●"
+                                    visible: treeRow.entry && !treeRow.entry.directory
+                                        && root.controller.dirty_document_ids.indexOf(treeRow.entry.path) !== -1
+                                }
+                            }
+                        }
                     }
                     ListView {
                         id: fileList
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
+                        objectName: "searchResults"
+                        anchors.top: textSearchRow.bottom
+                        anchors.left: sidebarTabs.right
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        visible: root.sidebarTab === 1
                         clip: true
                         model: sidebarModel
                         reuseItems: true
                         Label {
                             anchors.centerIn: parent
-                            text: root.controller.search_query.length > 0 ? "No matching files" : "No files"
-                            visible: root.controller.workspace_name.length > 0 && root.visibleSidebarEntries.length === 0 && !root.controller.search_in_progress
+                            text: root.sidebarTab === 1 ? "No text matches" : (root.fileNameQuery.length > 0 ? "No matching names" : "No files")
+                            visible: root.sidebarTab < 2 && root.controller.workspace_name.length > 0 && root.visibleSidebarEntries.length === 0 && !root.controller.search_in_progress
                         }
                         delegate: Column {
                             id: fileGroup
@@ -356,10 +847,19 @@ Item {
                             property int depth: fileId.split("/").length - 1
                             ItemDelegate {
                                 width: parent.width
-                                height: 26
-                                topPadding: 2
-                                bottomPadding: 2
-                                leftPadding: 10 + fileGroup.depth * 16
+                                height: 28
+                                text: fileGroup.fileId.split("/").pop()
+                                icon.name: fileGroup.isDirectory
+                                    ? (root.sidebarTab === 1 || root.fileNameQuery.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false ? "folder-open" : "folder")
+                                    : root.documentThemeIcon(fileGroup.fileId)
+                                icon.source: fileGroup.isDirectory
+                                    ? root.controller.folder_icon(fileGroup.fileId, root.sidebarTab === 1 || root.fileNameQuery.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false)
+                                    : root.controller.file_icon(fileGroup.fileId)
+                                icon.color: "transparent"
+                                icon.width: 16
+                                icon.height: 16
+                                leftPadding: 28 + fileGroup.depth * 16
+                                rightPadding: 38
                                 highlighted: !fileGroup.isDirectory && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
                                 onClicked: {
                                     if (fileGroup.isDirectory) {
@@ -371,36 +871,17 @@ Item {
                                         root.selectedResultIndex = -1
                                     }
                                 }
-                                contentItem: RowLayout {
-                                    Image {
-                                        visible: !fileGroup.isDirectory
-                                        source: root.controller.file_icon(fileGroup.fileId)
-                                        sourceSize.width: 32
-                                        sourceSize.height: 32
-                                        fillMode: Image.PreserveAspectFit
-                                        mipmap: true
-                                        Layout.preferredWidth: 16
-                                        Layout.preferredHeight: 16
-                                    }
-                                    Label {
-                                        visible: fileGroup.isDirectory
-                                        text: root.controller.search_query.length === 0 && root.collapsedDirectories[fileGroup.fileId] !== false ? "▸" : "▾"
-                                    }
-                                    Image {
-                                        visible: fileGroup.isDirectory
-                                        source: root.controller.folder_icon(fileGroup.fileId, root.controller.search_query.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false)
-                                        sourceSize.width: 32
-                                        sourceSize.height: 32
-                                        fillMode: Image.PreserveAspectFit
-                                        mipmap: true
-                                        Layout.preferredWidth: 16
-                                        Layout.preferredHeight: 16
-                                    }
-                                    Label {
-                                        text: fileGroup.fileId.split("/").pop()
-                                        Layout.fillWidth: true
-                                        elide: Text.ElideRight
-                                    }
+                                Label {
+                                    x: 10 + fileGroup.depth * 16
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    visible: fileGroup.isDirectory
+                                    text: root.sidebarTab === 0 && root.fileNameQuery.length === 0 && root.collapsedDirectories[fileGroup.fileId] !== false ? "▸" : "▾"
+                                }
+                                Row {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    spacing: 4
                                     Label {
                                         text: "⚠"
                                         visible: !fileGroup.isDirectory && root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
@@ -433,42 +914,228 @@ Item {
                             }
                         }
                     }
-                }
-            }
-            ScrollView {
-                id: editorScroll
-                SplitView.fillWidth: true
-                TextArea {
-                    id: editor
-                    font.family: "monospace"
-                    enabled: root.controller.active_document_id.length > 0
-                    placeholderText: "Select a document"
-                    onTextChanged: {
-                        if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
-                            root.selectedResultIndex = -1
-                            root.controller.change_document(text)
+                    RowLayout {
+                        id: searchRow
+                        visible: root.sidebarTab === 0
+                        anchors.left: sidebarTabs.right
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        anchors.bottomMargin: 6
+                        height: 26
+                        spacing: 6
+                        ToolButton {
+                            text: "+"
+                            font.pixelSize: 20
+                            font.weight: Font.Medium
+                            Layout.preferredWidth: 26
+                            Layout.preferredHeight: 26
+                            ToolTip.visible: hovered
+                            ToolTip.text: "Add file or folder"
+                            onClicked: addMenu.open()
+                            Menu {
+                                id: addMenu
+                                MenuItem {
+                                    text: "New File"
+                                    onTriggered: {
+                                        root.creatingDirectory = false
+                                        createEntryDialog.open()
+                                    }
+                                }
+                                MenuItem {
+                                    text: "New Folder"
+                                    onTriggered: {
+                                        root.creatingDirectory = true
+                                        createEntryDialog.open()
+                                    }
+                                }
+                            }
+                        }
+                        TextField {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 26
+                            font.pixelSize: 12
+                            text: root.fileNameQuery
+                            placeholderText: "Filter names"
+                            onTextEdited: {
+                                root.selectedResultIndex = -1
+                                root.fileNameQuery = text
+                            }
                         }
                     }
                 }
             }
+            ColumnLayout {
+                SplitView.fillWidth: true
+                SplitView.fillHeight: true
+                spacing: 0
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    color: palette.base
+                    border.color: palette.mid
+                    border.width: 1
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        spacing: 0
+                        FontMetrics { id: editorMetrics; font: editor.font }
+                        FontInfo { id: resolvedEditorFont; font: editor.font }
+                        Canvas {
+                            id: lineNumbers
+                            Layout.preferredWidth: 48
+                            Layout.fillHeight: true
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                ctx.fillStyle = "#808080"
+                                ctx.font = resolvedEditorFont.pixelSize + 'px "' + resolvedEditorFont.family + '"'
+                                ctx.textAlign = "right"
+                                var lineHeight = editorMetrics.height
+                                var scrollY = editorScroll.contentItem.contentY
+                                var first = Math.max(0, Math.floor(scrollY / lineHeight) - 1)
+                                var last = Math.min(editor.lineCount, first + Math.ceil(height / lineHeight) + 3)
+                                for (var line = first; line < last; ++line)
+                                    ctx.fillText(String(line + 1), width - 8, editor.topPadding + (line + 1) * lineHeight - scrollY)
+                            }
+                        }
+                        ScrollView {
+                            id: editorScroll
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            TextArea {
+                                id: editor
+                                font: EditorFonts.fixedFont
+                                textFormat: TextEdit.PlainText
+                                wrapMode: TextEdit.NoWrap
+                                EditorSyntaxHighlighter {
+                                    id: syntaxHighlighter
+                                    textDocument: editor.textDocument
+                                }
+                                enabled: root.controller.active_document_id.length > 0
+                                placeholderText: "Select a document"
+                                onTextChanged: {
+                                    root.updateHighlight()
+                                    lineNumbers.requestPaint()
+                                    if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
+                                        root.selectedResultIndex = -1
+                                        root.controller.change_document(text)
+                                    }
+                                }
+                            }
+                        }
+                        Canvas {
+                            id: minimap
+                            Layout.preferredWidth: 100
+                            Layout.fillHeight: true
+                            clip: true
+                            property real contentHeight: root.minimapLines.length * 2
+                            property real viewportTop: editorScroll.contentItem.contentY
+                                / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                            property real viewportHeight: editorScroll.contentItem.height
+                                / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                            property int mapOffset: Math.floor(Math.max(0,
+                                Math.min(contentHeight - height, viewportTop - (height - viewportHeight) / 2)))
+                            onMapOffsetChanged: requestPaint()
+                            onHeightChanged: requestPaint()
+                            onPaint: {
+                                var ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+                                var lines = root.minimapLines
+                                var palette = ["#9ba4ae", "#aa70d3", "#d88b44", "#5eb569", "#858e97", "#569ae0"]
+                                var first = Math.max(0, Math.floor(mapOffset / 2))
+                                var last = Math.min(lines.length, Math.ceil((mapOffset + height) / 2))
+                                for (var line = first; line < last; ++line) {
+                                    var offset = root.minimapOffsets[line]
+                                    var y = line * 2 - mapOffset
+                                    var x = 4
+                                    var source = lines[line]
+                                    for (var column = 0; column < source.length && x < width - 4; ++column) {
+                                        var code = source.charCodeAt(column)
+                                        if (code === 9) {
+                                            x += 4 - (x - 4) % 4
+                                        } else {
+                                            if (code > 32) {
+                                                ctx.fillStyle = palette[root.minimapKinds[offset + column] || 0]
+                                                var glyphIndex = (code >= 32 && code <= 126 ? code - 32 : 95) * 2
+                                                var top = root.minimapGlyphs[glyphIndex] || 0
+                                                var bottom = root.minimapGlyphs[glyphIndex + 1] || 0
+                                                if (top > 0) {
+                                                    ctx.globalAlpha = Math.min(1, top / 128)
+                                                    ctx.fillRect(x, y, 1, 1)
+                                                }
+                                                if (bottom > 0) {
+                                                    ctx.globalAlpha = Math.min(1, bottom / 128)
+                                                    ctx.fillRect(x, y + 1, 1, 1)
+                                                }
+                                                ctx.globalAlpha = 1
+                                            }
+                                            ++x
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                width: minimap.width
+                                y: minimap.viewportTop - minimap.mapOffset
+                                height: Math.max(8, minimap.viewportHeight)
+                                color: Qt.rgba(0.5, 0.5, 0.5, 0.2)
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                property real dragOffset: 0
+                                onPressed: {
+                                    dragOffset = minimap.mapOffset
+                                    moveTo(mouseY, dragOffset)
+                                }
+                                onPositionChanged: if (pressed) moveTo(mouseY, dragOffset)
+                                onWheel: function(wheel) {
+                                    var flick = editorScroll.contentItem
+                                    flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                        flick.contentY - wheel.angleDelta.y / 120 * editorMetrics.height * 3))
+                                    wheel.accepted = true
+                                }
+                                function moveTo(y, offset) {
+                                    var flick = editorScroll.contentItem
+                                    flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                        (y + offset) / Math.max(1, minimap.contentHeight)
+                                            * flick.contentHeight - flick.height / 2))
+                                }
+                            }
+                        }
+                        Connections {
+                            target: editorScroll.contentItem
+                            function onContentYChanged() {
+                                lineNumbers.requestPaint()
+                            }
+                        }
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.leftMargin: 8
+                    Layout.rightMargin: 8
+                    visible: root.controller.active_document_external_change
+                    Label {
+                        text: "This file changed on disk"
+                        Layout.fillWidth: true
+                    }
+                    Button {
+                        text: "Reload (discard edits)"
+                        onClicked: root.controller.reload_document()
+                    }
+                    Button {
+                        text: "Overwrite disk"
+                        onClicked: if (root.flushEditor()) root.controller.overwrite_document()
+                    }
+                }
+            }
         }
-        RowLayout {
+        Rectangle {
             Layout.fillWidth: true
-            Layout.leftMargin: 8
-            Layout.rightMargin: 8
-            visible: root.controller.active_document_external_change
-            Label {
-                text: "This file changed on disk"
-                Layout.fillWidth: true
-            }
-            Button {
-                text: "Reload (discard edits)"
-                onClicked: root.controller.reload_document()
-            }
-            Button {
-                text: "Overwrite disk"
-                onClicked: if (root.flushEditor()) root.controller.overwrite_document()
-            }
+            Layout.preferredHeight: 1
+            color: palette.mid
         }
         RowLayout {
             Layout.fillWidth: true
@@ -485,6 +1152,7 @@ Item {
 
     Connections {
         target: root.controller
+        function onActive_document_idChanged() { Qt.callLater(root.updateHighlight) }
         function onActive_document_textChanged() {
             if (editor.text !== root.controller.active_document_text) {
                 root.selectedResultIndex = -1

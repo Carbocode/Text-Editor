@@ -56,6 +56,8 @@ pub mod qobject {
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
+        fn create_entry(self: Pin<&mut Self>, path: &QString, directory: bool);
+        #[qinvokable]
         fn refresh_workspace(self: Pin<&mut Self>);
         #[qinvokable]
         fn poll_workspace_changes(self: Pin<&mut Self>);
@@ -65,6 +67,10 @@ pub mod qobject {
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
+        #[qinvokable]
+        fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList;
+        #[qinvokable]
+        fn minimap_glyphs(self: Pin<&mut Self>) -> QString;
         #[qinvokable]
         fn save_document(self: Pin<&mut Self>);
         #[qinvokable]
@@ -103,6 +109,31 @@ pub struct AppControllerRust {
 }
 
 impl qobject::AppController {
+    pub fn minimap_glyphs(self: Pin<&mut Self>) -> QString {
+        use std::fmt::Write;
+        let mut encoded = String::with_capacity(384);
+        for byte in native_workspace_syntax::minimap_glyphs() {
+            write!(encoded, "{byte:02X}").expect("write into string");
+        }
+        QString::from(encoded)
+    }
+
+    pub fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList {
+        let file_name = self.rust().active_document_id.to_string();
+        let text = text.to_string();
+        native_workspace_syntax::highlight(&file_name, &text)
+            .into_iter()
+            .map(|token| {
+                QString::from(format!(
+                    "{}:{}:{}",
+                    token.start_utf16,
+                    token.end_utf16,
+                    token.kind.code()
+                ))
+            })
+            .collect()
+    }
+
     fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
         let result = self.as_mut().rust_mut().application.dispatch(command);
         match result {
@@ -308,6 +339,15 @@ impl qobject::AppController {
         self.dispatch(AppCommand::OpenWorkspace(path));
     }
 
+    pub fn create_entry(mut self: Pin<&mut Self>, path: &QString, directory: bool) {
+        match DocumentId::parse(path.to_string()) {
+            Ok(id) => self
+                .as_mut()
+                .dispatch(AppCommand::CreateEntry { id, directory }),
+            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
+        }
+    }
+
     pub fn refresh_workspace(mut self: Pin<&mut Self>) {
         let result = self
             .as_mut()
@@ -355,7 +395,33 @@ impl qobject::AppController {
 
     pub fn open_document(mut self: Pin<&mut Self>, id: &QString) {
         match DocumentId::parse(id.to_string()) {
-            Ok(id) => self.dispatch(AppCommand::OpenDocument(id)),
+            Ok(id) => {
+                if !self.rust().search_query.to_string().trim().is_empty() {
+                    self.dispatch(AppCommand::OpenDocument(id));
+                    return;
+                }
+                let result = self
+                    .as_mut()
+                    .rust_mut()
+                    .application
+                    .dispatch(AppCommand::OpenDocument(id));
+                match result {
+                    Ok(snapshot) => {
+                        self.as_mut().set_error_message(QString::default());
+                        self.as_mut().set_revision(snapshot.revision);
+                        if let Some(doc) = snapshot.active_document {
+                            self.as_mut()
+                                .set_active_document_id(QString::from(doc.id.as_str()));
+                            self.as_mut()
+                                .set_active_document_text(QString::from(doc.content));
+                            self.as_mut().set_active_document_dirty(doc.dirty);
+                            self.as_mut()
+                                .set_active_document_external_change(doc.external_change);
+                        }
+                    }
+                    Err(error) => self.set_error_message(QString::from(error.to_string())),
+                }
+            }
             Err(_) => self
                 .as_mut()
                 .set_error_message(QString::from("Invalid document name")),
