@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/nativeworkspace/icons/scalable/actions">
+    <file>native-workspace-branch-symbolic.svg</file>
+    <file>native-workspace-bookmark-symbolic.svg</file>
+  </gresource>
+</gresources>

@@ -693,6 +693,12 @@ fn texture_for_icon(name: &str) -> gtk::gdk::Texture {
 }
 
 fn main() {
+    let resource = gio::Resource::from_data(&glib::Bytes::from_static(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/icons.gresource"
+    ))))
+    .expect("bundled GNOME icons");
+    gio::resources_register(&resource);
     let app = adw::Application::builder()
         .application_id("org.nativeworkspace.App")
         .flags(gio::ApplicationFlags::FLAGS_NONE)
@@ -724,6 +730,7 @@ fn build_window(app: &adw::Application) {
     let content_header = adw::HeaderBar::new();
     let toggle_sidebar = gtk::ToggleButton::new();
     let icons = gtk::IconTheme::for_display(&gtk::gdk::Display::default().expect("GTK display"));
+    icons.add_resource_path("/org/nativeworkspace/icons");
     let sidebar_icon = if icons.has_icon("adw-sidebar-symbolic") {
         "adw-sidebar-symbolic"
     } else if icons.has_icon("sidebar-show-symbolic") {
@@ -735,10 +742,7 @@ fn build_window(app: &adw::Application) {
     toggle_sidebar.set_tooltip_text(Some("Toggle Sidebar"));
     content_header.pack_start(&toggle_sidebar);
     let open = gtk::Button::with_label("Open Folder…");
-    let home_button = gtk::Button::new();
-    let home_icon = gtk::Image::from_paintable(Some(&texture_for_icon("folder-home")));
-    home_icon.set_pixel_size(16);
-    home_button.set_child(Some(&home_icon));
+    let home_button = gtk::Button::from_icon_name("user-home-symbolic");
     home_button.set_tooltip_text(Some("Home"));
     content_header.pack_end(&home_button);
     let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
@@ -805,37 +809,27 @@ fn build_window(app: &adw::Application) {
     tab_row.set_margin_top(6);
     tab_row.set_margin_bottom(6);
     let file_tab = gtk::ToggleButton::new();
-    let file_tab_icon = gtk::Image::from_paintable(Some(&texture_for_icon("folder")));
-    file_tab_icon.set_pixel_size(16);
-    file_tab.set_child(Some(&file_tab_icon));
+    file_tab.set_icon_name("folder-symbolic");
     file_tab.set_tooltip_text(Some("Files"));
     file_tab.set_hexpand(true);
     file_tab.set_active(true);
     let text_tab = gtk::ToggleButton::new();
-    let text_tab_icon = gtk::Image::from_paintable(Some(&texture_for_icon("search")));
-    text_tab_icon.set_pixel_size(16);
-    text_tab.set_child(Some(&text_tab_icon));
+    text_tab.set_icon_name("edit-find-symbolic");
     text_tab.set_tooltip_text(Some("Search in files"));
     text_tab.set_hexpand(true);
     text_tab.set_group(Some(&file_tab));
     tab_row.append(&file_tab);
     tab_row.append(&text_tab);
     let extra_tabs = [
-        ("Git", "git"),
-        ("Bookmarks", "user-bookmarks-symbolic"),
+        ("Git", "native-workspace-branch-symbolic"),
+        ("Bookmarks", "native-workspace-bookmark-symbolic"),
         ("Warnings", "dialog-warning-symbolic"),
         ("Errors", "dialog-error-symbolic"),
     ];
     let mut empty_tabs = Vec::new();
     for (title, icon_name) in extra_tabs {
         let tab = gtk::ToggleButton::new();
-        if icon_name == "git" {
-            let icon = gtk::Image::from_paintable(Some(&texture_for_icon("git")));
-            icon.set_pixel_size(16);
-            tab.set_child(Some(&icon));
-        } else {
-            tab.set_icon_name(icon_name);
-        }
+        tab.set_icon_name(icon_name);
         tab.set_tooltip_text(Some(title));
         tab.set_hexpand(true);
         tab.set_group(Some(&file_tab));
@@ -1305,7 +1299,15 @@ fn build_window(app: &adw::Application) {
         assert!(icons.has_icon("document-open-symbolic"));
         assert!(icons.has_icon("document-save-symbolic"));
         assert!(icons.has_icon(sidebar_icon));
-        assert!(home_icon.paintable().is_some());
+        for icon in [
+            "user-home-symbolic",
+            "folder-symbolic",
+            "edit-find-symbolic",
+            "native-workspace-branch-symbolic",
+            "native-workspace-bookmark-symbolic",
+        ] {
+            assert!(icons.has_icon(icon), "missing icon: {icon}");
+        }
         assert!(sidebar_header.shows_start_title_buttons());
         assert!(sidebar_header.shows_end_title_buttons());
         assert!(content_header.shows_start_title_buttons());
