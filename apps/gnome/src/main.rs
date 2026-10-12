@@ -20,22 +20,17 @@ struct Ui {
     window: adw::ApplicationWindow,
     core: Rc<RefCell<Application>>,
     snapshot: Rc<RefCell<AppSnapshot>>,
-    files: gtk::ListView,
-    file_model: gtk::StringList,
-    file_selection: gtk::SingleSelection,
-    sidebar_rows: Rc<RefCell<Vec<SidebarRow>>>,
-    all_entries: Rc<RefCell<Vec<SidebarEntry>>>,
-    visible_entries: Rc<RefCell<Vec<SidebarEntry>>>,
+    // Keep Files and Search models, selections and scroll positions alive across tab switches.
+    sidebars: [SidebarView; 2],
+    sidebar_pages: gtk::Stack,
     search: gtk::SearchEntry,
     file_search: gtk::SearchEntry,
     search_mode: Rc<Cell<bool>>,
     sidebar_tab: Rc<Cell<u8>>,
     file_query: Rc<RefCell<String>>,
-    force_sidebar_rebuild: Rc<Cell<bool>>,
     file_search_row: gtk::Box,
     text_search_row: gtk::Box,
     search_spinner: gtk::Spinner,
-    files_placeholder: gtk::Label,
     conflict_banner: gtk::Box,
     editor: gtk::TextView,
     editor_chrome: editor_chrome::EditorChrome,
@@ -48,6 +43,20 @@ struct Ui {
     recent_empty: gtk::Label,
     updating: Rc<Cell<bool>>,
     collapsed_directories: Rc<RefCell<std::collections::HashSet<String>>>,
+}
+
+#[derive(Clone)]
+struct SidebarView {
+    files: gtk::ListView,
+    file_model: gtk::StringList,
+    file_selection: gtk::SingleSelection,
+    sidebar_rows: Rc<RefCell<Vec<SidebarRow>>>,
+    all_entries: Rc<RefCell<Vec<SidebarEntry>>>,
+    visible_entries: Rc<RefCell<Vec<SidebarEntry>>>,
+    files_placeholder: gtk::Label,
+    overlay: gtk::Overlay,
+    scroll: gtk::ScrolledWindow,
+    dirty: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
@@ -123,20 +132,22 @@ impl Ui {
 
     fn render(&self, snapshot: AppSnapshot) {
         self.updating.set(true);
-        let previous_selection = self
-            .sidebar_rows
-            .borrow()
-            .get(self.file_selection.selected() as usize)
-            .cloned();
-        let results_changed = {
+        {
             let previous = self.snapshot.borrow();
-            self.force_sidebar_rebuild.replace(false)
-                || (self.search_mode.get()
-                    && (previous.search_results != snapshot.search_results
-                        || previous.search_query != snapshot.search_query))
+            if previous.workspace_root != snapshot.workspace_root
                 || previous.documents != snapshot.documents
                 || previous.directories != snapshot.directories
-        };
+            {
+                for sidebar in &self.sidebars {
+                    sidebar.dirty.set(true);
+                }
+            }
+            if previous.search_results != snapshot.search_results
+                || previous.search_query != snapshot.search_query
+            {
+                self.sidebars[1].dirty.set(true);
+            }
+        }
         {
             let previous = self.snapshot.borrow();
             if previous.workspace_root != snapshot.workspace_root {
@@ -176,21 +187,7 @@ impl Ui {
         self.search_spinner
             .set_spinning(snapshot.search_in_progress);
         self.search_spinner
-            .set_visible(self.search_mode.get() && snapshot.search_in_progress);
-        self.files_placeholder
-            .set_label(if snapshot.workspace_name.is_none() {
-                "Open a workspace"
-            } else if self.search_mode.get() {
-                if snapshot.search_query.0.is_empty() {
-                    "Search file contents"
-                } else {
-                    "No text matches"
-                }
-            } else if !self.file_query.borrow().is_empty() {
-                "No matching names"
-            } else {
-                "No files"
-            });
+            .set_visible(self.sidebar_tab.get() == 1 && snapshot.search_in_progress);
         self.conflict_banner.set_visible(
             snapshot
                 .active_document
@@ -233,6 +230,88 @@ impl Ui {
         }
         self.recent_empty
             .set_visible(snapshot.recent_workspaces.is_empty());
+        self.render_sidebar(&snapshot);
+        let content = snapshot
+            .active_document
+            .as_ref()
+            .map(|doc| doc.content.as_str())
+            .unwrap_or("");
+        let (start, end) = self.buffer.bounds();
+        let content_changed = self.buffer.text(&start, &end, false).as_str() != content;
+        let document_changed = self
+            .snapshot
+            .borrow()
+            .active_document
+            .as_ref()
+            .map(|doc| &doc.id)
+            != snapshot.active_document.as_ref().map(|doc| &doc.id);
+        if content_changed {
+            self.buffer.set_text(content);
+        }
+        if content_changed || document_changed {
+            syntax::apply(
+                &self.buffer,
+                snapshot
+                    .active_document
+                    .as_ref()
+                    .map_or("", |doc| doc.id.as_str()),
+            );
+        }
+        self.editor_chrome.set_file_name(
+            snapshot
+                .active_document
+                .as_ref()
+                .map_or("", |doc| doc.id.as_str()),
+        );
+        self.snapshot.replace(snapshot);
+        self.updating.set(false);
+    }
+
+    fn sidebar(&self) -> &SidebarView {
+        &self.sidebars[usize::from(self.search_mode.get())]
+    }
+
+    fn switch_sidebar(&self, tab: u8) {
+        self.sidebar_tab.set(tab);
+        self.file_search_row.set_visible(tab == 0);
+        self.text_search_row.set_visible(tab == 1);
+        self.search_spinner
+            .set_visible(tab == 1 && self.snapshot.borrow().search_in_progress);
+        if tab >= 2 {
+            self.sidebar_pages.set_visible_child_name("empty");
+            return;
+        }
+        self.search_mode.set(tab == 1);
+        self.updating.set(true);
+        self.render_sidebar(&self.snapshot.borrow());
+        self.updating.set(false);
+        self.sidebar_pages
+            .set_visible_child_name(if tab == 0 { "files" } else { "search" });
+    }
+
+    fn render_sidebar(&self, snapshot: &AppSnapshot) {
+        let previous_selection = self
+            .sidebar()
+            .sidebar_rows
+            .borrow()
+            .get(self.sidebar().file_selection.selected() as usize)
+            .cloned();
+        let results_changed = self.sidebar().dirty.replace(false);
+        self.sidebar()
+            .files_placeholder
+            .set_label(if snapshot.workspace_name.is_none() {
+                "Open a workspace"
+            } else if self.search_mode.get() {
+                if snapshot.search_query.0.is_empty() {
+                    "Search file contents"
+                } else {
+                    "No text matches"
+                }
+            } else if !self.file_query.borrow().is_empty() {
+                "No matching names"
+            } else {
+                "No files"
+            });
         if results_changed {
             let mut entries = Vec::new();
             let text_mode = self.search_mode.get();
@@ -245,6 +324,7 @@ impl Ui {
             let groups: std::collections::HashMap<String, Vec<&SearchResult>> = snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
+                .filter(|_| text_mode)
                 .filter_map(|group| {
                     let matches: Vec<_> = group
                         .iter()
@@ -358,11 +438,11 @@ impl Ui {
                     });
                 }
             }
-            self.all_entries.replace(entries);
+            self.sidebar().all_entries.replace(entries);
             self.rebuild_visible_sidebar();
         }
         if let Some(active) = snapshot.active_document.as_ref() {
-            let rows = self.sidebar_rows.borrow();
+            let rows = self.sidebar().sidebar_rows.borrow();
             let selected_index = previous_selection.as_ref().and_then(|previous| {
                 rows.iter().position(|row| {
                     row.id() == Some(&active.id)
@@ -379,52 +459,21 @@ impl Ui {
                 }
             });
             if let Some(index) = index {
-                self.file_selection.set_selected(index as u32);
+                self.sidebar().file_selection.set_selected(index as u32);
             } else {
-                self.file_selection.set_selected(u32::MAX);
+                self.sidebar().file_selection.set_selected(u32::MAX);
             }
         } else {
-            self.file_selection.set_selected(u32::MAX);
+            self.sidebar().file_selection.set_selected(u32::MAX);
         }
-        let content = snapshot
-            .active_document
-            .as_ref()
-            .map(|doc| doc.content.as_str())
-            .unwrap_or("");
-        let (start, end) = self.buffer.bounds();
-        if self.buffer.text(&start, &end, false).as_str() != content {
-            self.buffer.set_text(content);
-        }
-        syntax::apply(
-            &self.buffer,
-            snapshot
-                .active_document
-                .as_ref()
-                .map_or("", |doc| doc.id.as_str()),
-        );
-        self.editor_chrome.set_file_name(
-            snapshot
-                .active_document
-                .as_ref()
-                .map_or("", |doc| doc.id.as_str()),
-        );
-        self.snapshot.replace(snapshot);
-        self.updating.set(false);
     }
 
     fn rebuild_visible_sidebar(&self) {
-        if self.sidebar_tab.get() >= 2 {
-            self.visible_entries.borrow_mut().clear();
-            self.sidebar_rows.borrow_mut().clear();
-            self.file_model.splice(0, self.file_model.n_items(), &[]);
-            self.files_placeholder.set_visible(false);
-            return;
-        }
         let searching = self.search_mode.get() || !self.file_query.borrow().trim().is_empty();
         let collapsed = self.collapsed_directories.borrow();
         let mut hidden_prefix: Option<String> = None;
         let mut visible = Vec::new();
-        for entry in self.all_entries.borrow().iter() {
+        for entry in self.sidebar().all_entries.borrow().iter() {
             if let Some(prefix) = hidden_prefix.as_ref() {
                 if entry.path.starts_with(prefix) {
                     continue;
@@ -441,11 +490,14 @@ impl Ui {
         }
         let rows = visible.iter().map(|entry| entry.row.clone()).collect();
         let placeholders = vec![""; visible.len()];
-        self.visible_entries.replace(visible);
-        self.sidebar_rows.replace(rows);
-        self.file_model
-            .splice(0, self.file_model.n_items(), &placeholders);
-        self.files_placeholder.set_visible(placeholders.is_empty());
+        self.sidebar().visible_entries.replace(visible);
+        self.sidebar().sidebar_rows.replace(rows);
+        self.sidebar()
+            .file_model
+            .splice(0, self.sidebar().file_model.n_items(), &placeholders);
+        self.sidebar()
+            .files_placeholder
+            .set_visible(placeholders.is_empty());
     }
 
     fn toggle_directory(&self, path: &str) {
@@ -453,6 +505,7 @@ impl Ui {
             return;
         }
         let Some(visible_index) = self
+            .sidebar()
             .visible_entries
             .borrow()
             .iter()
@@ -461,6 +514,7 @@ impl Ui {
             return;
         };
         let Some(all_index) = self
+            .sidebar()
             .all_entries
             .borrow()
             .iter()
@@ -469,7 +523,7 @@ impl Ui {
             return;
         };
         let prefix = format!("{path}/");
-        let old_children = self.visible_entries.borrow()[visible_index + 1..]
+        let old_children = self.sidebar().visible_entries.borrow()[visible_index + 1..]
             .iter()
             .take_while(|entry| entry.path.starts_with(&prefix))
             .count();
@@ -478,10 +532,10 @@ impl Ui {
         if !expanding {
             collapsed.insert(path.to_owned());
         }
-        let mut replacement = vec![self.all_entries.borrow()[all_index].clone()];
+        let mut replacement = vec![self.sidebar().all_entries.borrow()[all_index].clone()];
         if expanding {
             let mut hidden_prefix: Option<String> = None;
-            for entry in self.all_entries.borrow()[all_index + 1..].iter() {
+            for entry in self.sidebar().all_entries.borrow()[all_index + 1..].iter() {
                 if !entry.path.starts_with(&prefix) {
                     break;
                 }
@@ -501,15 +555,18 @@ impl Ui {
         }
         drop(collapsed);
         self.updating.set(true);
-        self.file_selection.set_selected(u32::MAX);
+        self.sidebar().file_selection.set_selected(u32::MAX);
         let range = visible_index..visible_index + old_children + 1;
-        self.sidebar_rows.borrow_mut().splice(
+        self.sidebar().sidebar_rows.borrow_mut().splice(
             range.clone(),
             replacement.iter().map(|entry| entry.row.clone()),
         );
         let placeholders = vec![""; replacement.len()];
-        self.visible_entries.borrow_mut().splice(range, replacement);
-        self.file_model.splice(
+        self.sidebar()
+            .visible_entries
+            .borrow_mut()
+            .splice(range, replacement);
+        self.sidebar().file_model.splice(
             visible_index as u32,
             (old_children + 1) as u32,
             &placeholders,
@@ -692,6 +749,67 @@ fn texture_for_icon(name: &str) -> gtk::gdk::Texture {
     })
 }
 
+fn build_sidebar(
+    collapsed_directories: &Rc<RefCell<std::collections::HashSet<String>>>,
+    file_query: &Rc<RefCell<String>>,
+    text_mode: bool,
+) -> SidebarView {
+    let visible_entries: Rc<RefCell<Vec<SidebarEntry>>> = Rc::new(RefCell::new(Vec::new()));
+    let file_model = gtk::StringList::new(&[]);
+    let file_selection = gtk::SingleSelection::new(Some(file_model.clone()));
+    file_selection.set_autoselect(false);
+    file_selection.set_can_unselect(true);
+    let factory = gtk::SignalListItemFactory::new();
+    {
+        let visible_entries = visible_entries.clone();
+        let collapsed_directories = collapsed_directories.clone();
+        let file_query = file_query.clone();
+        factory.connect_bind(move |_, item| {
+            let item = item
+                .downcast_ref::<gtk::ListItem>()
+                .expect("sidebar list item");
+            if let Some(entry) = visible_entries.borrow().get(item.position() as usize) {
+                let collapsed = matches!(&entry.row, SidebarRow::Directory(path)
+                    if !text_mode && file_query.borrow().trim().is_empty()
+                        && collapsed_directories.borrow().contains(path));
+                item.set_child(Some(&sidebar_entry_widget(entry, collapsed)));
+            }
+        });
+    }
+    factory.connect_unbind(|_, item| {
+        item.downcast_ref::<gtk::ListItem>()
+            .expect("sidebar list item")
+            .set_child(gtk::Widget::NONE);
+    });
+    let files = gtk::ListView::new(Some(file_selection.clone()), Some(factory));
+    files.add_css_class("compact-files");
+    files.set_size_request(220, -1);
+    let files_placeholder = gtk::Label::new(Some("Open a workspace"));
+    files_placeholder.set_halign(gtk::Align::Center);
+    files_placeholder.set_valign(gtk::Align::Center);
+    files_placeholder.set_can_target(false);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.add_css_class("workspace-files-scroll");
+    scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(&files));
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&scroll));
+    overlay.add_overlay(&files_placeholder);
+    SidebarView {
+        files,
+        file_model,
+        file_selection,
+        visible_entries,
+        files_placeholder,
+        overlay,
+        scroll,
+        sidebar_rows: Rc::new(RefCell::new(Vec::new())),
+        all_entries: Rc::new(RefCell::new(Vec::new())),
+        dirty: Rc::new(Cell::new(true)),
+    }
+}
+
 fn main() {
     let resource = gio::Resource::from_data(&glib::Bytes::from_static(include_bytes!(concat!(
         env!("OUT_DIR"),
@@ -756,43 +874,12 @@ fn build_window(app: &adw::Application) {
     let search_mode = Rc::new(Cell::new(false));
     let sidebar_tab = Rc::new(Cell::new(0));
     let file_query = Rc::new(RefCell::new(String::new()));
-    let force_sidebar_rebuild = Rc::new(Cell::new(false));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
-    let visible_entries: Rc<RefCell<Vec<SidebarEntry>>> = Rc::new(RefCell::new(Vec::new()));
-    let file_model = gtk::StringList::new(&[]);
-    let file_selection = gtk::SingleSelection::new(Some(file_model.clone()));
-    file_selection.set_autoselect(false);
-    file_selection.set_can_unselect(true);
-    let factory = gtk::SignalListItemFactory::new();
-    {
-        let visible_entries = visible_entries.clone();
-        let collapsed_directories = collapsed_directories.clone();
-        let search_mode = search_mode.clone();
-        let file_query = file_query.clone();
-        factory.connect_bind(move |_, item| {
-            let item = item
-                .downcast_ref::<gtk::ListItem>()
-                .expect("sidebar list item");
-            if let Some(entry) = visible_entries.borrow().get(item.position() as usize) {
-                let collapsed = matches!(&entry.row, SidebarRow::Directory(path)
-                    if !search_mode.get() && file_query.borrow().is_empty()
-                        && collapsed_directories.borrow().contains(path));
-                item.set_child(Some(&sidebar_entry_widget(entry, collapsed)));
-            }
-        });
-    }
-    factory.connect_unbind(|_, item| {
-        item.downcast_ref::<gtk::ListItem>()
-            .expect("sidebar list item")
-            .set_child(gtk::Widget::NONE);
-    });
-    let files = gtk::ListView::new(Some(file_selection.clone()), Some(factory));
-    files.add_css_class("compact-files");
-    files.set_size_request(220, -1);
-    let files_placeholder = gtk::Label::new(Some("Open a workspace"));
-    files_placeholder.set_halign(gtk::Align::Center);
-    files_placeholder.set_valign(gtk::Align::Center);
-    files_placeholder.set_can_target(false);
+    let sidebars = [
+        build_sidebar(&collapsed_directories, &file_query, false),
+        build_sidebar(&collapsed_directories, &file_query, true),
+    ];
+    let files_scroll = sidebars[0].scroll.clone();
     let search = gtk::SearchEntry::new();
     let search_spinner = gtk::Spinner::new();
     search_spinner.set_visible(false);
@@ -865,15 +952,13 @@ fn build_window(app: &adw::Application) {
     search_row.append(&add_button);
     file_search.set_hexpand(true);
     search_row.append(&file_search);
-    let files_scroll = gtk::ScrolledWindow::new();
-    files_scroll.add_css_class("workspace-files-scroll");
-    files_scroll.set_vexpand(true);
-    files_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    files_scroll.set_child(Some(&files));
-    let files_overlay = gtk::Overlay::new();
-    files_overlay.set_child(Some(&files_scroll));
-    files_overlay.add_overlay(&files_placeholder);
-    sidebar_content.append(&files_overlay);
+    let sidebar_pages = gtk::Stack::new();
+    sidebar_pages.set_vexpand(true);
+    sidebar_pages.set_transition_type(gtk::StackTransitionType::None);
+    sidebar_pages.add_named(&sidebars[0].overlay, Some("files"));
+    sidebar_pages.add_named(&sidebars[1].overlay, Some("search"));
+    sidebar_pages.add_named(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("empty"));
+    sidebar_content.append(&sidebar_pages);
     sidebar_content.append(&search_row);
     let sidebar_style = gtk::CssProvider::new();
     sidebar_style.load_from_data(include_str!("sidebar.css"));
@@ -977,22 +1062,16 @@ fn build_window(app: &adw::Application) {
         window: window.clone(),
         core: Rc::new(RefCell::new(core)),
         snapshot: current_snapshot,
-        files,
-        file_model,
-        file_selection,
-        sidebar_rows: Rc::new(RefCell::new(Vec::new())),
-        all_entries: Rc::new(RefCell::new(Vec::new())),
-        visible_entries,
+        sidebars,
+        sidebar_pages,
         search,
         file_search,
         search_mode,
         sidebar_tab,
         file_query,
-        force_sidebar_rebuild,
         file_search_row: search_row,
         text_search_row,
         search_spinner,
-        files_placeholder,
         conflict_banner,
         editor,
         editor_chrome,
@@ -1013,13 +1092,7 @@ fn build_window(app: &adw::Application) {
             if !button.is_active() {
                 return;
             }
-            ui.search_mode.set(false);
-            ui.sidebar_tab.set(0);
-            ui.file_search_row.set_visible(true);
-            ui.text_search_row.set_visible(false);
-            ui.force_sidebar_rebuild.set(true);
-            let snapshot = ui.snapshot.borrow().clone();
-            ui.render(snapshot);
+            ui.switch_sidebar(0);
         });
     }
     {
@@ -1028,13 +1101,7 @@ fn build_window(app: &adw::Application) {
             if !button.is_active() {
                 return;
             }
-            ui.search_mode.set(true);
-            ui.sidebar_tab.set(1);
-            ui.file_search_row.set_visible(false);
-            ui.text_search_row.set_visible(true);
-            ui.force_sidebar_rebuild.set(true);
-            let snapshot = ui.snapshot.borrow().clone();
-            ui.render(snapshot);
+            ui.switch_sidebar(1);
         });
     }
     for (index, tab) in empty_tabs.into_iter().enumerate() {
@@ -1043,12 +1110,7 @@ fn build_window(app: &adw::Application) {
             if !button.is_active() {
                 return;
             }
-            ui.sidebar_tab.set(index as u8 + 2);
-            ui.file_search_row.set_visible(false);
-            ui.text_search_row.set_visible(false);
-            ui.force_sidebar_rebuild.set(true);
-            let snapshot = ui.snapshot.borrow().clone();
-            ui.render(snapshot);
+            ui.switch_sidebar(index as u8 + 2);
         });
     }
     {
@@ -1060,7 +1122,7 @@ fn build_window(app: &adw::Application) {
                     return;
                 }
                 ui.file_query.replace(search.text().to_string());
-                ui.force_sidebar_rebuild.set(true);
+                ui.sidebars[0].dirty.set(true);
                 let snapshot = ui.snapshot.borrow().clone();
                 ui.render(snapshot);
             });
@@ -1152,58 +1214,70 @@ fn build_window(app: &adw::Application) {
             }
         });
     }
-    {
-        let ui = ui.clone();
-        ui.file_selection
-            .clone()
-            .connect_selected_notify(move |selection| {
-                if ui.updating.get() {
-                    return;
-                }
-                let row = ui
-                    .sidebar_rows
-                    .borrow()
-                    .get(selection.selected() as usize)
-                    .cloned();
-                if let Some(row) = row {
-                    if let SidebarRow::Directory(path) = row {
-                        ui.toggle_directory(&path);
+    for (mode, sidebar) in ui.sidebars.iter().enumerate() {
+        {
+            let ui = ui.clone();
+            sidebar
+                .file_selection
+                .clone()
+                .connect_selected_notify(move |selection| {
+                    if ui.updating.get() || ui.sidebar_tab.get() != mode as u8 {
                         return;
                     }
-                    let Some(id) = row.id().cloned() else { return };
-                    let location = row.location().cloned();
-                    ui.dispatch(AppCommand::OpenDocument(id.clone()));
-                    if ui
+                    let row = ui
+                        .sidebar()
+                        .sidebar_rows
+                        .borrow()
+                        .get(selection.selected() as usize)
+                        .cloned();
+                    if let Some(row) = row {
+                        if let SidebarRow::Directory(path) = row {
+                            ui.toggle_directory(&path);
+                            return;
+                        }
+                        let Some(id) = row.id().cloned() else { return };
+                        let location = row.location().cloned();
+                        ui.dispatch(AppCommand::OpenDocument(id.clone()));
+                        if ui
+                            .snapshot
+                            .borrow()
+                            .active_document
+                            .as_ref()
+                            .map(|doc| &doc.id)
+                            == Some(&id)
+                            && let Some(location) = &location
+                        {
+                            ui.select_match(location);
+                        }
+                    }
+                });
+        }
+        {
+            let ui = ui.clone();
+            sidebar.files.clone().connect_activate(move |_, index| {
+                if ui.sidebar_tab.get() != mode as u8 {
+                    return;
+                }
+                let selected = ui
+                    .sidebar()
+                    .sidebar_rows
+                    .borrow()
+                    .get(index as usize)
+                    .cloned();
+                if let Some(row) = selected
+                    && ui
                         .snapshot
                         .borrow()
                         .active_document
                         .as_ref()
                         .map(|doc| &doc.id)
-                        == Some(&id)
-                        && let Some(location) = &location
-                    {
-                        ui.select_match(location);
-                    }
+                        == row.id()
+                    && let Some(location) = row.location()
+                {
+                    ui.select_match(location);
                 }
             });
-    }
-    {
-        let ui = ui.clone();
-        ui.files.clone().connect_activate(move |_, index| {
-            let selected = ui.sidebar_rows.borrow().get(index as usize).cloned();
-            if let Some(row) = selected
-                && ui
-                    .snapshot
-                    .borrow()
-                    .active_document
-                    .as_ref()
-                    .map(|doc| &doc.id)
-                    == row.id()
-                && let Some(location) = row.location()
-            {
-                ui.select_match(location);
-            }
-        });
+        }
     }
     {
         let ui = ui.clone();
@@ -1335,49 +1409,85 @@ fn build_window(app: &adw::Application) {
             .any(|path| path == "src")
         {
             assert!(ui.collapsed_directories.borrow().contains("src"));
-            assert_eq!(ui.sidebar_rows.borrow().len(), 2);
+            assert_eq!(ui.sidebar().sidebar_rows.borrow().len(), 2);
             assert!(matches!(
-                ui.sidebar_rows.borrow()[0],
+                ui.sidebar().sidebar_rows.borrow()[0],
                 SidebarRow::Directory(_)
             ));
-            let unchanged_root_file = ui.file_model.item(1).expect("root file row");
-            ui.file_selection.set_selected(0);
+            let unchanged_root_file = ui.sidebar().file_model.item(1).expect("root file row");
+            ui.sidebar().file_selection.set_selected(0);
             let nested_index = ui
+                .sidebar()
                 .sidebar_rows
                 .borrow()
                 .iter()
                 .position(|row| matches!(row, SidebarRow::File(id) if id.as_str() == "src/main.rs"))
                 .expect("expanded directory file");
-            let nested = ui.visible_entries.borrow()[nested_index].clone();
+            let nested = ui.sidebar().visible_entries.borrow()[nested_index].clone();
             assert_eq!(sidebar_entry_widget(&nested, false).margin_start(), 24);
             assert_eq!(
                 unchanged_root_file.as_ptr(),
-                ui.file_model
-                    .item((ui.file_model.n_items() - 1) as u32)
+                ui.sidebar()
+                    .file_model
+                    .item(ui.sidebar().file_model.n_items() - 1)
                     .expect("root file after expansion")
                     .as_ptr(),
                 "expanding a folder should preserve rows outside its subtree"
             );
-            ui.file_selection.set_selected(0);
-            assert_eq!(ui.sidebar_rows.borrow().len(), 2);
-            ui.file_selection.set_selected(0);
-            assert!(ui.sidebar_rows.borrow().len() > 2);
+            ui.sidebar().file_selection.set_selected(0);
+            assert_eq!(ui.sidebar().sidebar_rows.borrow().len(), 2);
+            ui.sidebar().file_selection.set_selected(0);
+            assert!(ui.sidebar().sidebar_rows.borrow().len() > 2);
         }
+        // Switching tabs must retain the file model and avoid touching editor tags.
+        let retained_row = ui.sidebars[0].file_model.item(0).expect("file sidebar row");
+        let model_changes = Rc::new(Cell::new(0));
+        let tag_changes = Rc::new(Cell::new(0));
+        let changed = model_changes.clone();
+        let model_handler = ui.sidebars[0]
+            .file_model
+            .connect_items_changed(move |_, _, _, _| {
+                changed.set(changed.get() + 1);
+            });
+        let changed = tag_changes.clone();
+        let tag_handler = ui.buffer.connect_apply_tag(move |_, _, _, _| {
+            changed.set(changed.get() + 1);
+        });
+        for _ in 0..3 {
+            text_tab.set_active(true);
+            file_tab.set_active(true);
+            ui.switch_sidebar(2);
+            assert_eq!(
+                ui.sidebar_pages.visible_child_name().as_deref(),
+                Some("empty")
+            );
+            ui.switch_sidebar(0);
+        }
+        assert_eq!(
+            model_changes.get(),
+            0,
+            "tab switches rebuilt the file model"
+        );
+        assert_eq!(tag_changes.get(), 0, "tab switches reapplied syntax tags");
+        assert_eq!(retained_row, ui.sidebars[0].file_model.item(0).unwrap());
+        ui.sidebars[0].file_model.disconnect(model_handler);
+        ui.buffer.disconnect(tag_handler);
         assert_eq!(
             window.title().as_deref(),
             ui.snapshot.borrow().workspace_name.as_deref()
         );
-        let first =
-            ui.sidebar_rows
-                .borrow()
-                .iter()
-                .enumerate()
-                .find_map(|(index, row)| match row {
-                    SidebarRow::File(id) if id.as_str() == "README.md" => Some((index, id.clone())),
-                    _ => None,
-                });
+        let first = ui
+            .sidebar()
+            .sidebar_rows
+            .borrow()
+            .iter()
+            .enumerate()
+            .find_map(|(index, row)| match row {
+                SidebarRow::File(id) if id.as_str() == "README.md" => Some((index, id.clone())),
+                _ => None,
+            });
         if let Some((index, id)) = first {
-            ui.file_selection.set_selected(index as u32);
+            ui.sidebar().file_selection.set_selected(index as u32);
             assert_eq!(
                 ui.snapshot
                     .borrow()
@@ -1402,36 +1512,84 @@ fn build_window(app: &adw::Application) {
             app.activate_action("save", None);
             assert_eq!(ui.status.text(), "Saved");
             ui.file_search.set_text("main");
-            assert!(ui.sidebar_rows.borrow().iter().any(|row| matches!(row,
-                SidebarRow::File(id) if id.as_str() == "src/main.rs")));
             assert!(
-                !ui.sidebar_rows
+                ui.sidebar()
+                    .sidebar_rows
+                    .borrow()
+                    .iter()
+                    .any(|row| matches!(row,
+                SidebarRow::File(id) if id.as_str() == "src/main.rs"))
+            );
+            assert!(
+                !ui.sidebar()
+                    .sidebar_rows
                     .borrow()
                     .iter()
                     .any(|row| matches!(row, SidebarRow::Match(_)))
             );
             ui.file_search.set_text("src");
-            assert!(ui.sidebar_rows.borrow().iter().any(|row| matches!(row,
-                SidebarRow::Directory(path) if path == "src")));
+            assert!(
+                ui.sidebar()
+                    .sidebar_rows
+                    .borrow()
+                    .iter()
+                    .any(|row| matches!(row,
+                SidebarRow::Directory(path) if path == "src"))
+            );
+            let filtered_row = ui.sidebars[0]
+                .file_model
+                .item(0)
+                .expect("filtered file row");
+            let selected = ui.sidebars[0].file_selection.selected();
+            let cursor = ui.buffer.cursor_position();
+            let changed = tag_changes.clone();
+            let tag_handler = ui.buffer.connect_apply_tag(move |_, _, _, _| {
+                changed.set(changed.get() + 1);
+            });
+            text_tab.set_active(true);
+            file_tab.set_active(true);
+            assert_eq!(filtered_row, ui.sidebars[0].file_model.item(0).unwrap());
+            assert_eq!(selected, ui.sidebars[0].file_selection.selected());
+            assert_eq!(cursor, ui.buffer.cursor_position());
+            assert_eq!(
+                tag_changes.get(),
+                0,
+                "tab switches rehighlighted the loaded document"
+            );
+            ui.buffer.disconnect(tag_handler);
             ui.file_search.set_text("");
             text_tab.set_active(true);
             ui.dispatch(AppCommand::SetSearchQuery("README".into()));
-            assert!(ui.sidebar_rows.borrow().is_empty());
+            assert!(ui.sidebar().sidebar_rows.borrow().is_empty());
             ui.dispatch(AppCommand::SetSearchQuery("phase 1".into()));
             assert_eq!(ui.snapshot.borrow().search_results.len(), 2);
-            assert_eq!(ui.sidebar_rows.borrow().len(), 3);
-            let first_row = sidebar_entry_widget(&ui.visible_entries.borrow()[0], false);
+            assert_eq!(ui.sidebar().sidebar_rows.borrow().len(), 3);
+            let first_row = sidebar_entry_widget(&ui.sidebar().visible_entries.borrow()[0], false);
             let (_, natural_height, _, _) = first_row.measure(gtk::Orientation::Vertical, -1);
             assert!(
                 natural_height <= 32,
                 "sidebar row is {natural_height}px high"
             );
-            assert!(matches!(ui.sidebar_rows.borrow()[0], SidebarRow::File(_)));
+            assert!(matches!(
+                ui.sidebar().sidebar_rows.borrow()[0],
+                SidebarRow::File(_)
+            ));
             assert_eq!(
                 ui.snapshot.borrow().search_results[0].snippet.as_deref(),
                 Some("GTK Phase 1 smoke content")
             );
-            ui.file_selection.set_selected(2);
+            let search_row = ui.sidebars[1].file_model.item(2).expect("search match row");
+            file_tab.set_active(true);
+            assert!(
+                ui.sidebars[0]
+                    .sidebar_rows
+                    .borrow()
+                    .iter()
+                    .all(|row| !matches!(row, SidebarRow::Match(_)))
+            );
+            text_tab.set_active(true);
+            assert_eq!(search_row, ui.sidebars[1].file_model.item(2).unwrap());
+            ui.sidebar().file_selection.set_selected(2);
             let (start, end) = ui
                 .buffer
                 .selection_bounds()
@@ -1462,8 +1620,16 @@ fn build_window(app: &adw::Application) {
                 ui.snapshot.borrow().documents.len()
             );
             let document_path = workspace_path.join(id.as_str());
+            text_tab.set_active(true);
             std::fs::write(&document_path, "external clean edit").unwrap();
+            std::fs::write(workspace_path.join("new-while-hidden.txt"), "new file").unwrap();
             ui.dispatch(AppCommand::RefreshWorkspace);
+            assert!(ui.sidebars[0].dirty.get());
+            file_tab.set_active(true);
+            assert!(!ui.sidebars[0].dirty.get());
+            assert!(ui.sidebars[0].sidebar_rows.borrow().iter().any(
+                |row| matches!(row, SidebarRow::File(id) if id.as_str() == "new-while-hidden.txt")
+            ));
             assert_eq!(
                 ui.buffer
                     .text(&ui.buffer.start_iter(), &ui.buffer.end_iter(), false),

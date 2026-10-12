@@ -33,6 +33,8 @@ jobs:
       - run: |
           workspace=$(mktemp -d)
           printf 'before\n' > "$workspace/README.md"
+          mkdir "$workspace/src"
+          printf 'fn main() {}\n' > "$workspace/src/main.rs"
           NATIVE_WORKSPACE_SMOKE_WORKSPACE="$workspace" xvfb-run -a target/debug/native-workspace-gnome
           grep -q 'GTK Phase 1 smoke content' "$workspace/README.md"
 
