@@ -10,6 +10,7 @@ ApplicationWindow {
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
 
     AppController { id: controller }
+    Timer { id: benchmarkDelay; interval: 200; repeat: false }
     FolderDialog {
         id: folderDialog
         onAccepted: workspacePane.openWorkspace(selectedFolder.toString())
@@ -33,14 +34,19 @@ ApplicationWindow {
                 var initialAt = Date.now()
                 var initialRows = workspacePane.sidebarEntries()
                 var initialMs = Date.now() - initialAt
-                Qt.callLater(function() {
+                benchmarkDelay.triggered.connect(function() {
+                    if (!workspacePane.treeMatchesSidebarEntries())
+                        throw new Error("Native tree did not show the initial rows")
                     var expandedAt = Date.now()
                     workspacePane.toggleDirectory("src")
                     var expandedRows = workspacePane.sidebarEntries()
+                    var expandedChildPath = expandedRows.find(entry => entry.path.startsWith("src/")).path
                     var expandMs = Date.now() - expandedAt
                     if (expandedRows.length <= initialRows.length)
                         throw new Error("Benchmark directory did not expand; expected a populated src folder")
                     Qt.callLater(function() {
+                        if (!workspacePane.treeMatchesSidebarEntries())
+                            throw new Error("Native tree did not expand with the folder")
                         var expandedSettledMs = Date.now() - expandedAt
                         var collapsedAt = Date.now()
                         workspacePane.toggleDirectory("src")
@@ -49,16 +55,25 @@ ApplicationWindow {
                         if (collapsedRows.length !== initialRows.length)
                             throw new Error("Benchmark directory did not collapse")
                         Qt.callLater(function() {
+                            if (!workspacePane.treeMatchesSidebarEntries() || workspacePane.treeRowForPath(expandedChildPath) !== -1)
+                                throw new Error("Native tree did not collapse with the folder")
                             console.log("KDE tree benchmark files=" + controller.document_ids.length
                                 + " open=" + openMs + "ms initial=" + initialMs + "ms/" + initialRows.length
                                 + " expand=" + expandMs + "ms/" + expandedRows.length
                                 + " expand-next-turn=" + expandedSettledMs + "ms"
                                 + " collapse=" + collapseMs + "ms/" + collapsedRows.length
                                 + " collapse-next-turn=" + (Date.now() - collapsedAt) + "ms")
-                            Qt.quit()
+                            workspacePane.fileNameQuery = expandedChildPath.split("/").pop()
+                            workspacePane.sidebarEntries()
+                            Qt.callLater(function() {
+                                if (!workspacePane.treeMatchesSidebarEntries())
+                                    throw new Error("Native tree did not show filtered files")
+                                Qt.quit()
+                            })
                         })
                     })
                 })
+                benchmarkDelay.start()
                 return
             }
         }
