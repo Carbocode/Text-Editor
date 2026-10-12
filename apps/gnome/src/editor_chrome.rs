@@ -298,6 +298,12 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     });
     let redraw_gutter = gutter.clone();
     let redraw_map = minimap.clone();
+    adjustment.connect_changed(move |_| {
+        redraw_gutter.queue_draw();
+        redraw_map.queue_draw();
+    });
+    let redraw_gutter = gutter.clone();
+    let redraw_map = minimap.clone();
     let model_update = model.clone();
     let name_update = file_name.clone();
     let cache_update = cache.clone();

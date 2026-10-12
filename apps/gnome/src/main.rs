@@ -29,6 +29,7 @@ struct Ui {
     search: gtk::SearchEntry,
     file_search: gtk::SearchEntry,
     search_mode: Rc<Cell<bool>>,
+    sidebar_tab: Rc<Cell<u8>>,
     file_query: Rc<RefCell<String>>,
     force_sidebar_rebuild: Rc<Cell<bool>>,
     file_search_row: gtk::Box,
@@ -412,6 +413,13 @@ impl Ui {
     }
 
     fn rebuild_visible_sidebar(&self) {
+        if self.sidebar_tab.get() >= 2 {
+            self.visible_entries.borrow_mut().clear();
+            self.sidebar_rows.borrow_mut().clear();
+            self.file_model.splice(0, self.file_model.n_items(), &[]);
+            self.files_placeholder.set_visible(false);
+            return;
+        }
         let searching = self.search_mode.get() || !self.file_query.borrow().trim().is_empty();
         let collapsed = self.collapsed_directories.borrow();
         let mut hidden_prefix: Option<String> = None;
@@ -732,7 +740,7 @@ fn build_window(app: &adw::Application) {
     home_icon.set_pixel_size(16);
     home_button.set_child(Some(&home_icon));
     home_button.set_tooltip_text(Some("Home"));
-    sidebar_header.pack_start(&home_button);
+    content_header.pack_end(&home_button);
     let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
     recent_list.set_margin_top(6);
     recent_list.set_margin_bottom(6);
@@ -742,6 +750,7 @@ fn build_window(app: &adw::Application) {
     content_header.set_title_widget(Some(&heading));
     let current_snapshot = Rc::new(RefCell::new(Application::new().snapshot()));
     let search_mode = Rc::new(Cell::new(false));
+    let sidebar_tab = Rc::new(Cell::new(0));
     let file_query = Rc::new(RefCell::new(String::new()));
     let force_sidebar_rebuild = Rc::new(Cell::new(false));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
@@ -789,6 +798,8 @@ fn build_window(app: &adw::Application) {
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_content.add_css_class("workspace-sidebar");
     let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    tab_row.add_css_class("linked");
+    tab_row.set_homogeneous(true);
     tab_row.set_margin_start(8);
     tab_row.set_margin_end(8);
     tab_row.set_margin_top(6);
@@ -809,6 +820,28 @@ fn build_window(app: &adw::Application) {
     text_tab.set_group(Some(&file_tab));
     tab_row.append(&file_tab);
     tab_row.append(&text_tab);
+    let extra_tabs = [
+        ("Git", "git"),
+        ("Bookmarks", "user-bookmarks-symbolic"),
+        ("Warnings", "dialog-warning-symbolic"),
+        ("Errors", "dialog-error-symbolic"),
+    ];
+    let mut empty_tabs = Vec::new();
+    for (title, icon_name) in extra_tabs {
+        let tab = gtk::ToggleButton::new();
+        if icon_name == "git" {
+            let icon = gtk::Image::from_paintable(Some(&texture_for_icon("git")));
+            icon.set_pixel_size(16);
+            tab.set_child(Some(&icon));
+        } else {
+            tab.set_icon_name(icon_name);
+        }
+        tab.set_tooltip_text(Some(title));
+        tab.set_hexpand(true);
+        tab.set_group(Some(&file_tab));
+        tab_row.append(&tab);
+        empty_tabs.push(tab);
+    }
     sidebar_content.append(&tab_row);
     let text_search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     text_search_row.set_margin_start(8);
@@ -959,6 +992,7 @@ fn build_window(app: &adw::Application) {
         search,
         file_search,
         search_mode,
+        sidebar_tab,
         file_query,
         force_sidebar_rebuild,
         file_search_row: search_row,
@@ -986,6 +1020,7 @@ fn build_window(app: &adw::Application) {
                 return;
             }
             ui.search_mode.set(false);
+            ui.sidebar_tab.set(0);
             ui.file_search_row.set_visible(true);
             ui.text_search_row.set_visible(false);
             ui.force_sidebar_rebuild.set(true);
@@ -1000,8 +1035,23 @@ fn build_window(app: &adw::Application) {
                 return;
             }
             ui.search_mode.set(true);
+            ui.sidebar_tab.set(1);
             ui.file_search_row.set_visible(false);
             ui.text_search_row.set_visible(true);
+            ui.force_sidebar_rebuild.set(true);
+            let snapshot = ui.snapshot.borrow().clone();
+            ui.render(snapshot);
+        });
+    }
+    for (index, tab) in empty_tabs.into_iter().enumerate() {
+        let ui = ui.clone();
+        tab.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            ui.sidebar_tab.set(index as u8 + 2);
+            ui.file_search_row.set_visible(false);
+            ui.text_search_row.set_visible(false);
             ui.force_sidebar_rebuild.set(true);
             let snapshot = ui.snapshot.borrow().clone();
             ui.render(snapshot);

@@ -21,7 +21,12 @@ fn main() {
             .qml_file("qml/KirigamiMain.qml")
             .qml_file("qml/WorkspacePane.qml"),
     )
-    .qrc_resources(["qml/icons/action-open.png", "qml/icons/action-save.png"])
+    .qrc_resources([
+        "qml/icons/action-open.png",
+        "qml/icons/action-save.png",
+        "qml/icons/git-branch.png",
+        "qml/icons/bookmark.png",
+    ])
     .qrc_resources(QResources::new().resource(resources))
     .qt_module("Network")
     .qt_module("Quick")

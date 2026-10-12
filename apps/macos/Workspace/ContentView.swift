@@ -17,7 +17,6 @@ struct ContentView: View {
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
     @State private var sidebarRows: [SidebarOutlineRow] = []
     @State private var sidebarCache: [Int: SidebarIndex] = [:]
-
     private struct SidebarIndex {
         let children: [String: [SidebarOutlineRow]]
         let rows: [SidebarOutlineRow]
@@ -47,6 +46,11 @@ struct ContentView: View {
     }
 
     private func rebuildSidebarIndex() {
+        if sidebarTab >= 2 {
+            sidebarChildren = [:]
+            sidebarRows = []
+            return
+        }
         if let cached = sidebarCache[sidebarTab] {
             sidebarChildren = cached.children
             sidebarRows = cached.rows
@@ -267,7 +271,7 @@ struct ContentView: View {
                     rebuildSidebarIndex()
                 }
                 .overlay {
-                    if store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
+                    if sidebarTab < 2 && store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
                         Text(sidebarTab == 1
                              ? (store.searchQuery.isEmpty ? "Search file contents" : "No text matches")
                              : (fileNameQuery.isEmpty ? "No files" : "No matching names"))
@@ -279,6 +283,10 @@ struct ContentView: View {
                         Picker("Sidebar", selection: $sidebarTab) {
                             Image(systemName: "folder").accessibilityLabel("Files").tag(0)
                             Image(systemName: "magnifyingglass").accessibilityLabel("Search").tag(1)
+                            Image(systemName: "arrow.triangle.branch").accessibilityLabel("Git").tag(2)
+                            Image(systemName: "bookmark").accessibilityLabel("Bookmarks").tag(3)
+                            Image(systemName: "exclamationmark.triangle").accessibilityLabel("Warnings").tag(4)
+                            Image(systemName: "xmark.octagon").accessibilityLabel("Errors").tag(5)
                         }
                         .pickerStyle(.segmented)
                         .controlSize(.large)
@@ -344,11 +352,13 @@ struct ContentView: View {
                     }
                 }
             }
-            .toolbar {
-                Button("Home", systemImage: "house") { showingHome = true }
-            }
         } detail: {
             editorDetail
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Home", systemImage: "house") { showingHome = true }
+                    }
+                }
         }
         .opacity(showingHome ? 0 : 1)
         .allowsHitTesting(!showingHome)
