@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQml.Models
 import Qt.labs.qmlmodels
 import org.nativeworkspace.Syntax 1.0
+import org.nativeworkspace.Editor 1.0
 
 Item {
     id: root
@@ -14,7 +15,7 @@ Item {
     property int sidebarTab: 0 // 0: files, 1: text search, 2-5: empty tabs
     property string fileNameQuery: ""
     onSidebarTabChanged: scheduleSidebarUpdate()
-    onFileNameQueryChanged: scheduleSidebarUpdate()
+    onFileNameQueryChanged: invalidateSidebar(0)
     property bool syncingEditor: false
     property bool updatingHighlight: false
     property var minimapLines: [""]
@@ -25,12 +26,17 @@ Item {
     property var minimapSpans: []
     property int selectedResultIndex: -1
     property alias editorText: editor.text
+    property alias editorFont: editor.font
     property alias editorSelectedText: editor.selectedText
     property real editorScrollY: editorScroll.contentItem.contentY
-    property int searchFileCount: fileIds().length
+    property int searchFileCount: textSearchFileIds().length
     property var collapsedDirectories: ({})
     property var orderedSidebarEntries: []
     property var visibleSidebarEntries: []
+    // Keep Files and Search data independently; tab changes only select a cache.
+    property var sidebarCaches: [null, null]
+    property var searchSidebarEntries: []
+    property bool fileTreeNeedsRestore: false
     property var childEntriesByParent: ({})
     property var treeIndexPaths: ({})
     property bool restoringFileTree: false
@@ -65,12 +71,14 @@ Item {
                 root.collapsedDirectories = ({})
             }
             if (root.controller.workspace_root.length > 0) root.showingHome = false
-            root.scheduleSidebarUpdate()
+            root.invalidateSidebar(0)
+            root.invalidateSidebar(1)
         }
-        function onDirectory_idsChanged() { root.scheduleSidebarUpdate() }
-        function onDocument_idsChanged() { root.scheduleSidebarUpdate() }
-        function onSearch_result_idsChanged() { root.scheduleSidebarUpdate() }
-        function onSearch_queryChanged() { root.scheduleSidebarUpdate() }
+        function onDirectory_idsChanged() { root.invalidateSidebar(0) }
+        function onDocument_idsChanged() { root.invalidateSidebar(0) }
+        function onSearch_result_idsChanged() { root.invalidateSidebar(1) }
+        function onSearch_result_linesChanged() { root.invalidateSidebar(1) }
+        function onSearch_queryChanged() { root.invalidateSidebar(1) }
     }
 
     Component.onCompleted: {
@@ -116,6 +124,21 @@ Item {
         minimapOffsets = offsets
         minimapLines = lines
         minimap.requestPaint()
+    }
+
+    function invalidateSidebar(tab) {
+        sidebarCaches[tab] = null
+        if (sidebarTab === tab) scheduleSidebarUpdate()
+    }
+
+    function cacheCurrentSidebar() {
+        if (sidebarTab >= 2) return
+        sidebarCaches[sidebarTab] = {
+            ordered: orderedSidebarEntries,
+            visible: visibleSidebarEntries,
+            children: childEntriesByParent,
+            matches: matchIndicesByFile
+        }
     }
 
     function scheduleSidebarUpdate() {
@@ -199,15 +222,29 @@ Item {
         }
     }
 
+    function textSearchFileIds() {
+        var ids = controller.search_result_ids
+        var lines = controller.search_result_lines
+        var files = []
+        var seen = ({})
+        for (var i = 0; i < ids.length; ++i) {
+            if (lines[i] !== "" && !seen["#" + ids[i]]) {
+                files.push(ids[i])
+                seen["#" + ids[i]] = true
+            }
+        }
+        return files
+    }
+
     function fileIds() {
         if (sidebarTab >= 2) return []
-        var ids = sidebarTab === 0 ? controller.document_ids : controller.search_result_ids
+        if (sidebarTab === 1) return textSearchFileIds()
+        var ids = controller.document_ids
         var files = []
         var seen = ({})
         var needle = fileNameQuery.trim().toLowerCase()
         for (var i = 0; i < ids.length; ++i) {
             if (sidebarTab === 0 && needle.length > 0 && !ids[i].split("/").pop().toLowerCase().includes(needle)) continue
-            if (sidebarTab === 1 && controller.search_result_lines[i] === "") continue
             if (!seen["#" + ids[i]]) {
                 files.push(ids[i])
                 seen["#" + ids[i]] = true
@@ -232,6 +269,20 @@ Item {
     function rebuildOrderedEntries() {
         sidebarEntriesDirty = false
         sidebarUpdate.stop()
+        if (sidebarTab >= 2) {
+            visibleSidebarEntries = []
+            return
+        }
+        var cached = sidebarCaches[sidebarTab]
+        if (cached) {
+            orderedSidebarEntries = cached.ordered
+            visibleSidebarEntries = cached.visible
+            childEntriesByParent = cached.children
+            if (sidebarTab === 1) matchIndicesByFile = cached.matches
+            if (sidebarTab === 0 && fileTreeNeedsRestore)
+                Qt.callLater(root.restoreFileTreeExpansion)
+            return
+        }
         var files = fileIds()
         var matches = ({})
         if (sidebarTab === 1 && root.controller.search_query.length > 0) {
@@ -244,7 +295,7 @@ Item {
                 matches[resultKey].push(result)
             }
         }
-        matchIndicesByFile = matches
+        if (sidebarTab === 1) matchIndicesByFile = matches
         var directories = []
         var seenDirectories = ({})
         if (sidebarTab === 0 && fileNameQuery.trim().length === 0) {
@@ -314,26 +365,29 @@ Item {
                 childEntries[fileParent].push({ path: child, directory: false })
         }
         childEntriesByParent = childEntries
-        var indexPaths = ({})
-        function treeRows(parent, parentIndex) {
-            var entries = childEntries["#" + parent] || []
-            return entries.map(function(entry, row) {
-                var indexPath = parentIndex.concat([row])
-                indexPaths["#" + entry.path] = indexPath
-                var node = {
-                    name: entry.path.split("/").pop(),
-                    path: entry.path,
-                    directory: entry.directory
-                }
-                if (entry.directory) node.rows = treeRows(entry.path, indexPath)
-                return node
-            })
+        if (sidebarTab === 0) {
+            var indexPaths = ({})
+            function treeRows(parent, parentIndex) {
+                var entries = childEntries["#" + parent] || []
+                return entries.map(function(entry, row) {
+                    var indexPath = parentIndex.concat([row])
+                    indexPaths["#" + entry.path] = indexPath
+                    var node = {
+                        name: entry.path.split("/").pop(),
+                        path: entry.path,
+                        directory: entry.directory
+                    }
+                    if (entry.directory) node.rows = treeRows(entry.path, indexPath)
+                    return node
+                })
+            }
+            restoringFileTree = true
+            fileTreeNeedsRestore = true
+            var rootRows = treeRows("", [])
+            treeIndexPaths = indexPaths
+            fileTreeModel.rows = rootRows
+            Qt.callLater(root.restoreFileTreeExpansion)
         }
-        restoringFileTree = true
-        var rootRows = treeRows("", [])
-        treeIndexPaths = indexPaths
-        fileTreeModel.rows = rootRows
-        Qt.callLater(root.restoreFileTreeExpansion)
         var paths = []
         function appendChildren(parent) {
             for (var entry of childEntries["#" + parent] || []) {
@@ -344,6 +398,7 @@ Item {
         appendChildren("")
         orderedSidebarEntries = paths
         updateVisibleEntries()
+        cacheCurrentSidebar()
     }
 
     function updateVisibleEntries() {
@@ -360,7 +415,13 @@ Item {
             if (!searching && entry.directory && collapsedDirectories[entry.path] !== false)
                 hiddenPrefix = entry.path + "/"
         }
-        var previous = visibleSidebarEntries
+        // Only Search uses the ListModel. Keep it populated while Files or an
+        // empty panel is selected, rather than removing and reinserting rows.
+        if (sidebarTab !== 1) {
+            visibleSidebarEntries = visible
+            return
+        }
+        var previous = searchSidebarEntries
         var start = 0
         while (start < previous.length && start < visible.length
                && previous[start].path === visible[start].path
@@ -378,6 +439,7 @@ Item {
             sidebarModel.remove(start, oldEnd - start)
         for (var row = start; row < newEnd; ++row)
             sidebarModel.insert(row, visible[row])
+        searchSidebarEntries = visible
         visibleSidebarEntries = visible
     }
 
@@ -401,6 +463,10 @@ Item {
     }
 
     function restoreFileTreeExpansion() {
+        if (sidebarTab !== 0) {
+            restoringFileTree = false
+            return
+        }
         if (sidebarTab === 0) {
             if (fileNameQuery.trim().length > 0) {
                 fileTree.expandRecursively(-1)
@@ -417,6 +483,7 @@ Item {
                 expandChildren("")
             }
         }
+        fileTreeNeedsRestore = false
         restoringFileTree = false
     }
 
@@ -444,10 +511,17 @@ Item {
         }
         if (expanding) appendVisibleChildren(path)
         var oldCount = oldEnd - index - 1
-        if (oldCount > 0) sidebarModel.remove(index + 1, oldCount)
-        for (var row = 0; row < children.length; ++row)
-            sidebarModel.insert(index + 1 + row, children[row])
+        if (sidebarTab === 1) {
+            if (oldCount > 0) sidebarModel.remove(index + 1, oldCount)
+            for (var row = 0; row < children.length; ++row)
+                sidebarModel.insert(index + 1 + row, children[row])
+        }
         visibleSidebarEntries = visible.slice(0, index + 1).concat(children, visible.slice(oldEnd))
+        if (sidebarTab === 1) {
+            searchSidebarEntries = visibleSidebarEntries
+            invalidateSidebar(0)
+        }
+        cacheCurrentSidebar()
         if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeIndexPaths["#" + path]) {
             var treeRow = fileTree.rowAtIndex(fileTreeModel.index(treeIndexPaths["#" + path], 0))
             if (treeRow >= 0 && fileTree.isExpanded(treeRow) !== expanding) {
@@ -625,7 +699,6 @@ Item {
                                 onClicked: {
                                     root.sidebarTab = index
                                     root.selectedResultIndex = -1
-                                    root.scheduleSidebarUpdate()
                                 }
                             }
                         }
@@ -664,6 +737,7 @@ Item {
                     }
                     TreeView {
                         id: fileTree
+                        objectName: "fileTree"
                         anchors.top: parent.top
                         anchors.left: sidebarTabs.right
                         anchors.right: parent.right
@@ -676,13 +750,13 @@ Item {
                         rowHeightProvider: function() { return 28 }
                         onWidthChanged: forceLayout()
                         onExpanded: function(row) {
-                            if (root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                            if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
                             var entry = fileTreeModel.getRow(fileTree.index(row, 0))
                             if (entry && root.collapsedDirectories[entry.path] !== false)
                                 root.toggleDirectory(entry.path)
                         }
                         onCollapsed: function(row) {
-                            if (root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                            if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
                             var entry = fileTreeModel.getRow(fileTree.index(row, 0))
                             if (entry && root.collapsedDirectories[entry.path] === false)
                                 root.toggleDirectory(entry.path)
@@ -694,17 +768,34 @@ Item {
                         }
                         delegate: TreeViewDelegate {
                             id: treeRow
-                            property var entry: fileTreeModel.getRow(fileTree.index(row, 0))
+                            // Expanding changes the mapping of view rows even
+                            // when a reused delegate keeps the same row number.
+                            property var entry: row < fileTree.rows && model.display !== undefined
+                                ? fileTreeModel.getRow(fileTree.index(row, 0)) : null
                             text: entry ? entry.name : ""
-                            icon.name: entry ? (entry.directory
-                                ? (expanded ? "folder-open" : "folder")
-                                : root.documentThemeIcon(entry.path)) : ""
-                            icon.source: entry ? (entry.directory
-                                ? root.controller.folder_icon(entry.path, expanded)
-                                : root.controller.file_icon(entry.path)) : ""
-                            icon.color: "transparent"
-                            icon.width: 16
-                            icon.height: 16
+                            // TreeViewDelegate styles can provide a text-only
+                            // contentItem, so draw the bundled icon explicitly.
+                            contentItem: RowLayout {
+                                spacing: 4
+                                Image {
+                                    objectName: "fileTreeIcon"
+                                    source: treeRow.entry ? (treeRow.entry.directory
+                                        ? root.controller.folder_icon(treeRow.entry.path, treeRow.expanded)
+                                        : root.controller.file_icon(treeRow.entry.path)) : ""
+                                    sourceSize.width: 32
+                                    sourceSize.height: 32
+                                    fillMode: Image.PreserveAspectFit
+                                    Layout.preferredWidth: 16
+                                    Layout.preferredHeight: 16
+                                }
+                                Label {
+                                    text: treeRow.text
+                                    color: treeRow.highlighted ? treeRow.palette.highlightedText : treeRow.palette.text
+                                    elide: Text.ElideRight
+                                    Layout.fillWidth: true
+                                }
+                            }
+                            rightPadding: 38
                             highlighted: entry && !entry.directory && root.controller.active_document_id === entry.path
                             onClicked: {
                                 if (!entry || entry.directory) return
@@ -734,12 +825,12 @@ Item {
                     }
                     ListView {
                         id: fileList
-                        anchors.top: root.sidebarTab === 1 ? textSearchRow.bottom : parent.top
+                        objectName: "searchResults"
+                        anchors.top: textSearchRow.bottom
                         anchors.left: sidebarTabs.right
                         anchors.right: parent.right
-                        anchors.bottom: root.sidebarTab === 0 ? searchRow.top : parent.bottom
-                        anchors.bottomMargin: root.sidebarTab === 0 ? 6 : 0
-                        visible: root.sidebarTab !== 0
+                        anchors.bottom: parent.bottom
+                        visible: root.sidebarTab === 1
                         clip: true
                         model: sidebarModel
                         reuseItems: true
@@ -803,7 +894,7 @@ Item {
                                 }
                             }
                             Repeater {
-                                model: root.sidebarTab === 0 || fileGroup.isDirectory || root.controller.search_query.length === 0
+                                model: fileGroup.isDirectory || root.controller.search_query.length === 0
                                     ? [] : root.matchIndicesForFile(fileGroup.fileId)
                                 delegate: ItemDelegate {
                                     property int resultIndex: modelData
@@ -870,7 +961,6 @@ Item {
                             onTextEdited: {
                                 root.selectedResultIndex = -1
                                 root.fileNameQuery = text
-                                root.scheduleSidebarUpdate()
                             }
                         }
                     }
@@ -891,6 +981,7 @@ Item {
                         anchors.margins: 1
                         spacing: 0
                         FontMetrics { id: editorMetrics; font: editor.font }
+                        FontInfo { id: resolvedEditorFont; font: editor.font }
                         Canvas {
                             id: lineNumbers
                             Layout.preferredWidth: 48
@@ -899,7 +990,7 @@ Item {
                                 var ctx = getContext("2d")
                                 ctx.clearRect(0, 0, width, height)
                                 ctx.fillStyle = "#808080"
-                                ctx.font = (editorMetrics.font.pixelSize > 0 ? editorMetrics.font.pixelSize : 12) + "px monospace"
+                                ctx.font = resolvedEditorFont.pixelSize + 'px "' + resolvedEditorFont.family + '"'
                                 ctx.textAlign = "right"
                                 var lineHeight = editorMetrics.height
                                 var scrollY = editorScroll.contentItem.contentY
@@ -915,7 +1006,7 @@ Item {
                             Layout.fillHeight: true
                             TextArea {
                                 id: editor
-                                font.family: "monospace"
+                                font: EditorFonts.fixedFont
                                 textFormat: TextEdit.PlainText
                                 wrapMode: TextEdit.NoWrap
                                 EditorSyntaxHighlighter {
