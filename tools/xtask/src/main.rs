@@ -3,6 +3,9 @@ use std::{
     process::{Command, ExitCode},
 };
 
+#[cfg(any(target_os = "macos", test))]
+mod qt;
+
 fn available(program: &str, args: &[&str]) -> bool {
     Command::new(program)
         .args(args)
@@ -82,6 +85,8 @@ fn run(program: &str, args: &[&str]) -> ExitCode {
 fn run_kde(args: &[&str]) -> ExitCode {
     let mut command = Command::new("cargo");
     command.args(args);
+    #[cfg(target_os = "macos")]
+    qt::configure(&mut command);
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         // Qt Minimal 6.10 headers need this declaration with Xcode 27's Clang.
         command.env("CXXFLAGS", "-include arm_acle.h");
