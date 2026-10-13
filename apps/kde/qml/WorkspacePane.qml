@@ -26,6 +26,7 @@ Item {
     property string minimapSource: ""
     property var minimapSpans: []
     property int selectedResultIndex: -1
+    property string selectedDirectoryPath: ""
     property alias editorText: editor.text
     property alias editorFont: editor.font
     property alias editorSelectedText: editor.selectedText
@@ -58,6 +59,18 @@ Item {
 
     signal browseRequested()
 
+    MouseArea {
+        id: renameOutsideClick
+        objectName: "renameOutsideClick"
+        anchors.fill: parent
+        z: 1000
+        enabled: root.renamePath.length > 0 && root.activeRenameEditor && root.activeRenameEditor.visible
+        acceptedButtons: Qt.AllButtons
+        onPressed: function(mouse) {
+            mouse.accepted = root.cancelRenameForClick(renameOutsideClick, mouse.x, mouse.y)
+        }
+    }
+
     SystemPalette { id: sidebarPalette }
     ListModel { id: sidebarModel }
     TreeModel {
@@ -83,6 +96,7 @@ Item {
             if (root.lastWorkspaceRoot !== root.controller.workspace_root) {
                 root.lastWorkspaceRoot = root.controller.workspace_root
                 root.collapsedDirectories = ({})
+                root.selectedDirectoryPath = ""
             }
             if (root.controller.workspace_root.length > 0) root.showingHome = false
             root.invalidateSidebar(0)
@@ -191,15 +205,45 @@ Item {
         Qt.callLater(root.focusInlineRename)
     }
 
+    function cancelRenameForClick(item, x, y) {
+        if (!activeRenameEditor || renamePath.length === 0) return false
+        var point = activeRenameEditor.mapFromItem(item, x, y)
+        if (activeRenameEditor.contains(point)) return false
+        renamePath = ""
+        activeRenameEditor = null
+        return true
+    }
+
+    function clickSidebarEntry(path, directory) {
+        if (renamePath.length > 0 || draggingPath.length > 0) return
+        if (directory) {
+            selectedDirectoryPath = path
+            toggleDirectory(path)
+            return
+        }
+        var selected = selectedDirectoryPath.length === 0 && selectedResultIndex < 0 && controller.active_document_id === path
+        if (selected) { beginRename(path); return }
+        if (flushEditor()) {
+            selectedDirectoryPath = ""
+            controller.open_document(path)
+            selectedResultIndex = -1
+        }
+    }
+
     function focusInlineRename() {
-        if (sidebarEntriesDirty) rebuildOrderedEntries()
-        fileTree.forceLayout()
-        var row = treeRowForPath(renamePath)
-        if (row < 0) return
-        var delegate = fileTree.itemAtCell(Qt.point(0, row))
-        if (!delegate || !delegate.renameEditor) return
-        if (activeRenameEditor === delegate.renameEditor && activeRenameEditor.activeFocus) return
-        activeRenameEditor = delegate.renameEditor
+        if (sidebarTab === 1) {
+            if (!activeRenameEditor || !activeRenameEditor.visible) return
+            if (activeRenameEditor.activeFocus) return
+        } else {
+            if (sidebarEntriesDirty) rebuildOrderedEntries()
+            fileTree.forceLayout()
+            var row = treeRowForPath(renamePath)
+            if (row < 0) return
+            var delegate = fileTree.itemAtCell(Qt.point(0, row))
+            if (!delegate || !delegate.renameEditor) return
+            if (activeRenameEditor === delegate.renameEditor && activeRenameEditor.activeFocus) return
+            activeRenameEditor = delegate.renameEditor
+        }
         activeRenameEditor.text = renameName
         activeRenameEditor.forceActiveFocus(Qt.OtherFocusReason)
         var dot = controller.directory_ids.indexOf(renamePath) === -1 ? renameName.lastIndexOf(".") : -1
@@ -399,6 +443,7 @@ Item {
     }
 
     function openSearchResult(index, id) {
+        selectedDirectoryPath = ""
         if (!flushEditor()) return
         var start = controller.search_result_starts[index]
         var end = controller.search_result_ends[index]
@@ -1037,6 +1082,8 @@ Item {
                                     text: visible ? root.renameName : ""
                                     onTextEdited: root.renameName = text
                                     onAccepted: root.commitRename()
+                                    onActiveFocusChanged: if (!activeFocus && root.activeRenameEditor === renameField && visible)
+                                        root.renamePath = ""
                                     Keys.onEscapePressed: root.renamePath = ""
                                     ToolTip.visible: activeFocus && root.controller.error_message.length > 0
                                     ToolTip.text: root.controller.error_message
@@ -1108,14 +1155,9 @@ Item {
                                     && root.hoverDirectory === treeRow.entry.path
                             }
                             rightPadding: 38
-                            highlighted: entry && !entry.directory && root.controller.active_document_id === entry.path
-                            onClicked: {
-                                if (!entry || entry.directory || root.renamePath.length > 0 || root.draggingPath.length > 0) return
-                                if (root.flushEditor()) {
-                                    root.controller.open_document(entry.path)
-                                    root.selectedResultIndex = -1
-                                }
-                            }
+                            highlighted: entry && (entry.directory ? root.selectedDirectoryPath === entry.path
+                                : root.selectedDirectoryPath.length === 0 && root.selectedResultIndex < 0 && root.controller.active_document_id === entry.path)
+                            onClicked: if (entry) root.clickSidebarEntry(entry.path, entry.directory)
                             Row {
                                 anchors.right: parent.right
                                 anchors.rightMargin: 8
@@ -1191,9 +1233,10 @@ Item {
                             property bool isDirectory: model.directory
                             property int depth: fileId.split("/").length - 1
                             ItemDelegate {
+                                objectName: "sidebarSearchFile:" + fileGroup.fileId
                                 width: parent.width
                                 height: 28
-                                text: fileGroup.fileId.split("/").pop()
+                                text: root.renamePath === fileGroup.fileId ? "" : fileGroup.fileId.split("/").pop()
                                 icon.name: fileGroup.isDirectory
                                     ? (root.sidebarTab === 1 || root.fileNameQuery.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false ? "folder-open" : "folder")
                                     : root.documentThemeIcon(fileGroup.fileId)
@@ -1205,16 +1248,40 @@ Item {
                                 icon.height: 16
                                 leftPadding: 28 + fileGroup.depth * 16
                                 rightPadding: 38
-                                highlighted: !fileGroup.isDirectory && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
-                                onClicked: {
-                                    if (fileGroup.isDirectory) {
-                                        root.toggleDirectory(fileGroup.fileId)
-                                        return
+                                highlighted: fileGroup.isDirectory ? root.selectedDirectoryPath === fileGroup.fileId
+                                    : root.selectedDirectoryPath.length === 0 && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
+                                onClicked: root.clickSidebarEntry(fileGroup.fileId, fileGroup.isDirectory)
+                                TapHandler {
+                                    acceptedButtons: Qt.RightButton
+                                    onTapped: searchEntryMenu.popup()
+                                }
+                                Menu {
+                                    id: searchEntryMenu
+                                    MenuItem {
+                                        text: "Rename…"
+                                        onTriggered: root.beginRename(fileGroup.fileId)
                                     }
-                                    if (root.flushEditor()) {
-                                        root.controller.open_document(fileGroup.fileId)
-                                        root.selectedResultIndex = -1
+                                }
+                                Basic.TextField {
+                                    id: searchRenameField
+                                    objectName: "sidebarRenameField"
+                                    visible: root.renamePath === fileGroup.fileId
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: parent.leftPadding + parent.icon.width + parent.spacing
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: parent.rightPadding
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    height: 24
+                                    text: visible ? root.renameName : ""
+                                    onVisibleChanged: if (visible) {
+                                        root.activeRenameEditor = searchRenameField
+                                        Qt.callLater(root.focusInlineRename)
                                     }
+                                    onTextEdited: root.renameName = text
+                                    onAccepted: root.commitRename()
+                                    onActiveFocusChanged: if (!activeFocus && root.activeRenameEditor === searchRenameField && visible)
+                                        root.renamePath = ""
+                                    Keys.onEscapePressed: root.renamePath = ""
                                 }
                                 Label {
                                     x: 10 + fileGroup.depth * 16

@@ -28,6 +28,31 @@ struct SidebarInteractionSmoke {
         precondition(submitted == 1, "Return did not submit rename")
         editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
         precondition(cancelled == 1, "Escape did not cancel rename")
+        let insideUp = NSEvent.mouseEvent(with: .leftMouseUp, location: NSPoint(x: 140, y: 25), modifierFlags: [],
+                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                          context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
+        let insideDown = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 140, y: 25), modifierFlags: [],
+                                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                            context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        app.postEvent(insideUp, atStart: false)
+        app.postEvent(insideDown, atStart: true)
+        if let event = app.nextEvent(matching: .leftMouseDown, until: Date().addingTimeInterval(0.1),
+                                     inMode: .default, dequeue: true) { app.sendEvent(event) }
+        precondition(cancelled == 1, "Clicking inside the input cancelled rename")
+        for type in [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown] {
+            let previousCancelled = cancelled
+            let click = NSEvent.mouseEvent(with: type, location: NSPoint(x: 2, y: 2), modifierFlags: [],
+                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                          context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+            app.postEvent(click, atStart: true)
+            if let event = app.nextEvent(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown],
+                                         until: Date().addingTimeInterval(0.1), inMode: .default, dequeue: true) {
+                app.sendEvent(event)
+            }
+            precondition(cancelled == previousCancelled + 1, "Outside click did not cancel rename")
+            precondition(submitted == 1, "Outside click submitted a rename")
+        }
+        print("macOS outside left/right/other click cancels rename without submitting")
         let drag = SidebarDragState(isDragging: { true })
         let renders = RenderCounter()
         window.contentView = NSHostingView(rootView: DragRenderHarness(drag: drag, renders: renders))

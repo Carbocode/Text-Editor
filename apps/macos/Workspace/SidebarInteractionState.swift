@@ -148,20 +148,35 @@ struct SidebarEntryIcon: View {
     }
 }
 
+struct SidebarRowHighlight: View {
+    var color: Color = .accentColor
+    var cornerRadius: CGFloat = 4
+    var outlined = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .fill(color.opacity(0.14))
+            .overlay {
+                if outlined {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(color, lineWidth: 2)
+                }
+            }
+            .allowsHitTesting(false)
+    }
+}
+
 struct SidebarDropOutline: View {
     @ObservedObject var drag: SidebarDragState
     let directory: String
     var cornerRadius: CGFloat = 4
+    var selected = false
 
     var body: some View {
-        if drag.source != nil && drag.directory == directory {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .fill((drag.valid ? Color.accentColor : Color.red).opacity(0.14))
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .stroke(drag.valid ? Color.accentColor : Color.red, lineWidth: 2)
-                }
-                .allowsHitTesting(false)
+        let targeted = drag.source != nil && drag.directory == directory
+        if targeted || selected {
+            SidebarRowHighlight(color: targeted && !drag.valid ? .red : .accentColor,
+                                cornerRadius: cornerRadius, outlined: targeted)
         }
     }
 }

@@ -469,7 +469,18 @@ impl Ui {
             self.sidebar().all_entries.replace(entries);
             self.rebuild_visible_sidebar();
         }
-        if let Some(active) = snapshot.active_document.as_ref() {
+        let selected_directory = previous_selection.as_ref().and_then(|previous| {
+            if let SidebarRow::Directory(path) = previous {
+                self.sidebar().sidebar_rows.borrow().iter().position(
+                    |row| matches!(row, SidebarRow::Directory(candidate) if candidate == path),
+                )
+            } else {
+                None
+            }
+        });
+        if let Some(index) = selected_directory {
+            self.sidebar().file_selection.set_selected(index as u32);
+        } else if let Some(active) = snapshot.active_document.as_ref() {
             let rows = self.sidebar().sidebar_rows.borrow();
             let selected_index = previous_selection.as_ref().and_then(|previous| {
                 rows.iter().position(|row| {
@@ -494,6 +505,21 @@ impl Ui {
         } else {
             self.sidebar().file_selection.set_selected(u32::MAX);
         }
+        self.sync_sidebar_selection();
+    }
+
+    fn sync_sidebar_selection(&self) {
+        let selected = self
+            .sidebar()
+            .sidebar_rows
+            .borrow()
+            .get(self.sidebar().file_selection.selected() as usize)
+            .and_then(|row| match row {
+                SidebarRow::Directory(path) => Some(path.clone()),
+                SidebarRow::File(id) => Some(id.as_str().to_owned()),
+                SidebarRow::Match(_) => None,
+            });
+        self.sidebar().interactions.selected.replace(selected);
     }
 
     fn rebuild_visible_sidebar(&self) {
@@ -582,8 +608,13 @@ impl Ui {
             }
         }
         drop(collapsed);
+        let selected = self
+            .sidebar()
+            .sidebar_rows
+            .borrow()
+            .get(self.sidebar().file_selection.selected() as usize)
+            .cloned();
         self.updating.set(true);
-        self.sidebar().file_selection.set_selected(u32::MAX);
         let range = visible_index + 1..visible_index + old_children + 1;
         self.sidebar().sidebar_rows.borrow_mut().splice(
             range.clone(),
@@ -612,6 +643,18 @@ impl Ui {
                 image.set_paintable(Some(&folder_icon_for(path, expanding)));
             }
         }
+        if let Some(selected) = selected {
+            let index = self.sidebar().sidebar_rows.borrow().iter().position(|row| {
+                match (&selected, row) {
+                    (SidebarRow::Directory(a), SidebarRow::Directory(b)) => a == b,
+                    _ => selected.id() == row.id() && selected.location() == row.location(),
+                }
+            });
+            if let Some(index) = index {
+                self.sidebar().file_selection.set_selected(index as u32);
+            }
+        }
+        self.sync_sidebar_selection();
         self.updating.set(false);
     }
 
@@ -1326,6 +1369,9 @@ fn build_window(app: &adw::Application) {
             }
         });
         sidebar.files.add_controller(keys);
+        sidebar
+            .interactions
+            .attach_cancel_on_outside_click(&ui.window);
     }
     for (button, directory) in [(new_file, false), (new_folder, true)] {
         let ui = ui.clone();
@@ -1430,12 +1476,8 @@ fn build_window(app: &adw::Application) {
                         .borrow()
                         .get(selection.selected() as usize)
                         .cloned();
+                    ui.sync_sidebar_selection();
                     if let Some(row) = row {
-                        ui.sidebar().interactions.selected.replace(Some(match &row {
-                            SidebarRow::Directory(path) => path.clone(),
-                            SidebarRow::File(id) => id.as_str().to_owned(),
-                            SidebarRow::Match(result) => result.id.as_str().to_owned(),
-                        }));
                         if let SidebarRow::Directory(path) = row {
                             ui.toggle_directory(&path);
                             return;
@@ -1646,9 +1688,10 @@ fn build_window(app: &adw::Application) {
                     .as_ptr(),
                 "expanding a folder should preserve rows outside its subtree"
             );
-            ui.sidebar().file_selection.set_selected(0);
+            ui.toggle_directory("src");
             assert_eq!(ui.sidebar().sidebar_rows.borrow().len(), 2);
-            ui.sidebar().file_selection.set_selected(0);
+            assert_eq!(ui.sidebar().file_selection.selected(), 0);
+            ui.toggle_directory("src");
             assert!(ui.sidebar().sidebar_rows.borrow().len() > 2);
         }
         // Switching tabs must retain the file model and avoid touching editor tags.
@@ -1900,10 +1943,121 @@ fn build_window(app: &adw::Application) {
             assert!(ui.editor.line_yrange(&ui.buffer.start_iter()).1 > 0);
             println!("GTK editor full-width/active-line smoke test passed");
             ui.buffer.set_text("unsaved rename");
+            if ui.collapsed_directories.borrow().contains("notes") {
+                ui.toggle_directory("notes");
+            }
             // Let the virtualized row bind before activating its inline editor.
             for _ in 0..100 {
                 glib::MainContext::default().iteration(false);
             }
+            let file_row = ui.sidebars[0]
+                .interactions
+                .row_widget("notes/todo.md")
+                .expect("file row for selected-click rename");
+            let controllers = file_row.observe_controllers();
+            let selected_click = (0..controllers.n_items())
+                .filter_map(|index| controllers.item(index))
+                .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+                .find(|gesture| gesture.name().as_deref() == Some("sidebar-entry-click"))
+                .expect("entry click gesture");
+            let file_entry = ui.sidebars[0].interactions.editor("notes/todo.md").unwrap();
+            let file_stack = file_entry
+                .parent()
+                .unwrap()
+                .downcast::<gtk::Stack>()
+                .unwrap();
+            ui.sidebars[0].file_selection.set_selected(u32::MAX);
+            selected_click.emit_by_name::<()>("pressed", &[&1i32, &24f64, &0f64]);
+            assert_eq!(file_stack.visible_child_name().as_deref(), Some("label"));
+            let file_index = ui.sidebars[0]
+                .sidebar_rows
+                .borrow()
+                .iter()
+                .position(
+                    |row| matches!(row, SidebarRow::File(id) if id.as_str() == "notes/todo.md"),
+                )
+                .unwrap();
+            ui.sidebars[0]
+                .file_selection
+                .set_selected(file_index as u32);
+            selected_click.emit_by_name::<()>("pressed", &[&1i32, &24f64, &0f64]);
+            assert_eq!(file_stack.visible_child_name().as_deref(), Some("edit"));
+            assert_eq!(file_entry.selection_bounds(), Some((0, 4)));
+            let controllers = ui.window.observe_controllers();
+            let outside_clicks: Vec<_> = (0..controllers.n_items())
+                .filter_map(|index| controllers.item(index))
+                .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+                .filter(|gesture| gesture.name().as_deref() == Some("sidebar-rename-outside-click"))
+                .collect();
+            assert!(!outside_clicks.is_empty());
+            assert!(outside_clicks.iter().all(|gesture| gesture.button() == 0));
+            for _ in 0..40 {
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let inside = file_entry
+                .compute_point(
+                    &ui.window,
+                    &gtk::graphene::Point::new(
+                        file_entry.width() as f32 / 2.0,
+                        file_entry.height() as f32 / 2.0,
+                    ),
+                )
+                .unwrap();
+            for gesture in &outside_clicks {
+                gesture.emit_by_name::<()>(
+                    "pressed",
+                    &[&1i32, &f64::from(inside.x()), &f64::from(inside.y())],
+                );
+            }
+            assert_eq!(file_stack.visible_child_name().as_deref(), Some("edit"));
+            file_entry.set_text("discarded.md");
+            for gesture in &outside_clicks {
+                gesture.emit_by_name::<()>("pressed", &[&1i32, &0f64, &0f64]);
+            }
+            assert_eq!(file_stack.visible_child_name().as_deref(), Some("label"));
+            assert!(workspace_path.join("notes/todo.md").is_file());
+            assert!(!workspace_path.join("notes/discarded.md").exists());
+            println!("GTK outside click cancels draft; clicking inside keeps rename active");
+            ui.editor.grab_focus();
+            for _ in 0..20 {
+                glib::MainContext::default().iteration(false);
+            }
+            println!("GTK selected file click/rename/stem selection smoke test passed");
+            let folder_index = ui.sidebars[0]
+                .sidebar_rows
+                .borrow()
+                .iter()
+                .position(|row| matches!(row, SidebarRow::Directory(path) if path == "notes"))
+                .unwrap();
+            ui.sidebars[0]
+                .file_selection
+                .set_selected(folder_index as u32);
+            assert_eq!(
+                ui.sidebars[0].file_selection.selected(),
+                folder_index as u32
+            );
+            let folder_row = ui.sidebars[0].interactions.row_widget("notes").unwrap();
+            let folder_controllers = folder_row.observe_controllers();
+            let folder_click = (0..folder_controllers.n_items())
+                .filter_map(|index| folder_controllers.item(index))
+                .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+                .find(|gesture| gesture.name().as_deref() == Some("sidebar-entry-click"))
+                .unwrap();
+            folder_click.emit_by_name::<()>("pressed", &[&1i32, &24f64, &0f64]);
+            assert_eq!(
+                ui.sidebars[0]
+                    .interactions
+                    .editor("notes")
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .downcast::<gtk::Stack>()
+                    .unwrap()
+                    .visible_child_name()
+                    .as_deref(),
+                Some("label")
+            );
             ui.sidebars[0].interactions.begin_rename("notes");
             let entry = ui.sidebars[0]
                 .interactions

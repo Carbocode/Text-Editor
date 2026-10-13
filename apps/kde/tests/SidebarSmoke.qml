@@ -248,6 +248,14 @@ ApplicationWindow {
                     checkNumberAlignment([25, 40, 100])
                     console.log("KDE editor scrolling active-line smoke test passed")
                     pane.editorText = "unsaved rename"
+                    tree.forceLayout()
+                    var folderDelegate = tree.itemAtCell(Qt.point(0, pane.treeRowForPath("src")))
+                    check(folderDelegate, "Folder row is missing for selected-click rename")
+                    folderDelegate.clicked()
+                    check(pane.selectedDirectoryPath === "src" && pane.renamePath.length === 0,
+                        "First folder click must select it")
+                    folderDelegate.clicked()
+                    check(pane.renamePath.length === 0, "Selected folder click must not start renaming")
                     pane.beginRename("src")
                     break
                 case 13:
@@ -314,7 +322,15 @@ ApplicationWindow {
                         check(controller.error_message.length === 0 && !controller.active_document_dirty,
                             "Could not save moved document after background confirmation")
                         waitingMoveSave = false
-                        pane.beginRename("new.rs")
+                        tree.forceLayout()
+                        var fileRow = pane.treeRowForPath("new.rs")
+                        var fileDelegate = tree.itemAtCell(Qt.point(0, fileRow))
+                        check(fileDelegate, "File row is missing for selected-click rename")
+                        pane.selectedDirectoryPath = "destination"
+                        fileDelegate.clicked()
+                        check(pane.renamePath.length === 0, "First file click must only select/open it")
+                        fileDelegate.clicked()
+                        check(pane.renamePath === "new.rs", "Selected file click did not start renaming")
                         --step
                         break
                     }
@@ -348,6 +364,38 @@ ApplicationWindow {
                     check(pane.collapsedDirectories["sibling"] !== false, "Cancelled drag retained a temporary expansion")
                     check(pane.collapsedDirectories["destination"] === false, "Cancellation lost a confirmed expansion")
                     console.log("KDE drag ghost/drop/hover expansion/sibling rollback smoke test passed")
+                    pane.sidebarTab = 1
+                    controller.search_files("unsaved move")
+                    switchedAt = Date.now()
+                    break
+                case 21:
+                    if (controller.search_in_progress) { --step; break }
+                    var searchFile = findItem(pane, "sidebarSearchFile:renamed.rs")
+                    if (!searchFile && Date.now() - switchedAt < 3000) { --step; break }
+                    check(searchFile, "Search file row is missing for selected-click rename")
+                    searchFile.clicked()
+                    check(pane.renamePath === "renamed.rs", "Selected search file click did not start renaming")
+                    break
+                case 22:
+                    var searchRename = pane.activeRenameEditor
+                    check(searchRename && searchRename.visible && searchRename.activeFocus,
+                        "Selected search file click did not focus the inline rename editor")
+                    check(searchRename.selectedText === "renamed", "Search rename should select the file stem")
+                    var outsideClick = findItem(pane, "renameOutsideClick")
+                    check(outsideClick && outsideClick.acceptedButtons === Qt.AllButtons,
+                        "Outside rename clicks must accept all mouse buttons")
+                    var insideInput = searchRename.mapToItem(outsideClick, searchRename.width / 2, searchRename.height / 2)
+                    check(!pane.cancelRenameForClick(outsideClick, insideInput.x, insideInput.y)
+                        && pane.renamePath === "renamed.rs", "Click inside the input cancelled rename")
+                    searchRename.text = "discarded.rs"
+                    pane.renameName = searchRename.text
+                    check(pane.cancelRenameForClick(outsideClick, pane.width - 4, pane.height - 4),
+                        "Outside click was not accepted")
+                    check(pane.renamePath.length === 0, "Outside click did not cancel rename")
+                    check(controller.document_ids.indexOf("renamed.rs") !== -1
+                        && controller.document_ids.indexOf("discarded.rs") === -1,
+                        "Outside click applied the drafted file name")
+                    console.log("KDE Files/Search selected-click rename/stem selection smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {
