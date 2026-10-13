@@ -23,7 +23,9 @@ fn main() -> std::process::ExitCode {
     }
     let mut app = QGuiApplication::new();
     let mut engine = QQmlApplicationEngine::new();
-    let qml = if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar=")) {
+    let qml = if std::env::args().any(|argument| argument.starts_with("--smoke-drag=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/DragSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar=")) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SidebarSmoke.qml"
     } else if std::env::var_os("NATIVE_WORKSPACE_KIRIGAMI").is_some() {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/KirigamiMain.qml"

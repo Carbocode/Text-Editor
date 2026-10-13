@@ -534,7 +534,7 @@ impl Ui {
         if !expanding {
             collapsed.insert(path.to_owned());
         }
-        let mut replacement = vec![self.sidebar().all_entries.borrow()[all_index].clone()];
+        let mut replacement = Vec::new();
         if expanding {
             let mut hidden_prefix: Option<String> = None;
             for entry in self.sidebar().all_entries.borrow()[all_index + 1..].iter() {
@@ -558,7 +558,7 @@ impl Ui {
         drop(collapsed);
         self.updating.set(true);
         self.sidebar().file_selection.set_selected(u32::MAX);
-        let range = visible_index..visible_index + old_children + 1;
+        let range = visible_index + 1..visible_index + old_children + 1;
         self.sidebar().sidebar_rows.borrow_mut().splice(
             range.clone(),
             replacement.iter().map(|entry| entry.row.clone()),
@@ -569,10 +569,23 @@ impl Ui {
             .borrow_mut()
             .splice(range, replacement);
         self.sidebar().file_model.splice(
-            visible_index as u32,
-            (old_children + 1) as u32,
+            (visible_index + 1) as u32,
+            old_children as u32,
             &placeholders,
         );
+        if let Some(widget) = self.sidebar().interactions.row_widget(path)
+            && let Some(marker) = widget
+                .first_child()
+                .and_then(|widget| widget.downcast::<gtk::Label>().ok())
+        {
+            marker.set_label(if expanding { "▾" } else { "▸" });
+            if let Some(image) = marker
+                .next_sibling()
+                .and_then(|widget| widget.downcast::<gtk::Image>().ok())
+            {
+                image.set_paintable(Some(&folder_icon_for(path, expanding)));
+            }
+        }
         self.updating.set(false);
     }
 
@@ -777,6 +790,10 @@ fn build_sidebar(
                     if !text_mode && file_query.borrow().trim().is_empty()
                         && collapsed_directories.borrow().contains(path));
                 let widget = sidebar_entry_widget(entry, collapsed);
+                let row_area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                widget.set_hexpand(true);
+                row_area.set_hexpand(true);
+                row_area.append(&widget);
                 if !matches!(entry.row, SidebarRow::Match(_)) {
                     interactions.attach(
                         &widget,
@@ -784,7 +801,7 @@ fn build_sidebar(
                         matches!(entry.row, SidebarRow::Directory(_)),
                     );
                 }
-                item.set_child(Some(&widget));
+                item.set_child(Some(&row_area));
             }
         });
     }
@@ -1151,6 +1168,7 @@ fn build_window(app: &adw::Application) {
         let move_ui = ui.clone();
         let validate_ui = ui.clone();
         let expand_ui = ui.clone();
+        let collapse_ui = ui.clone();
         sidebar
             .interactions
             .callbacks
@@ -1210,8 +1228,30 @@ fn build_window(app: &adw::Application) {
                         })
                 }),
                 expand: Rc::new(move |path| {
-                    if expand_ui.collapsed_directories.borrow().contains(path) {
+                    if !expand_ui.search_mode.get()
+                        && expand_ui.file_query.borrow().trim().is_empty()
+                        && expand_ui.collapsed_directories.borrow().contains(path)
+                    {
                         expand_ui.toggle_directory(path);
+                        true
+                    } else {
+                        false
+                    }
+                }),
+                collapse: Rc::new(move |path| {
+                    if collapse_ui.collapsed_directories.borrow().contains(path) {
+                        return;
+                    }
+                    if !collapse_ui.search_mode.get()
+                        && collapse_ui.file_query.borrow().trim().is_empty()
+                    {
+                        collapse_ui.toggle_directory(path);
+                    } else {
+                        collapse_ui
+                            .collapsed_directories
+                            .borrow_mut()
+                            .insert(path.to_owned());
+                        collapse_ui.sidebars[0].dirty.set(true);
                     }
                 }),
             }));
@@ -1229,7 +1269,7 @@ fn build_window(app: &adw::Application) {
                         SidebarRow::File(id) => id.as_str().to_owned(),
                         SidebarRow::Match(result) => result.id.as_str().to_owned(),
                     });
-                if let Some(path) = path {
+                if let Some(path) = path.or_else(|| interactions.selected.borrow().clone()) {
                     interactions.begin_rename(&path);
                 }
                 glib::Propagation::Stop
@@ -1343,6 +1383,11 @@ fn build_window(app: &adw::Application) {
                         .get(selection.selected() as usize)
                         .cloned();
                     if let Some(row) = row {
+                        ui.sidebar().interactions.selected.replace(Some(match &row {
+                            SidebarRow::Directory(path) => path.clone(),
+                            SidebarRow::File(id) => id.as_str().to_owned(),
+                            SidebarRow::Match(result) => result.id.as_str().to_owned(),
+                        }));
                         if let SidebarRow::Directory(path) = row {
                             ui.toggle_directory(&path);
                             return;
@@ -1809,7 +1854,16 @@ fn build_window(app: &adw::Application) {
                 .interactions
                 .editor("notes")
                 .expect("inline rename entry");
-            assert!(entry.has_focus());
+            assert_eq!(
+                entry
+                    .parent()
+                    .unwrap()
+                    .downcast::<gtk::Stack>()
+                    .unwrap()
+                    .visible_child_name()
+                    .as_deref(),
+                Some("edit")
+            );
             entry.set_text("renamed");
             entry.emit_activate();
             let active = ui.snapshot.borrow().active_document.clone().unwrap();

@@ -1,13 +1,21 @@
 //! Native sidebar editing and drag-and-drop. Payloads are accepted only from this sidebar.
 use gtk::{gdk, glib, prelude::*};
-use std::{cell::RefCell, collections::HashMap, rc::Rc, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    time::Duration,
+};
+
+type MoveValidator = Rc<dyn Fn(&str, &str) -> bool>;
 
 #[derive(Clone)]
 pub struct Callbacks {
     pub rename: Rc<dyn Fn(String, String) -> bool>,
     pub move_entry: Rc<dyn Fn(String, String) -> bool>,
-    pub can_move: Rc<dyn Fn(&str, &str) -> bool>,
-    pub expand: Rc<dyn Fn(&str)>,
+    pub can_move: MoveValidator,
+    pub expand: Rc<dyn Fn(&str) -> bool>,
+    pub collapse: Rc<dyn Fn(&str)>,
 }
 
 #[derive(Default)]
@@ -15,9 +23,15 @@ pub struct Interactions {
     pub callbacks: RefCell<Option<Callbacks>>,
     editors: RefCell<HashMap<String, glib::WeakRef<gtk::Entry>>>,
     editing: RefCell<Option<String>>,
+    pub selected: RefCell<Option<String>>,
+    folders: RefCell<HashSet<String>>,
+    drop_widgets: RefCell<Vec<glib::WeakRef<gtk::Box>>>,
     dragged: RefCell<Option<String>>,
     hovered: RefCell<Option<String>>,
+    hover_widget: RefCell<Option<glib::WeakRef<gtk::Box>>>,
     expand_timer: RefCell<Option<glib::SourceId>>,
+    leave_timer: RefCell<Option<glib::SourceId>>,
+    temporary_folders: RefCell<HashSet<String>>,
     root_target: RefCell<Option<glib::WeakRef<gtk::Box>>>,
 }
 
@@ -29,6 +43,14 @@ impl Interactions {
             .and_then(glib::WeakRef::upgrade)
     }
 
+    pub fn row_widget(&self, path: &str) -> Option<gtk::Box> {
+        self.editor(path)?
+            .parent()?
+            .parent()?
+            .downcast::<gtk::Box>()
+            .ok()
+    }
+
     pub fn begin_rename(&self, path: &str) {
         if let Some(entry) = self.editor(path) {
             self.editing.replace(Some(path.into()));
@@ -36,20 +58,30 @@ impl Interactions {
                 .parent()
                 .and_then(|widget| widget.downcast::<gtk::Stack>().ok())
             {
+                if let Some(label) = stack
+                    .child_by_name("label")
+                    .and_then(|widget| widget.downcast::<gtk::Label>().ok())
+                {
+                    entry.set_text(&label.text());
+                }
+                entry.remove_css_class("error");
                 stack.set_visible_child_name("edit");
             }
             entry.grab_focus();
             let name = entry.text();
-            let stem = name
-                .rfind('.')
-                .filter(|position| *position > 0)
-                .unwrap_or(name.len());
+            let stem = if self.folders.borrow().contains(path) {
+                name.len()
+            } else {
+                name.rfind('.')
+                    .filter(|position| *position > 0)
+                    .unwrap_or(name.len())
+            };
             entry.select_region(0, name[..stem].chars().count() as i32);
         }
     }
 
     pub fn start_drag(&self, path: &str) {
-        self.cancel_hover();
+        self.finish_drag();
         self.dragged.replace(Some(path.into()));
         if let Some(widget) = self
             .root_target
@@ -62,8 +94,23 @@ impl Interactions {
     }
 
     pub fn finish_drag(&self) {
+        self.finish_drag_to(None);
+    }
+
+    fn finish_drag_to(&self, destination: Option<&str>) {
         self.dragged.take();
         self.cancel_hover();
+        self.restore_temporary_folders(destination);
+        self.temporary_folders.borrow_mut().clear();
+        for widget in self
+            .drop_widgets
+            .borrow()
+            .iter()
+            .filter_map(glib::WeakRef::upgrade)
+        {
+            widget.remove_css_class("sidebar-drop-valid");
+            widget.remove_css_class("sidebar-drop-invalid");
+        }
         if let Some(widget) = self
             .root_target
             .borrow()
@@ -75,10 +122,56 @@ impl Interactions {
     }
 
     fn cancel_hover(&self) {
+        if let Some(timer) = self.leave_timer.take() {
+            timer.remove();
+        }
         if let Some(timer) = self.expand_timer.take() {
             timer.remove();
         }
         self.hovered.take();
+        self.hover_widget.take();
+    }
+
+    fn restore_temporary_folders(&self, destination: Option<&str>) {
+        let mut closing: Vec<_> = self
+            .temporary_folders
+            .borrow()
+            .iter()
+            .filter(|folder| {
+                destination.is_none_or(|target| {
+                    target != folder.as_str() && !target.starts_with(&format!("{folder}/"))
+                })
+            })
+            .cloned()
+            .collect();
+        closing.sort_by_key(|path| std::cmp::Reverse(path.len()));
+        let callbacks = self.callbacks.borrow().clone();
+        for folder in closing {
+            self.temporary_folders.borrow_mut().remove(&folder);
+            if let Some(callbacks) = &callbacks {
+                (callbacks.collapse)(&folder);
+            }
+        }
+    }
+
+    pub fn leave(self: &Rc<Self>, directory: &str) {
+        if self.hovered.borrow().as_deref() != Some(directory) {
+            return;
+        }
+        if let Some(timer) = self.leave_timer.take() {
+            timer.remove();
+        }
+        let state = self.clone();
+        let path = directory.to_owned();
+        self.leave_timer.replace(Some(glib::timeout_add_local_once(
+            Duration::from_millis(50),
+            move || {
+                state.leave_timer.take();
+                if state.hovered.borrow().as_deref() == Some(&path) {
+                    state.cancel_hover();
+                }
+            },
+        )));
     }
 
     fn can_drop(&self, directory: &str) -> bool {
@@ -92,20 +185,29 @@ impl Interactions {
 
     pub fn hover(self: &Rc<Self>, directory: &str, folder: bool) -> bool {
         let valid = self.can_drop(directory);
+        if let Some(timer) = self.leave_timer.take() {
+            timer.remove();
+        }
         if self.hovered.borrow().as_deref() != Some(directory) {
             self.cancel_hover();
+            self.restore_temporary_folders(Some(directory));
             self.hovered.replace(Some(directory.into()));
             if valid && folder && !directory.is_empty() {
                 let state = self.clone();
                 let directory = directory.to_owned();
-                let timer = glib::timeout_add_local_once(Duration::from_millis(650), move || {
+                let timer = glib::timeout_add_local_once(Duration::from_millis(450), move || {
                     state.expand_timer.take();
                     if state.hovered.borrow().as_deref() == Some(&directory)
                         && state.can_drop(&directory)
                     {
                         let callbacks = state.callbacks.borrow().clone();
-                        if let Some(callbacks) = callbacks {
-                            (callbacks.expand)(&directory);
+                        if let Some(callbacks) = callbacks
+                            && (callbacks.expand)(&directory)
+                        {
+                            state
+                                .temporary_folders
+                                .borrow_mut()
+                                .insert(directory.clone());
                         }
                     }
                 });
@@ -122,11 +224,16 @@ impl Interactions {
         let callbacks = self.callbacks.borrow().clone();
         let succeeded = callbacks
             .is_some_and(|callbacks| (callbacks.move_entry)(source.into(), directory.into()));
-        self.finish_drag();
+        self.finish_drag_to(succeeded.then_some(directory));
         succeeded
     }
 
     pub fn attach(self: &Rc<Self>, widget: &gtk::Box, path: &str, folder: bool) {
+        if folder {
+            self.folders.borrow_mut().insert(path.into());
+        } else {
+            self.folders.borrow_mut().remove(path);
+        }
         let mut child = widget.first_child();
         let label = loop {
             let Some(current) = child else { return };
@@ -267,6 +374,13 @@ impl Interactions {
             let state = self.clone();
             source.connect_drag_end(move |_, _, _| state.finish_drag());
         }
+        {
+            let state = self.clone();
+            source.connect_drag_cancel(move |_, _, _| {
+                state.finish_drag();
+                false
+            });
+        }
         widget.add_controller(source);
         let directory = if folder {
             path
@@ -275,7 +389,10 @@ impl Interactions {
                 .map(|(parent, _)| parent)
                 .unwrap_or("")
         };
-        self.attach_drop(widget, directory, folder);
+        let row_area = widget
+            .parent()
+            .and_then(|parent| parent.downcast::<gtk::Box>().ok());
+        self.attach_drop(row_area.as_ref().unwrap_or(widget), directory, folder);
     }
 
     pub fn attach_root(self: &Rc<Self>, widget: &gtk::Box) {
@@ -286,12 +403,19 @@ impl Interactions {
     }
 
     fn attach_drop(self: &Rc<Self>, widget: &gtk::Box, directory: &str, folder: bool) {
+        self.drop_widgets
+            .borrow_mut()
+            .retain(|widget| widget.upgrade().is_some());
+        self.drop_widgets.borrow_mut().push(widget.downgrade());
         let target = gtk::DropTarget::new(String::static_type(), gdk::DragAction::MOVE);
+        let state = self.clone();
+        target.connect_accept(move |_, _| state.dragged.borrow().is_some());
         let state = self.clone();
         let path = directory.to_owned();
         let weak_widget = widget.downgrade();
         target.connect_enter(move |_, _, _| {
             let valid = state.hover(&path, folder);
+            state.hover_widget.replace(Some(weak_widget.clone()));
             if let Some(widget) = weak_widget.upgrade() {
                 widget.add_css_class(if valid {
                     "sidebar-drop-valid"
@@ -307,8 +431,11 @@ impl Interactions {
         });
         let state = self.clone();
         let path = directory.to_owned();
+        let weak_widget = widget.downgrade();
         target.connect_motion(move |_, _, _| {
-            if state.hover(&path, folder) {
+            let valid = state.hover(&path, folder);
+            state.hover_widget.replace(Some(weak_widget.clone()));
+            if valid {
                 gdk::DragAction::MOVE
             } else {
                 gdk::DragAction::empty()
@@ -318,13 +445,25 @@ impl Interactions {
         let path = directory.to_owned();
         let weak_widget = widget.downgrade();
         target.connect_leave(move |_| {
-            if state.hovered.borrow().as_deref() == Some(&path) {
-                state.cancel_hover();
-            }
-            if let Some(widget) = weak_widget.upgrade() {
-                widget.remove_css_class("sidebar-drop-valid");
-                widget.remove_css_class("sidebar-drop-invalid");
-            }
+            state.leave(&path);
+            let state = state.clone();
+            let path = path.clone();
+            let weak_widget = weak_widget.clone();
+            glib::timeout_add_local_once(Duration::from_millis(55), move || {
+                if let Some(widget) = weak_widget.upgrade() {
+                    let current = state
+                        .hover_widget
+                        .borrow()
+                        .as_ref()
+                        .and_then(glib::WeakRef::upgrade);
+                    if state.hovered.borrow().as_deref() != Some(&path)
+                        || current.as_ref() != Some(&widget)
+                    {
+                        widget.remove_css_class("sidebar-drop-valid");
+                        widget.remove_css_class("sidebar-drop-invalid");
+                    }
+                }
+            });
         });
         let state = self.clone();
         let path = directory.to_owned();
@@ -334,5 +473,105 @@ impl Interactions {
                 .is_ok_and(|source| state.drop_entry(&source, &path))
         });
         widget.add_controller(target);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hover_delay_cancels_on_leave_and_drag_end_and_rejects_foreign_payloads() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        let expanded = Rc::new(RefCell::new(Vec::new()));
+        let recorded = expanded.clone();
+        let moves = Rc::new(RefCell::new(Vec::new()));
+        let recorded_moves = moves.clone();
+        let state = Rc::new(Interactions::default());
+        state.callbacks.replace(Some(Callbacks {
+            rename: Rc::new(|_, _| true),
+            move_entry: Rc::new(move |source, directory| {
+                recorded_moves.borrow_mut().push((source, directory));
+                true
+            }),
+            can_move: Rc::new(|source, directory| source != directory),
+            expand: Rc::new(move |directory| {
+                recorded.borrow_mut().push(directory.to_owned());
+                true
+            }),
+            collapse: Rc::new(|_| {}),
+        }));
+        let pump = |milliseconds| {
+            let until = std::time::Instant::now() + Duration::from_millis(milliseconds);
+            while std::time::Instant::now() < until {
+                context.iteration(false);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let open = Rc::new(RefCell::new(HashSet::from(["already-open".to_owned()])));
+        let expanded_open = open.clone();
+        let collapsed_open = open.clone();
+        let branches = Rc::new(Interactions::default());
+        branches.callbacks.replace(Some(Callbacks {
+            rename: Rc::new(|_, _| true),
+            move_entry: Rc::new(|_, _| true),
+            can_move: Rc::new(|_, _| true),
+            expand: Rc::new(move |path| expanded_open.borrow_mut().insert(path.into())),
+            collapse: Rc::new(move |path| {
+                collapsed_open.borrow_mut().remove(path);
+            }),
+        }));
+        branches.start_drag("source");
+        branches.hover("already-open", true);
+        pump(500);
+        branches.hover("a", true);
+        pump(250);
+        branches.leave("a");
+        branches.hover("a", true);
+        pump(250);
+        assert!(
+            open.borrow().contains("a"),
+            "movement must not restart the folder deadline"
+        );
+        branches.hover("a/child", true);
+        pump(500);
+        assert!(open.borrow().contains("a"));
+        branches.hover("b", true);
+        assert!(!open.borrow().contains("a") && !open.borrow().contains("a/child"));
+        pump(500);
+        assert!(branches.drop_entry("source", "b"));
+        assert!(open.borrow().contains("b"));
+        branches.start_drag("source");
+        branches.hover("cancelled", true);
+        pump(500);
+        branches.finish_drag();
+        assert!(
+            !open.borrow().contains("cancelled")
+                && open.borrow().contains("b")
+                && open.borrow().contains("already-open")
+        );
+
+        state.start_drag("source");
+        assert!(state.hover("cancelled", true));
+        pump(100);
+        assert!(expanded.borrow().is_empty());
+        state.cancel_hover();
+        assert!(state.hover("destination", true));
+        pump(700);
+        assert_eq!(*expanded.borrow(), ["destination"]);
+        assert!(!state.drop_entry("foreign payload", "destination"));
+        assert!(!state.hover("source", true));
+        assert!(state.hover("ended", true));
+        state.finish_drag();
+        pump(700);
+        assert_eq!(*expanded.borrow(), ["destination"]);
+        assert!(moves.borrow().is_empty());
+        state.start_drag("source");
+        assert!(state.drop_entry("source", "destination"));
+        assert_eq!(
+            *moves.borrow(),
+            [("source".to_owned(), "destination".to_owned())]
+        );
     }
 }

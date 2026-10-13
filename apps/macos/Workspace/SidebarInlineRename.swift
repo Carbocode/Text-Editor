@@ -11,27 +11,34 @@ struct SidebarInlineRename: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(string: name)
+        let field = RenameTextField(string: name)
         field.font = .systemFont(ofSize: NSFont.systemFontSize)
         field.focusRingType = .exterior
         field.delegate = context.coordinator
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setAccessibilityLabel("Rename")
-        DispatchQueue.main.async {
-            guard let window = field.window else { return }
-            window.makeFirstResponder(field)
-            if let editor = field.currentEditor() {
-                let full = name as NSString
-                let dot = directory ? NSNotFound : full.range(of: ".", options: .backwards).location
-                editor.selectedRange = NSRange(location: 0, length: dot != NSNotFound && dot > 0 ? dot : full.length)
-            }
-        }
+        let full = name as NSString
+        let dot = directory ? NSNotFound : full.range(of: ".", options: .backwards).location
+        field.selectLength = dot != NSNotFound && dot > 0 ? dot : full.length
         return field
     }
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
         if field.stringValue != name { field.stringValue = name }
+    }
+
+    final class RenameTextField: NSTextField {
+        var selectLength = 0
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard window != nil else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let window = self.window else { return }
+                window.makeFirstResponder(self)
+                self.currentEditor()?.selectedRange = NSRange(location: 0, length: self.selectLength)
+            }
+        }
     }
 
     final class Coordinator: NSObject, NSTextFieldDelegate {

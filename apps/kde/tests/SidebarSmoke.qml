@@ -70,6 +70,12 @@ ApplicationWindow {
             check(icon.status === Image.Ready, "Icon did not load: " + icon.source)
             check(icon.visible && icon.width === 16 && icon.height === 16,
                 "Icon has no visible 16px area")
+            var row = icon.parent.parent
+            check(Math.abs(icon.mapToItem(row, 0, icon.height / 2).y - row.height / 2) < 0.5,
+                "Sidebar icon is not centered inside its row")
+            var label = findItem(row, "sidebarEntryLabel")
+            check(label && Math.abs(label.mapToItem(row, 0, label.height / 2).y - row.height / 2) < 0.5,
+                "Sidebar text is not centered inside its row: y=" + (label ? label.mapToItem(row, 0, label.height / 2).y : "missing") + ", row=" + row.height + ", label=" + (label ? label.height : 0))
         }
         check(icons.some(icon => String(icon.source).endsWith("rust.png")),
             "Rust file did not use its bundled icon: " + icons.map(icon => String(icon.source)).join(", "))
@@ -244,9 +250,17 @@ ApplicationWindow {
                     pane.beginRename("src")
                     break
                 case 13:
-                    var renameField = findItem(pane, "sidebarRenameField")
-                    check(renameField && renameField.visible, "Inline rename field is missing")
-                    check(renameField.selectedText === "src", "Folder name was not selected")
+                    var renameField = pane.activeRenameEditor
+                    check(renameField && renameField.visible, "Inline rename field is missing: path=" + pane.renamePath + ", treeRows=" + tree.rows)
+                    check(renameField.selectedText === "src", "Folder name was not selected: text=" + renameField.text + ", selected=" + renameField.selectedText + ", focus=" + renameField.activeFocus)
+                    var renameRow = renameField.parent.parent
+                    var renameTopLeft = renameField.mapToItem(renameRow, 0, 0)
+                    check(renameTopLeft.y >= 0 && renameTopLeft.y + renameField.height <= renameRow.height,
+                        "Inline rename extends outside its row vertically")
+                    check(renameTopLeft.x >= 0 && renameTopLeft.x + renameField.width <= renameRow.width,
+                        "Inline rename extends outside its row horizontally")
+                    check(Math.abs(renameTopLeft.y + renameField.height / 2 - renameRow.height / 2) < 0.5,
+                        "Inline rename is not centered inside its row")
                     renameField.text = "renamed"
                     pane.renameName = renameField.text
                     pane.commitRename()
@@ -268,7 +282,12 @@ ApplicationWindow {
                     switchedAt = Date.now()
                     break
                 case 15:
-                    if (Date.now() - switchedAt < 750) { --step; break }
+                    if (Date.now() - switchedAt < 500) {
+                        pane.leaveDrop("destination")
+                        pane.hoverDrop("destination")
+                        --step
+                        break
+                    }
                     check(pane.collapsedDirectories["destination"] === false, "Hover did not expand closed folder")
                     check(pane.dropEntry("destination"), "Folder drop failed")
                     pane.finishEntryDrag(true)
@@ -286,8 +305,8 @@ ApplicationWindow {
                     pane.beginRename("new.rs")
                     break
                 case 17:
-                    var fileRename = findItem(pane, "sidebarRenameField")
-                    check(fileRename && fileRename.selectedText === "new", "File rename should select its stem")
+                    var fileRename = pane.activeRenameEditor
+                    check(fileRename && fileRename.selectedText === "new", "File rename should select its stem: field=" + fileRename + (fileRename ? ", text=" + fileRename.text + ", selected=" + fileRename.selectedText + ", focus=" + fileRename.activeFocus + ", path=" + fileRename.parent.parent.entry.path : ""))
                     fileRename.text = "renamed.rs"
                     pane.renameName = fileRename.text
                     pane.commitRename()
@@ -295,7 +314,27 @@ ApplicationWindow {
                 case 18:
                     check(controller.active_document_id === "renamed.rs", "Inline file rename failed")
                     check(controller.active_document_text === "unsaved move", "Inline rename lost content")
-                    console.log("KDE drag ghost/drop/hover expansion smoke test passed")
+                    check(pane.collapsedDirectories["destination"] === false, "Drop did not promote folder expansion")
+                    controller.create_entry("sibling", true)
+                    pane.startEntryDrag("renamed.rs", Qt.point(30, 30))
+                    pane.hoverDrop("destination/renamed")
+                    switchedAt = Date.now()
+                    break
+                case 19:
+                    if (Date.now() - switchedAt < 500) { --step; break }
+                    check(pane.collapsedDirectories["destination/renamed"] === false, "Nested folder did not open temporarily")
+                    pane.hoverDrop("sibling")
+                    check(pane.collapsedDirectories["destination/renamed"] !== false, "Sibling hover did not restore the previous branch")
+                    check(pane.collapsedDirectories["destination"] === false, "Pre-existing expansion must be retained")
+                    switchedAt = Date.now()
+                    break
+                case 20:
+                    if (Date.now() - switchedAt < 500) { --step; break }
+                    check(pane.collapsedDirectories["sibling"] === false, "Sibling folder did not open temporarily")
+                    pane.finishEntryDrag(true)
+                    check(pane.collapsedDirectories["sibling"] !== false, "Cancelled drag retained a temporary expansion")
+                    check(pane.collapsedDirectories["destination"] === false, "Cancellation lost a confirmed expansion")
+                    console.log("KDE drag ghost/drop/hover expansion/sibling rollback smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {

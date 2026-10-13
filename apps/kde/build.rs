@@ -20,7 +20,8 @@ fn main() {
             .qml_file("qml/Main.qml")
             .qml_file("qml/KirigamiMain.qml")
             .qml_file("qml/WorkspacePane.qml")
-            .qml_file("tests/SidebarSmoke.qml"),
+            .qml_file("tests/SidebarSmoke.qml")
+            .qml_file("tests/DragSmoke.qml"),
     )
     .qrc_resources([
         "qml/icons/action-open.png",

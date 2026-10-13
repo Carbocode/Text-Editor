@@ -1,0 +1,93 @@
+import AppKit
+import Foundation
+
+@main
+struct WorkspaceStoreSmoke {
+    @MainActor static func main() throws {
+        _ = NSApplication.shared
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("dest"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "original".write(to: root.appendingPathComponent("a.rs"), atomically: true, encoding: .utf8)
+        let queue = DispatchQueue(label: "store.smoke.backend")
+        let store = WorkspaceStore(operationQueue: queue, persistence: false)
+        store.openWorkspace(root)
+        store.openDocument("a.rs")
+        store.changeDocument("first local edit")
+        let documentIdentity = store.editorDocumentIdentity
+        func finishBackend() {
+            let deadline = Date().addingTimeInterval(5)
+            while store.backendBusy && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+            precondition(!store.backendBusy, "Background backend did not finish")
+        }
+        queue.suspend()
+        let started = Date()
+        precondition(store.renameEntry("a.rs", newName: "new.rs"))
+        precondition(Date().timeIntervalSince(started) < 0.1, "Inline rename blocked the main thread")
+        precondition(store.presentationPath("a.rs") == "new.rs", "Rename should display immediately")
+        precondition(FileManager.default.fileExists(atPath: root.appendingPathComponent("a.rs").path))
+        store.changeDocument("edit typed during confirmation")
+        queue.resume()
+        finishBackend()
+        precondition(store.activeDocument?.id == "new.rs")
+        precondition(store.editorText == "edit typed during confirmation")
+        precondition(store.activeDocument?.content == store.editorText)
+        precondition(store.editorDocumentIdentity == documentIdentity, "Rename should preserve editor identity")
+        store.saveDocument()
+        let renamedContent = try String(contentsOf: root.appendingPathComponent("new.rs"), encoding: .utf8)
+        precondition(renamedContent == store.editorText)
+
+        // Introduce a collision after optimistic validation but before filesystem confirmation.
+        queue.suspend()
+        precondition(store.renameEntry("new.rs", newName: "collision.rs"))
+        precondition(store.presentationPath("new.rs") == "collision.rs")
+        try "external".write(to: root.appendingPathComponent("collision.rs"), atomically: true, encoding: .utf8)
+        store.changeDocument("edit typed during rejection")
+        queue.resume()
+        finishBackend()
+        precondition(store.pendingRelocation == nil)
+        precondition(store.presentationPath("new.rs") == "new.rs", "Failed rename did not roll back")
+        precondition(store.activeDocument?.id == "new.rs" && store.editorText == "edit typed during rejection")
+        precondition(store.errorMessage != nil, "Backend rejection should remain visible")
+        let externalContent = try String(contentsOf: root.appendingPathComponent("collision.rs"), encoding: .utf8)
+        precondition(externalContent == "external")
+
+        queue.suspend()
+        precondition(store.moveEntry("new.rs", directory: "dest"))
+        store.saveDocument() // queued behind the move
+        store.openSearchFile("new.rs") // its old path must resolve after confirmation
+        queue.resume()
+        finishBackend()
+        precondition(store.activeDocument?.id == "dest/new.rs")
+        precondition(store.activeDocument?.dirty == false)
+        let movedContent = try String(contentsOf: root.appendingPathComponent("dest/new.rs"), encoding: .utf8)
+        precondition(movedContent == "edit typed during rejection")
+
+        queue.suspend()
+        store.refreshWorkspace()
+        precondition(store.backendBusy)
+        precondition(store.renameEntry("dest/new.rs", newName: "final.rs"), "Rename should not wait for a background poll")
+        precondition(store.presentationPath("dest/new.rs") == "dest/final.rs")
+        store.changeDocument("edit while poll and rename are queued")
+        queue.resume()
+        finishBackend()
+        precondition(store.activeDocument?.id == "dest/final.rs")
+        precondition(store.editorText == "edit while poll and rename are queued")
+        precondition(store.pendingRelocation == nil)
+
+        let draft = SidebarRenameDraft()
+        draft.begin("README.md")
+        draft.changeName("preview.rs")
+        draft.changeName("preview.py")
+        precondition(draft.previewPath == "README.md", "Icon preview should be debounced")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        precondition(draft.previewPath == "preview.py")
+        draft.changeName("cancelled.json")
+        draft.finish()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        precondition(draft.previewPath == nil, "Cancelled icon preview leaked into another row")
+        print("macOS optimistic rename/rollback/concurrent edits/deferred save/icon debounce smoke test passed")
+    }
+}

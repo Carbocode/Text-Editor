@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
 import QtQml.Models
 import Qt.labs.qmlmodels
@@ -45,10 +46,15 @@ Item {
     property string lastWorkspaceRoot: ""
     property string renamePath: ""
     property string renameName: ""
+    property var activeRenameEditor: null
     property string draggingPath: ""
     property string hoverDirectory: ""
     property bool hoveringDrop: false
     property bool validDrop: false
+    property var temporaryDragDirectories: []
+    property bool dropCommitted: false
+    property string committedDropDirectory: ""
+    property bool finishingEntryDrag: false
 
     signal browseRequested()
 
@@ -179,8 +185,25 @@ Item {
     }
 
     function beginRename(path) {
+        activeRenameEditor = null
         renamePath = path
         renameName = path.split("/").pop()
+        Qt.callLater(root.focusInlineRename)
+    }
+
+    function focusInlineRename() {
+        if (sidebarEntriesDirty) rebuildOrderedEntries()
+        fileTree.forceLayout()
+        var row = treeRowForPath(renamePath)
+        if (row < 0) return
+        var delegate = fileTree.itemAtCell(Qt.point(0, row))
+        if (!delegate || !delegate.renameEditor) return
+        if (activeRenameEditor === delegate.renameEditor && activeRenameEditor.activeFocus) return
+        activeRenameEditor = delegate.renameEditor
+        activeRenameEditor.text = renameName
+        activeRenameEditor.forceActiveFocus(Qt.OtherFocusReason)
+        var dot = controller.directory_ids.indexOf(renamePath) === -1 ? renameName.lastIndexOf(".") : -1
+        activeRenameEditor.select(0, dot > 0 ? dot : renameName.length)
     }
 
     function commitRename() {
@@ -199,9 +222,35 @@ Item {
             && !controller.document_ids.some(path => path === target || path.startsWith(target + "/"))
     }
 
+    function restoreDragDirectories(destination) {
+        var keep = []
+        var closing = []
+        for (var folder of temporaryDragDirectories) {
+            if (destination !== null && (destination === folder || destination.startsWith(folder + "/"))) keep.push(folder)
+            else closing.push(folder)
+        }
+        temporaryDragDirectories = keep
+        closing.sort((a, b) => b.length - a.length)
+        for (var path of closing) if (collapsedDirectories[path] === false) {
+            if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeRowForPath(path) >= 0) {
+                toggleDirectory(path)
+            } else {
+                var restored = Object.assign({}, collapsedDirectories)
+                restored[path] = true
+                collapsedDirectories = restored
+                invalidateSidebar(0)
+            }
+        }
+    }
+
     function hoverDrop(directory) {
-        if (hoveringDrop && hoverDirectory === directory) return
+        leaveDropFolder.stop()
+        if (hoveringDrop && hoverDirectory === directory) {
+            validDrop = canDrop(draggingPath, directory)
+            return
+        }
         expandDropFolder.stop()
+        restoreDragDirectories(directory)
         hoverDirectory = directory
         hoveringDrop = true
         validDrop = canDrop(draggingPath, directory)
@@ -211,8 +260,8 @@ Item {
 
     function leaveDrop(directory) {
         if (hoveringDrop && hoverDirectory === directory) {
-            expandDropFolder.stop()
-            hoveringDrop = false
+            leaveDropFolder.directory = directory
+            leaveDropFolder.restart()
         }
     }
 
@@ -220,30 +269,55 @@ Item {
         if (!canDrop(draggingPath, directory) || !flushEditor()) return false
         controller.move_entry(draggingPath, directory)
         selectedResultIndex = -1
-        return controller.error_message.length === 0
+        var succeeded = controller.error_message.length === 0
+        if (succeeded) { dropCommitted = true; committedDropDirectory = directory }
+        return succeeded
     }
 
     function startEntryDrag(path, point) {
+        finishEntryDrag(true)
+        dropCommitted = false
         renamePath = ""
-        draggingPath = path
         dragGhost.x = point.x + 12
         dragGhost.y = point.y + 12
+        draggingPath = path
     }
 
     function finishEntryDrag(cancelled) {
-        if (!cancelled && draggingPath.length > 0) dragGhost.Drag.drop()
+        if (finishingEntryDrag) return
+        finishingEntryDrag = true
+        if (!cancelled && draggingPath.length > 0 && !dropCommitted) dragGhost.Drag.drop()
         draggingPath = ""
         hoveringDrop = false
         expandDropFolder.stop()
+        leaveDropFolder.stop()
+        restoreDragDirectories(dropCommitted ? committedDropDirectory : null)
+        temporaryDragDirectories = []
+        dropCommitted = false
+        finishingEntryDrag = false
+    }
+
+    Timer {
+        id: leaveDropFolder
+        property string directory: ""
+        interval: 50
+        onTriggered: {
+            if (root.hoveringDrop && root.hoverDirectory === directory) {
+                expandDropFolder.stop()
+                root.hoveringDrop = false
+            }
+        }
     }
 
     Timer {
         id: expandDropFolder
-        interval: 650
+        interval: 450
         onTriggered: {
             if (root.hoveringDrop && root.canDrop(root.draggingPath, root.hoverDirectory)
-                && root.collapsedDirectories[root.hoverDirectory] !== false)
+                && root.collapsedDirectories[root.hoverDirectory] !== false) {
+                root.temporaryDragDirectories = root.temporaryDragDirectories.concat([root.hoverDirectory])
                 root.toggleDirectory(root.hoverDirectory)
+            }
         }
     }
 
@@ -266,11 +340,14 @@ Item {
         border.color: sidebarPalette.highlight
         border.width: 1
         Drag.active: root.draggingPath.length > 0
-        Drag.source: root
+        // Qt excludes the source item's subtree from drop hit testing. Using
+        // the workspace pane here would exclude every destination row.
+        Drag.source: dragGhost
         Drag.keys: ["native-workspace-entry"]
         Drag.hotSpot.x: -12
         Drag.hotSpot.y: -12
         Drag.supportedActions: Qt.MoveAction
+        Drag.proposedAction: Qt.MoveAction
         Rectangle {
             anchors.fill: parent
             anchors.topMargin: 4
@@ -603,6 +680,7 @@ Item {
         }
         fileTreeNeedsRestore = false
         restoringFileTree = false
+        if (renamePath.length > 0) Qt.callLater(root.focusInlineRename)
     }
 
     function toggleDirectory(path) {
@@ -697,7 +775,7 @@ Item {
             Layout.alignment: Qt.AlignHCenter
             clip: true
             model: root.controller.recent_workspace_paths
-            delegate: ItemDelegate {
+            delegate: Basic.ItemDelegate {
                 required property int index
                 required property string modelData
                 width: ListView.view.width
@@ -859,7 +937,7 @@ Item {
                         anchors.top: parent.top
                         anchors.left: sidebarTabs.right
                         anchors.right: parent.right
-                        anchors.bottom: searchRow.top
+                        anchors.bottom: workspaceDropTarget.top
                         anchors.bottomMargin: 6
                         visible: root.sidebarTab === 0
                         clip: true
@@ -884,41 +962,22 @@ Item {
                             visible: root.visibleSidebarEntries.length === 0
                             text: root.fileNameQuery.length > 0 ? "No matching names" : "No files"
                         }
-                        Rectangle {
-                            objectName: "workspaceDropTarget"
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.bottom: parent.bottom
-                            height: 32
-                            z: 5
-                            visible: root.draggingPath.length > 0
-                            color: palette.base
-                            border.width: root.hoveringDrop && root.hoverDirectory === "" ? 2 : 1
-                            border.color: root.hoveringDrop && root.hoverDirectory === "" && !root.validDrop
-                                ? "#d64545" : palette.highlight
-                            Label {
-                                anchors.centerIn: parent
-                                text: "Move to " + root.controller.workspace_name
-                            }
-                            DropArea {
-                                anchors.fill: parent
-                                keys: ["native-workspace-entry"]
-                                onEntered: function(drag) {
-                                    if (drag.source === root) root.hoverDrop("")
-                                    else drag.accepted = false
-                                }
-                                onExited: root.leaveDrop("")
-                                onDropped: function(drop) {
-                                    if (drop.source === root && root.dropEntry("")) drop.accept(Qt.MoveAction)
-                                }
-                            }
-                        }
-                        delegate: TreeViewDelegate {
+                        // Native macOS controls reject custom contentItem. This
+                        // delegate supports our icon, rename field and overlays.
+                        delegate: Basic.TreeViewDelegate {
                             id: treeRow
+                            topPadding: 2
+                            bottomPadding: 2
+                            indicator.height: 28
+                            property alias renameEditor: renameField
+                            property bool pooled: false
+                            TableView.onPooled: pooled = true
+                            TableView.onReused: pooled = false
                             // Expanding changes the mapping of view rows even
                             // when a reused delegate keeps the same row number.
                             property var entry: row < fileTree.rows && model.display !== undefined
                                 ? fileTreeModel.getRow(fileTree.index(row, 0)) : null
+                            onEntryChanged: if (root.renamePath.length > 0) Qt.callLater(root.focusInlineRename)
                             text: entry ? entry.name : ""
                             // TreeViewDelegate styles can provide a text-only
                             // contentItem, so draw the bundled icon explicitly.
@@ -934,31 +993,44 @@ Item {
                                     fillMode: Image.PreserveAspectFit
                                     Layout.preferredWidth: 16
                                     Layout.preferredHeight: 16
+                                    Layout.minimumWidth: 16
+                                    Layout.maximumWidth: 16
+                                    Layout.minimumHeight: 16
+                                    Layout.maximumHeight: 16
+                                    Layout.alignment: Qt.AlignVCenter
                                 }
                                 Label {
+                                    objectName: "sidebarEntryLabel"
+                                    verticalAlignment: Text.AlignVCenter
+                                    Layout.fillHeight: true
                                     visible: !renameField.visible
                                     text: treeRow.text
+                                    font: treeRow.font
                                     color: treeRow.highlighted ? treeRow.palette.highlightedText : treeRow.palette.text
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    Layout.alignment: Qt.AlignVCenter
                                 }
-                                TextField {
+                                Basic.TextField {
                                     id: renameField
                                     objectName: "sidebarRenameField"
-                                    visible: treeRow.entry && root.renamePath === treeRow.entry.path
+                                    visible: !treeRow.pooled && treeRow.entry && root.renamePath === treeRow.entry.path
                                     Layout.fillWidth: true
-                                    Layout.preferredHeight: 26
+                                    Layout.minimumWidth: 0
+                                    Layout.minimumHeight: 24
+                                    Layout.preferredHeight: 24
+                                    Layout.maximumHeight: 24
+                                    Layout.alignment: Qt.AlignVCenter
+                                    font: treeRow.font
+                                    padding: 2
+                                    leftPadding: 4
+                                    rightPadding: 4
+                                    clip: true
                                     text: visible ? root.renameName : ""
                                     onTextEdited: root.renameName = text
-                                    onVisibleChanged: if (visible) Qt.callLater(function() {
-                                        renameField.forceActiveFocus()
-                                        var dot = root.controller.directory_ids.indexOf(root.renamePath) === -1
-                                            ? text.lastIndexOf(".") : -1
-                                        select(0, dot > 0 ? dot : text.length)
-                                    })
                                     onAccepted: root.commitRename()
                                     Keys.onEscapePressed: root.renamePath = ""
-                                    onActiveFocusChanged: if (!activeFocus && visible) root.renamePath = ""
                                     ToolTip.visible: activeFocus && root.controller.error_message.length > 0
                                     ToolTip.text: root.controller.error_message
                                 }
@@ -989,6 +1061,7 @@ Item {
                                 target: null
                                 enabled: treeRow.entry && root.renamePath.length === 0
                                 acceptedButtons: Qt.LeftButton
+                                cursorShape: root.hoveringDrop && !root.validDrop ? Qt.ForbiddenCursor : Qt.ClosedHandCursor
                                 onActiveChanged: {
                                     if (active) root.startEntryDrag(treeRow.entry.path,
                                         root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y))
@@ -1006,18 +1079,22 @@ Item {
                                 property string directory: treeRow.entry ? (treeRow.entry.directory
                                     ? treeRow.entry.path : root.parentDirectory(treeRow.entry.path)) : ""
                                 onEntered: function(drag) {
-                                    if (drag.source !== root) { drag.accepted = false; return }
+                                    if (drag.source !== dragGhost) { drag.accepted = false; return }
                                     root.hoverDrop(directory)
+                                }
+                                onPositionChanged: function(drag) {
+                                    if (drag.source === dragGhost) root.hoverDrop(directory)
                                 }
                                 onExited: root.leaveDrop(directory)
                                 onDropped: function(drop) {
-                                    if (drop.source === root && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
+                                    if (drop.source === dragGhost && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
                                 }
                             }
                             Rectangle {
                                 anchors.fill: parent
                                 z: 2
-                                color: "transparent"
+                                color: root.validDrop ? Qt.rgba(palette.highlight.r, palette.highlight.g, palette.highlight.b, 0.14)
+                                    : "#18d64545"
                                 border.width: 2
                                 border.color: root.validDrop ? palette.highlight : "#d64545"
                                 visible: root.hoveringDrop && treeRow.entry && treeRow.entry.directory
@@ -1048,6 +1125,39 @@ Item {
                                     visible: treeRow.entry && !treeRow.entry.directory
                                         && root.controller.dirty_document_ids.indexOf(treeRow.entry.path) !== -1
                                 }
+                            }
+                        }
+                    }
+                    Rectangle {
+                        id: workspaceDropTarget
+                        objectName: "workspaceDropTarget"
+                        anchors.left: sidebarTabs.right
+                        anchors.right: parent.right
+                        anchors.bottom: searchRow.top
+                        anchors.bottomMargin: 6
+                        height: 32
+                        z: 5
+                        visible: root.sidebarTab === 0
+                        color: root.hoveringDrop && root.hoverDirectory === ""
+                            ? Qt.rgba(sidebarPalette.highlight.r, sidebarPalette.highlight.g, sidebarPalette.highlight.b, 0.14)
+                            : sidebarPalette.base
+                        border.width: root.hoveringDrop && root.hoverDirectory === "" ? 2 : 1
+                        border.color: root.hoveringDrop && root.hoverDirectory === "" && !root.validDrop
+                            ? "#d64545" : sidebarPalette.highlight
+                        Label {
+                            anchors.centerIn: parent
+                            text: "Move to workspace root"
+                        }
+                        DropArea {
+                            anchors.fill: parent
+                            keys: ["native-workspace-entry"]
+                            onEntered: function(drag) {
+                                if (drag.source === dragGhost) root.hoverDrop("")
+                                else drag.accepted = false
+                            }
+                            onExited: root.leaveDrop("")
+                            onDropped: function(drop) {
+                                if (drop.source === dragGhost && root.dropEntry("")) drop.accept(Qt.MoveAction)
                             }
                         }
                     }
@@ -1124,7 +1234,7 @@ Item {
                             Repeater {
                                 model: fileGroup.isDirectory || root.controller.search_query.length === 0
                                     ? [] : root.matchIndicesForFile(fileGroup.fileId)
-                                delegate: ItemDelegate {
+                                delegate: Basic.ItemDelegate {
                                     property int resultIndex: modelData
                                     width: fileGroup.width
                                     height: 23
@@ -1270,7 +1380,7 @@ Item {
                             objectName: "editorScroll"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            TextArea {
+                            Basic.TextArea {
                                 id: editor
                                 objectName: "documentEditor"
                                 width: Math.max(editorScroll.availableWidth, implicitWidth)
