@@ -15,6 +15,8 @@ struct ContentView: View {
     @State private var newEntryPath = ""
     @State private var sidebarTab = 0
     @State private var fileNameQuery = ""
+    @State private var sidebarBottomBarHeight: CGFloat = 44
+    @State private var sidebarRootDropHeight: CGFloat = 0
     @State private var expandedDirectories: Set<String> = []
     @State private var currentWorkspaceRoot: String?
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
@@ -345,16 +347,58 @@ struct ContentView: View {
         })
     }
 
+    private var sidebarHeader: some View {
+        VStack(spacing: 8) {
+            Picker("Sidebar", selection: $sidebarTab) {
+                Image(systemName: "folder").accessibilityLabel("Files").tag(0)
+                Image(systemName: "magnifyingglass").accessibilityLabel("Search").tag(1)
+                Image(systemName: "arrow.triangle.branch").accessibilityLabel("Git").tag(2)
+                Image(systemName: "bookmark").accessibilityLabel("Bookmarks").tag(3)
+                Image(systemName: "exclamationmark.triangle").accessibilityLabel("Warnings").tag(4)
+                Image(systemName: "xmark.octagon").accessibilityLabel("Errors").tag(5)
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.large)
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
+            if sidebarTab == 1 {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search in files", text: Binding(
+                        get: { store.searchQuery },
+                        set: { store.setSearchQuery($0) }
+                    ))
+                    .textFieldStyle(.plain)
+                    if store.searchInProgress { ProgressView().controlSize(.small) }
+                }
+                .padding(10)
+                .glassEffect(.regular, in: Capsule())
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(.bar)
+    }
+
     var body: some View {
         ZStack {
         if store.workspaceName != nil {
         NavigationSplitView {
             VStack(spacing: 0) {
+                sidebarHeader
                 List {
-                    Color.clear.frame(height: sidebarTab == 1 ? 112 : 58)
-                        .listRowSeparator(.hidden)
                     ForEach(sidebarRows) { row in
                         sidebarRow(row)
+                    }
+                    if sidebarTab == 0 {
+                        // Keep scrollable space after the files, below the floating controls.
+                        Color.clear.frame(height: sidebarBottomBarHeight + sidebarRootDropHeight + 8)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
                     }
                 }
                 .onReceive(store.$workspaceRoot) { root in
@@ -404,37 +448,6 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .overlay(alignment: .top) {
-                    VStack(spacing: 8) {
-                        Picker("Sidebar", selection: $sidebarTab) {
-                            Image(systemName: "folder").accessibilityLabel("Files").tag(0)
-                            Image(systemName: "magnifyingglass").accessibilityLabel("Search").tag(1)
-                            Image(systemName: "arrow.triangle.branch").accessibilityLabel("Git").tag(2)
-                            Image(systemName: "bookmark").accessibilityLabel("Bookmarks").tag(3)
-                            Image(systemName: "exclamationmark.triangle").accessibilityLabel("Warnings").tag(4)
-                            Image(systemName: "xmark.octagon").accessibilityLabel("Errors").tag(5)
-                        }
-                        .pickerStyle(.segmented)
-                        .controlSize(.large)
-                        .labelsHidden()
-                        .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
-                        if sidebarTab == 1 {
-                            HStack(spacing: 8) {
-                                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                                TextField("Search in files", text: Binding(
-                                    get: { store.searchQuery },
-                                    set: { store.setSearchQuery($0) }
-                                ))
-                                .textFieldStyle(.plain)
-                                if store.searchInProgress { ProgressView().controlSize(.small) }
-                            }
-                            .padding(10)
-                            .glassEffect(.regular, in: Capsule())
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.top, 8)
-                }
                 .overlay(alignment: .bottom) {
                     if sidebarTab == 0 {
                     HStack(spacing: 8) {
@@ -475,11 +488,21 @@ struct ContentView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.bottom, 8)
+                    .onGeometryChange(for: CGFloat.self) { geometry in
+                        geometry.size.height
+                    } action: { height in
+                        sidebarBottomBarHeight = height
+                    }
                     }
                 }
                 if sidebarTab == 0 {
                     SidebarRootDropLabel(drag: sidebarDrag, workspaceName: store.workspaceName ?? "workspace")
                         .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(""))
+                        .onGeometryChange(for: CGFloat.self) { geometry in
+                            geometry.size.height
+                        } action: { height in
+                            sidebarRootDropHeight = height
+                        }
                 }
             }
         } detail: {
