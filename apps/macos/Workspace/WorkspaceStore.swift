@@ -44,6 +44,7 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var pendingRelocation: Relocation?
     private(set) var backendBusy = false
     private let core: WorkspaceApplication
+    let diagnosticsEnabled: Bool
     private let operationQueue: DispatchQueue
     private var deferredActions: [() -> Void] = []
     private var committedRelocation: Relocation?
@@ -57,6 +58,7 @@ final class WorkspaceStore: ObservableObject {
          operationQueue: DispatchQueue = DispatchQueue(label: "workspace.backend", qos: .userInitiated),
          persistence: Bool = true) {
         self.core = core
+        self.diagnosticsEnabled = core.devtoolsAvailable()
         self.operationQueue = operationQueue
         do {
             apply(try persistence ? core.enablePersistence() : core.snapshot())
@@ -64,6 +66,10 @@ final class WorkspaceStore: ObservableObject {
             errorMessage = error.localizedDescription
             if let snapshot = try? core.snapshot() { apply(snapshot) }
         }
+    }
+
+    func openDevtools() {
+        if !core.openDevtools() { errorMessage = "Developer Tools are busy. Try again after the current operation finishes." }
     }
 
     func presentationPath(_ path: String) -> String { pendingRelocation?.path(path) ?? path }
@@ -394,6 +400,12 @@ final class WorkspaceStore: ObservableObject {
     }
 
     private func apply(_ snapshot: WorkspaceSnapshot, preserveEditorText: Bool = false) {
+        let diagnosticStarted: UInt64? = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
+        defer {
+            if let started = diagnosticStarted {
+                core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started)
+            }
+        }
         let pathsChanged = directories != snapshot.directories || (documents.count != snapshot.documents.count || zip(documents, snapshot.documents).contains { $0.id != $1.id })
         let sidebarChanged = searchQuery != snapshot.searchQuery
             || searchResults != snapshot.searchResults

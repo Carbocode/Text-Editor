@@ -1,6 +1,9 @@
 //! Shared application commands, events, state, and owned snapshots.
 
+mod diagnostics;
 mod icons;
+pub use diagnostics::DiagnosticObserver;
+use diagnostics::{Context, Diagnostics};
 #[cfg(test)]
 mod optimistic_move_tests;
 pub use icons::{file_icon_name, folder_icon_name};
@@ -59,6 +62,30 @@ pub enum AppCommand {
     SaveDocument(DocumentId),
     ReloadDocument(DocumentId),
     OverwriteDocument(DocumentId),
+}
+
+impl AppCommand {
+    fn diagnostic_name(&self) -> &'static str {
+        match self {
+            Self::IncrementDiagnostic => "command.increment",
+            Self::SetSearchQuery(_) => "command.search_sync",
+            Self::QueueSearchQuery(_) => "command.search_input",
+            Self::PollSearchResults => "command.search_poll",
+            Self::OpenWorkspace(_) => "command.workspace_open",
+            Self::CreateEntry { .. } => "command.entry_create",
+            Self::RenameEntry { .. } => "command.entry_rename",
+            Self::MoveEntry { .. } => "command.entry_move",
+            Self::MoveEntryOptimistic { .. } => "command.entry_move_optimistic",
+            Self::RefreshWorkspace => "command.workspace_refresh",
+            Self::PollWorkspaceChanges => "command.workspace_poll",
+            Self::OpenDocument(_) => "command.document_open",
+            Self::CloseDocument(_) => "command.document_close",
+            Self::ChangeDocument { .. } => "command.document_change",
+            Self::SaveDocument(_) => "command.document_save",
+            Self::ReloadDocument(_) => "command.document_reload",
+            Self::OverwriteDocument(_) => "command.document_overwrite",
+        }
+    }
 }
 
 /// A fact produced by a successful command. Events are transient, not a persisted log.
@@ -249,6 +276,8 @@ fn search_results_for(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppSnapshot {
+    /// Opaque correlation only; never used to resolve application commands.
+    pub diagnostic_operation: u64,
     pub revision: u64,
     pub diagnostic_counter: u64,
     pub workspace_name: Option<String>,
@@ -353,6 +382,7 @@ impl AppState {
                 })
         });
         AppSnapshot {
+            diagnostic_operation: 0,
             revision: self.revision,
             diagnostic_counter: self.diagnostic.counter,
             workspace_name: self
@@ -540,6 +570,10 @@ impl AppState {
 }
 
 pub struct Application {
+    diagnostics: Diagnostics,
+    search_context: Context,
+    command_context: Context,
+    snapshot_operation: u64,
     state: AppState,
     filesystem: Arc<dyn WorkspaceFilesystem>,
     storage: Box<dyn MetadataStorage>,
@@ -602,6 +636,7 @@ fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) 
 }
 
 struct SearchJob {
+    diagnostic: Context,
     generation: u64,
     root: PathBuf,
     documents: Vec<DocumentEntry>,
@@ -609,6 +644,7 @@ struct SearchJob {
 }
 
 struct SearchFinished {
+    diagnostic: Context,
     generation: u64,
     results: Vec<SearchResult>,
 }
@@ -646,16 +682,59 @@ fn search_worker(
     generation: Arc<AtomicU64>,
 ) {
     while let Ok(mut job) = jobs.recv() {
+        let mut debounce_span = job.diagnostic.begin("search.debounce", "search-worker");
         loop {
             match jobs.recv_timeout(Duration::from_millis(150)) {
-                Ok(newer) => job = newer,
+                Ok(newer) => {
+                    job.diagnostic.end(
+                        "search.debounce",
+                        "search-worker",
+                        debounce_span,
+                        "cancelled",
+                        0,
+                        0,
+                    );
+                    job.diagnostic
+                        .event("search.superseded", "search-worker", 0, 0);
+                    job = newer;
+                    debounce_span = job.diagnostic.begin("search.debounce", "search-worker");
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    job.diagnostic.end(
+                        "search.debounce",
+                        "search-worker",
+                        debounce_span,
+                        "cancelled",
+                        0,
+                        0,
+                    );
+                    return;
+                }
             }
         }
         if generation.load(Ordering::Relaxed) != job.generation {
+            job.diagnostic.end(
+                "search.debounce",
+                "search-worker",
+                debounce_span,
+                "cancelled",
+                0,
+                0,
+            );
+            job.diagnostic
+                .event("search.superseded", "search-worker", 0, 0);
             continue;
         }
+        job.diagnostic.end(
+            "search.debounce",
+            "search-worker",
+            debounce_span,
+            "ok",
+            0,
+            0,
+        );
+        let span = job.diagnostic.begin("search.execute", "search-worker");
         let found = collect_search_results(
             filesystem.as_ref(),
             Some(&job.root),
@@ -663,9 +742,27 @@ fn search_worker(
             &job.query,
             || generation.load(Ordering::Relaxed) != job.generation,
         );
-        if generation.load(Ordering::Relaxed) == job.generation
+        let current = generation.load(Ordering::Relaxed) == job.generation;
+        job.diagnostic.end(
+            "search.execute",
+            "search-worker",
+            span,
+            if current { "ok" } else { "cancelled" },
+            0,
+            found.len() as u64,
+        );
+        if !current {
+            job.diagnostic
+                .event("search.superseded", "search-worker", 0, 0);
+        }
+        if current {
+            job.diagnostic
+                .event("search.published", "search-worker", 0, found.len() as u64);
+        }
+        if current
             && results
                 .send(SearchFinished {
+                    diagnostic: job.diagnostic,
                     generation: job.generation,
                     results: found,
                 })
@@ -692,6 +789,10 @@ impl Application {
             search_worker(jobs_rx, results_tx, worker_filesystem, worker_generation)
         });
         Self {
+            diagnostics: Diagnostics::default(),
+            search_context: Context::default(),
+            command_context: Context::default(),
+            snapshot_operation: 0,
             state: AppState::default(),
             filesystem,
             storage: Box::new(MemoryStorage::default()),
@@ -723,7 +824,65 @@ impl Application {
     }
 
     pub fn snapshot(&self) -> AppSnapshot {
-        self.state.snapshot()
+        let mut snapshot = self.state.snapshot();
+        snapshot.diagnostic_operation = self.snapshot_operation;
+        snapshot
+    }
+
+    /// Opt-in, best effort and compile-time removable. Never returns editor errors.
+    pub fn enable_devtools(&mut self, frontend: &'static str) {
+        self.diagnostics.enable(frontend);
+    }
+
+    pub fn start_devtools(&mut self, frontend: &'static str) {
+        self.diagnostics.start(frontend);
+        let context = self.diagnostics.context();
+        self.emit_diagnostic_state(&context);
+    }
+    fn emit_diagnostic_state(&self, context: &Context) {
+        if !self.diagnostics.enabled() {
+            return;
+        }
+        for (name, value) in [
+            ("state.documents", self.state.documents.len() as u64),
+            ("state.directories", self.state.directories.len() as u64),
+            (
+                "state.search_results",
+                self.state.search_results.len() as u64,
+            ),
+            (
+                "state.search_pending",
+                u64::from(self.state.search_in_progress),
+            ),
+            ("state.revision", self.state.revision),
+            (
+                "state.search_generation",
+                self.search_generation.load(Ordering::Relaxed),
+            ),
+            ("state.watcher_active", u64::from(self.watcher.is_some())),
+        ] {
+            context.event(name, "main", self.state.revision, value);
+        }
+    }
+    pub fn devtools_supported(&self) -> bool {
+        cfg!(feature = "devtools")
+    }
+    pub fn open_devtools(&self) {
+        self.diagnostics.observer().open_console();
+    }
+
+    pub fn diagnostic_observer(&self) -> DiagnosticObserver {
+        self.diagnostics.observer()
+    }
+
+    pub fn devtools_enabled(&self) -> bool {
+        self.diagnostics.enabled()
+    }
+
+    /// Time spent applying a snapshot, not proof that a frame was presented.
+    pub fn diagnostic_snapshot_applied(&self, operation: u64, revision: u64, duration_ns: u64) {
+        self.diagnostics
+            .snapshot_applied(operation, revision, duration_ns);
     }
 
     pub fn take_background_error(&mut self) -> Option<String> {
@@ -755,7 +914,12 @@ impl Application {
         if let Some(workspace) = &self.state.workspace
             && !self.state.search_query.0.trim().is_empty()
         {
+            self.search_context = self.command_context.clone();
+            self.search_context.generation = generation;
+            self.search_context
+                .event("search.queued", "main", self.state.revision, generation);
             let _ = self.search_jobs.send(SearchJob {
+                diagnostic: self.search_context.clone(),
                 generation,
                 root: workspace.root.clone(),
                 documents: self.state.documents.clone(),
@@ -826,6 +990,98 @@ impl Application {
     }
 
     fn execute(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
+        let context = self.diagnostics.context();
+        self.command_context = context.clone();
+        let name = command.diagnostic_name();
+        let span = context.begin(name, "dispatch");
+        let before_revision = self.state.revision;
+        let result = self.execute_inner(command);
+        if self.state.revision != before_revision {
+            self.snapshot_operation = if result.as_ref().is_ok_and(|events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, AppEvent::SearchResultsUpdated(_)))
+            }) {
+                self.search_context.operation
+            } else {
+                context.operation
+            };
+        }
+        if let Ok(events) = &result {
+            let facts = if events
+                .iter()
+                .any(|event| matches!(event, AppEvent::SearchResultsUpdated(_)))
+            {
+                &self.search_context
+            } else {
+                &context
+            };
+            for event in events {
+                let (name, value) = match event {
+                    AppEvent::DocumentChanged { content, .. } => {
+                        ("document.buffer_bytes", content.len() as u64)
+                    }
+                    AppEvent::DocumentLoaded { content, .. } => {
+                        ("document.loaded_bytes", content.len() as u64)
+                    }
+                    AppEvent::DocumentSaved { .. } => ("document.saved", 0),
+                    AppEvent::DocumentOpened { .. } => ("document.opened", 0),
+                    AppEvent::DocumentClosed { .. } => ("document.closed", 0),
+                    AppEvent::WorkspaceOpened { documents, .. } => {
+                        ("workspace.opened", documents.len() as u64)
+                    }
+                    AppEvent::WorkspaceRefreshed { documents, .. } => {
+                        ("workspace.refreshed", documents.len() as u64)
+                    }
+                    AppEvent::SearchResultsUpdated(results) => {
+                        ("search.results_applied", results.len() as u64)
+                    }
+                    AppEvent::SearchQueryChanged { results, .. } => {
+                        ("search.input_changed", results.len() as u64)
+                    }
+                    AppEvent::SearchStarted => ("search.started", 0),
+                    AppEvent::EntryRenamed { .. } => ("filesystem.entry_renamed", 0),
+                    AppEvent::EntryMoved { .. } => ("filesystem.entry_moved", 0),
+                    AppEvent::DiagnosticIncremented => ("diagnostic.incremented", 0),
+                };
+                facts.event(name, "main", self.state.revision, value);
+                if matches!(event, AppEvent::DocumentLoaded { .. }) {
+                    facts.event("document.buffer_bytes", "main", self.state.revision, value);
+                }
+                if matches!(event, AppEvent::DocumentClosed { .. }) {
+                    facts.event("document.buffer_bytes", "main", self.state.revision, 0);
+                }
+            }
+            if self.state.revision != before_revision {
+                self.emit_diagnostic_state(facts);
+            }
+        } else if let Err(error) = &result {
+            let name = match error {
+                AppError::ExternalChanges(_) => "error.save_conflict",
+                AppError::UnsavedChanges => "error.unsaved_changes",
+                AppError::Filesystem(_) => "error.filesystem",
+                AppError::Storage(_) => "error.storage",
+                _ => "error.validation",
+            };
+            context.error(name, "main", self.state.revision);
+        }
+        let outcome = match &result {
+            Ok(events) if events.is_empty() => "noop",
+            Ok(_) => "ok",
+            Err(_) => "error",
+        };
+        context.end(
+            name,
+            "dispatch",
+            span,
+            outcome,
+            self.state.revision,
+            result.as_ref().map_or(0, |events| events.len() as u64),
+        );
+        result
+    }
+
+    fn execute_inner(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
         let command = if let Some((source, target)) = self.finish_pending_move() {
             remap_command(command, &source, &target)
         } else {
@@ -1009,7 +1265,30 @@ impl Application {
                 let mut latest = None;
                 while let Ok(finished) = self.search_results_rx.try_recv() {
                     if finished.generation == self.search_generation.load(Ordering::Relaxed) {
+                        finished.diagnostic.event(
+                            "search.delivered",
+                            "main",
+                            self.state.revision,
+                            finished.results.len() as u64,
+                        );
+                        self.search_context = finished.diagnostic;
                         latest = Some(finished.results);
+                    } else {
+                        let span = finished.diagnostic.begin("search.delivery", "main");
+                        finished.diagnostic.end(
+                            "search.delivery",
+                            "main",
+                            span,
+                            "discarded",
+                            self.state.revision,
+                            0,
+                        );
+                        finished.diagnostic.event(
+                            "search.stale_generation",
+                            "main",
+                            self.state.revision,
+                            finished.generation,
+                        );
                     }
                 }
                 latest
@@ -1040,13 +1319,44 @@ impl Application {
                 } else {
                     Duration::from_secs(2)
                 };
-                let changed = self
+                let (changed, count, errors) = self
                     .watcher
                     .as_ref()
-                    .is_some_and(WorkspaceWatcher::has_changes);
+                    .map(WorkspaceWatcher::drain_changes)
+                    .unwrap_or_default();
+                if count > 0 {
+                    self.command_context
+                        .event("watcher.batch", "main", self.state.revision, count);
+                }
+                if errors > 0 {
+                    self.command_context.event(
+                        "watcher.errors",
+                        "main",
+                        self.state.revision,
+                        errors,
+                    );
+                }
                 if changed || self.last_reconcile.elapsed() >= interval {
                     self.last_reconcile = Instant::now();
-                    let events = self.resolve(AppCommand::RefreshWorkspace)?;
+                    let reason = if changed {
+                        "reconcile.watcher"
+                    } else if self.watcher.is_some() {
+                        "reconcile.periodic"
+                    } else {
+                        "reconcile.fallback"
+                    };
+                    let context = self.command_context.clone();
+                    let span = context.begin(reason, "main");
+                    let result = self.resolve(AppCommand::RefreshWorkspace);
+                    context.end(
+                        reason,
+                        "main",
+                        span,
+                        if result.is_ok() { "ok" } else { "error" },
+                        self.state.revision,
+                        0,
+                    );
+                    let events = result?;
                     if events.is_empty() {
                         self.queue_current_search();
                     }

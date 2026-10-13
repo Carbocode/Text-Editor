@@ -1,6 +1,6 @@
 # Developer Tools: osservabilità, diagnostica e analisi persistente
 
-Stato: proposta di architettura e piano di implementazione. Nessuna delle API, variabili di ambiente o funzionalità descritte qui è ancora implementata.
+Stato: piano di architettura con un primo percorso implementato. Vedere [implementazione e verifiche](IMPLEMENTATION.md) per funzionalità disponibili, avvio, limiti e requisiti ancora aperti; le fasi sotto non sono tutte completate.
 
 ## Obiettivo
 

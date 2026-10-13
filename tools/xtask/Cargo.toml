@@ -3,3 +3,7 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+native-workspace-devtools-protocol = { path = "../../crates/devtools-protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }

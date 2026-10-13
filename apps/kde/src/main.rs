@@ -22,6 +22,12 @@ fn main() -> std::process::ExitCode {
         QQuickStyle::set_style(&"org.kde.desktop".into());
     }
     let mut app = QGuiApplication::new();
+    if let Some(mut app) = app.as_mut() {
+        app.as_mut()
+            .set_application_name(&"Native Workspace".into());
+        app.set_organization_domain(&"nativeworkspace.org".into());
+        QGuiApplication::set_desktop_file_name(&"org.nativeworkspace.App".into());
+    }
     let mut engine = QQmlApplicationEngine::new();
     let qml = if std::env::args().any(|argument| argument.starts_with("--smoke-drag=")) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/DragSmoke.qml"

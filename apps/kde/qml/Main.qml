@@ -9,6 +9,19 @@ ApplicationWindow {
     height: 600
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
 
+    menuBar: MenuBar {
+        visible: controller.devtools_available
+        Menu {
+            title: "Developer"
+            Action { text: "Open Developer Tools"; onTriggered: controller.open_devtools() }
+        }
+    }
+    header: ToolBar {
+        visible: controller.devtools_available
+        Row {
+            ToolButton { text: "Developer Tools"; onClicked: controller.open_devtools() }
+        }
+    }
     AppController { id: controller }
     Timer { id: benchmarkDelay; interval: 200; repeat: false }
     FolderDialog {

@@ -142,6 +142,13 @@ impl Ui {
     }
 
     fn render(&self, snapshot: AppSnapshot) {
+        let diagnostic_started = self
+            .core
+            .borrow()
+            .devtools_enabled()
+            .then(std::time::Instant::now);
+        let diagnostic_operation = snapshot.diagnostic_operation;
+        let diagnostic_revision = snapshot.revision;
         self.updating.set(true);
         {
             let previous = self.snapshot.borrow();
@@ -279,6 +286,13 @@ impl Ui {
         );
         self.snapshot.replace(snapshot);
         self.updating.set(false);
+        if let Some(started) = diagnostic_started {
+            self.core.borrow().diagnostic_snapshot_applied(
+                diagnostic_operation,
+                diagnostic_revision,
+                started.elapsed().as_nanos() as u64,
+            );
+        }
     }
 
     fn sidebar(&self) -> &SidebarView {
@@ -875,6 +889,7 @@ fn main() {
 
 fn build_window(app: &adw::Application) {
     let mut core = Application::new();
+    core.enable_devtools("gtk");
     let persistence_error = if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_none()
         && std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE").is_none()
     {
@@ -884,6 +899,7 @@ fn build_window(app: &adw::Application) {
     } else {
         None
     };
+    let devtools_available = core.devtools_supported();
     let snapshot = core.snapshot();
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -907,6 +923,13 @@ fn build_window(app: &adw::Application) {
     toggle_sidebar.set_icon_name(sidebar_icon);
     toggle_sidebar.set_tooltip_text(Some("Toggle Sidebar"));
     content_header.pack_start(&toggle_sidebar);
+    if devtools_available {
+        let devtools_action = gio::SimpleAction::new("devtools", None);
+        app.add_action(&devtools_action);
+        let devtools = gtk::Button::with_label("Developer Tools");
+        devtools.set_action_name(Some("app.devtools"));
+        content_header.pack_end(&devtools);
+    }
     let open = gtk::Button::with_label("Open Folder…");
     let home_button = gtk::Button::from_icon_name("user-home-symbolic");
     home_button.set_tooltip_text(Some("Home"));
@@ -1135,6 +1158,17 @@ fn build_window(app: &adw::Application) {
         collapsed_directories,
     };
     ui.render(snapshot);
+    if let Some(action) = app
+        .lookup_action("devtools")
+        .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
+    {
+        let core = ui.core.clone();
+        action.connect_activate(move |_, _| {
+            let mut app = core.borrow_mut();
+            app.start_devtools("gtk");
+            app.open_devtools();
+        });
+    }
     {
         let ui = ui.clone();
         file_tab.connect_toggled(move |button| {

@@ -1,9 +1,14 @@
 [package]
 name = "native-workspace-kde"
+default-run = "native-workspace-kde"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 build = "build.rs"
+
+[features]
+default = ["devtools"]
+devtools = ["native-workspace-application/devtools"]
 
 [dependencies]
 native-workspace-application = { path = "../../crates/application" }

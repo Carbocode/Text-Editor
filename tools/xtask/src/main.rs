@@ -92,21 +92,145 @@ fn run_kde(args: &[&str]) -> ExitCode {
     }
 }
 
+fn build_frontend(package: &str, kde: bool) -> ExitCode {
+    // Qt compiler overrides belong to Qt, not to the bundled diagnostic engine.
+    if run(
+        "cargo",
+        &[
+            "build",
+            "-p",
+            "native-workspace-devtools",
+            "-p",
+            "native-workspace-devtools-ui",
+        ],
+    ) != ExitCode::SUCCESS
+    {
+        return ExitCode::FAILURE;
+    }
+    let args = ["build", "-p", package];
+    if kde {
+        run_kde(&args)
+    } else {
+        run("cargo", &args)
+    }
+}
+
+fn run_frontend(package: &str, kde: bool) -> ExitCode {
+    if build_frontend(package, kde) != ExitCode::SUCCESS {
+        return ExitCode::FAILURE;
+    }
+    let executable = env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "target".into())
+        .join("debug")
+        .join(format!("{package}{}", env::consts::EXE_SUFFIX));
+    run(executable.to_str().expect("frontend executable path"), &[])
+}
+
+fn devtools(demo: bool) -> ExitCode {
+    use native_workspace_devtools_protocol::{Descriptor, Health, VERSION, diagnostics_dir};
+    use std::time::{Duration, Instant};
+    if run(
+        "cargo",
+        &[
+            "build",
+            "-p",
+            "native-workspace-devtools",
+            "-p",
+            "native-workspace-devtools-ui",
+        ],
+    ) != ExitCode::SUCCESS
+    {
+        return ExitCode::FAILURE;
+    }
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_millis(500))
+        .build()
+    else {
+        return ExitCode::FAILURE;
+    };
+    let ready = || {
+        Descriptor::read(&diagnostics_dir().join("service.json"))
+            .ok()
+            .is_some_and(|d| {
+                client
+                    .get(format!("{}/v1/health", d.base_url()))
+                    .bearer_auth(&d.token)
+                    .send()
+                    .and_then(|r| r.error_for_status())
+                    .and_then(|r| r.json::<Health>())
+                    .is_ok_and(|h| h.version == VERSION && h.service == d.service)
+            })
+    };
+    let target = env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| "target".into())
+        .join("debug");
+    if !ready() {
+        let mut command = Command::new(target.join(format!(
+            "native-workspace-devtools{}",
+            env::consts::EXE_SUFFIX
+        )));
+        if demo {
+            command.arg("--demo");
+        }
+        if command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .is_err()
+        {
+            return ExitCode::FAILURE;
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "Diagnostic service did not become ready; editor launches remain independent."
+                );
+                return ExitCode::FAILURE;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    run(
+        target
+            .join(format!(
+                "native-workspace-devtools-ui{}",
+                env::consts::EXE_SUFFIX
+            ))
+            .to_str()
+            .unwrap(),
+        &[],
+    )
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.as_slice() {
         [cmd] if cmd == "doctor" => doctor(None),
         [cmd, flag, target] if cmd == "doctor" && flag == "--strict" => doctor(Some(target)),
+        [cmd] if cmd == "devtools" => devtools(false),
+        [cmd, flag] if cmd == "devtools" && flag == "--demo" => devtools(true),
+        [cmd] if cmd == "devtools-service" => {
+            run("cargo", &["run", "-p", "native-workspace-devtools"])
+        }
+        [cmd] if cmd == "devtools-ui" => {
+            run("cargo", &["run", "-p", "native-workspace-devtools-ui"])
+        }
         [cmd] if cmd == "check-core" => run("cargo", &["check"]),
         [cmd] if cmd == "build-macos" => run("sh", &["apps/macos/build.sh"]),
         [cmd] if cmd == "run-macos" => run("sh", &["apps/macos/run.sh"]),
-        [cmd] if cmd == "build-gnome" => run("cargo", &["build", "-p", "native-workspace-gnome"]),
-        [cmd] if cmd == "run-gnome" => run("cargo", &["run", "-p", "native-workspace-gnome"]),
-        [cmd] if cmd == "build-kde" => run_kde(&["build", "-p", "native-workspace-kde"]),
-        [cmd] if cmd == "run-kde" => run_kde(&["run", "-p", "native-workspace-kde"]),
+        [cmd] if cmd == "build-gnome" => build_frontend("native-workspace-gnome", false),
+        [cmd] if cmd == "run-gnome" => run_frontend("native-workspace-gnome", false),
+        [cmd] if cmd == "build-kde" => build_frontend("native-workspace-kde", true),
+        [cmd] if cmd == "run-kde" => run_frontend("native-workspace-kde", true),
         _ => {
             eprintln!(
-                "usage: cargo xtask doctor [--strict macos|gnome|kde] | check-core | build-macos | run-macos | build-gnome | run-gnome | build-kde | run-kde"
+                "usage: cargo xtask doctor [--strict macos|gnome|kde] | devtools [--demo] | devtools-service | devtools-ui | check-core | build-macos | run-macos | build-gnome | run-gnome | build-kde | run-kde"
             );
             ExitCode::FAILURE
         }

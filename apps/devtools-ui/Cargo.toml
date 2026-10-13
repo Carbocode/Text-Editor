@@ -1,0 +1,17 @@
+[package]
+name = "native-workspace-devtools-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-devtools-protocol = { path = "../../crates/devtools-protocol" }
+eframe = { version = "=0.33.0", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json"] }
+serde_json = "1"
+tungstenite = "0.29"
+
+# Eframe default features are disabled; explicitly enable native WGPU backends.
+wgpu = { version = "=27.0.1", default-features = false, features = ["metal", "vulkan", "dx12", "wgsl"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+egui_extras = { version = "=0.33.0", default-features = false }
