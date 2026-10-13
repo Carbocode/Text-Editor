@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var sidebarBottomBarHeight: CGFloat = 44
     @State private var sidebarRootDropHeight: CGFloat = 0
     @State private var expandedDirectories: Set<String> = []
+    @State private var selectedDirectory: String?
     @State private var currentWorkspaceRoot: String?
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
     @State private var sidebarRows: [SidebarOutlineRow] = []
@@ -186,32 +187,51 @@ struct ContentView: View {
     @ViewBuilder private func sidebarRow(_ row: SidebarOutlineRow) -> some View {
         switch row.kind {
         case .directory(let path):
-            Button {
-                if renamePath != path { toggleDirectory(path) }
-            } label: {
-                HStack(spacing: 8) {
+            HStack(spacing: 8) {
+                Button { toggleDirectory(path) } label: {
                     Image(systemName: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty
                         ? "chevron.down" : "chevron.right").font(.caption)
-                    SidebarEntryIcon(draft: renameDraft, originalPath: path,
-                                     displayPath: store.presentationPath(path), directory: true,
-                                     expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty)
-                    entryName(path)
                 }
-                .padding(.leading, CGFloat(row.depth) * 14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                Button {
+                    if renamePath != path {
+                        selectedDirectory = path
+                        toggleDirectory(path)
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        SidebarEntryIcon(draft: renameDraft, originalPath: path,
+                                         displayPath: store.presentationPath(path), directory: true,
+                                         expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty)
+                        entryName(path)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(.leading, CGFloat(row.depth) * 14 + 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
             .onDrag { dragProvider(path) } preview: { dragPreview(path, directory: true) }
             .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(path))
-            .overlay { SidebarDropOutline(drag: sidebarDrag, directory: path) }
+            .overlay { SidebarDropOutline(drag: sidebarDrag, directory: path, selected: selectedDirectory == path) }
+            .listRowBackground(Color.clear)
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
             .contextMenu {
                 Button("Rename") { beginRename(path) }
             }
         case .file(let group):
             Button {
-                if renamePath != group.id { store.openSearchFile(group.id) }
+                if renamePath != group.id {
+                    if selectedDirectory == nil && store.selectedSearchResultIndex == nil
+                        && store.activeDocument.map({ store.presentationPath($0.id) }) == group.id {
+                        beginRename(group.id)
+                    } else {
+                        selectedDirectory = nil
+                        store.openSearchFile(group.id)
+                    }
+                }
             } label: {
                 HStack(spacing: 8) {
                     SidebarEntryIcon(draft: renameDraft, originalPath: group.id,
@@ -223,7 +243,7 @@ struct ContentView: View {
                     }
                     if group.file.dirty || (store.activeDocument.map { store.presentationPath($0.id) } == group.id && store.hasDirtyActiveDocument) { Circle().fill(.secondary).frame(width: 6, height: 6) }
                 }
-                .padding(.leading, CGFloat(row.depth) * 14)
+                .padding(.leading, CGFloat(row.depth) * 14 + 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
@@ -234,10 +254,16 @@ struct ContentView: View {
             .contextMenu {
                 Button("Rename") { beginRename(group.id) }
             }
-            .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument.map { store.presentationPath($0.id) } == group.id
-                ? Color.accentColor.opacity(0.12) : Color.clear)
+            .overlay {
+                if selectedDirectory == nil && store.selectedSearchResultIndex == nil
+                    && store.activeDocument.map({ store.presentationPath($0.id) }) == group.id {
+                    SidebarRowHighlight()
+                }
+            }
+            .listRowBackground(Color.clear)
         case .match(let match):
             Button {
+                selectedDirectory = nil
                 store.openSearchResult(match.result, at: match.index)
             } label: {
                 HStack(alignment: .top, spacing: 8) {
@@ -252,8 +278,12 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .listRowBackground(store.selectedSearchResultIndex == match.index
-                ? Color.accentColor.opacity(0.12) : Color.clear)
+            .overlay {
+                if selectedDirectory == nil && store.selectedSearchResultIndex == match.index {
+                    SidebarRowHighlight()
+                }
+            }
+            .listRowBackground(Color.clear)
         }
     }
 
@@ -349,17 +379,7 @@ struct ContentView: View {
 
     private var sidebarHeader: some View {
         VStack(spacing: 8) {
-            Picker("Sidebar", selection: $sidebarTab) {
-                Image(systemName: "folder").accessibilityLabel("Files").tag(0)
-                Image(systemName: "magnifyingglass").accessibilityLabel("Search").tag(1)
-                Image(systemName: "arrow.triangle.branch").accessibilityLabel("Git").tag(2)
-                Image(systemName: "bookmark").accessibilityLabel("Bookmarks").tag(3)
-                Image(systemName: "exclamationmark.triangle").accessibilityLabel("Warnings").tag(4)
-                Image(systemName: "xmark.octagon").accessibilityLabel("Errors").tag(5)
-            }
-            .pickerStyle(.segmented)
-            .controlSize(.large)
-            .labelsHidden()
+            SidebarTabBar(selection: $sidebarTab)
             .frame(maxWidth: .infinity)
             .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
             if sidebarTab == 1 {
@@ -378,7 +398,6 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(.bar)
     }
 
     var body: some View {
@@ -386,7 +405,6 @@ struct ContentView: View {
         if store.workspaceName != nil {
         NavigationSplitView {
             VStack(spacing: 0) {
-                sidebarHeader
                 List {
                     ForEach(sidebarRows) { row in
                         sidebarRow(row)
@@ -401,6 +419,8 @@ struct ContentView: View {
                             .accessibilityHidden(true)
                     }
                 }
+                .safeAreaBar(edge: .top, spacing: 0) { sidebarHeader }
+                .scrollEdgeEffectStyle(.soft, for: .top)
                 .onReceive(store.$workspaceRoot) { root in
                     if currentWorkspaceRoot != root {
                         sidebarDrag.finish()
@@ -408,6 +428,7 @@ struct ContentView: View {
                         cancelRename()
                         currentWorkspaceRoot = root
                         expandedDirectories.removeAll()
+                        selectedDirectory = nil
                         sidebarCache.removeAll()
                         rebuildSidebarIndex()
                     }
@@ -426,10 +447,12 @@ struct ContentView: View {
                             if !confirmed {
                                 let inverse = WorkspaceStore.Relocation(source: previous.target, target: previous.source)
                                 expandedDirectories = Set(expandedDirectories.map(inverse.path))
+                                selectedDirectory = selectedDirectory.map(inverse.path)
                             }
                         }
                         if let relocation, sidebarRelocation != relocation {
                             expandedDirectories = Set(expandedDirectories.map(relocation.path))
+                            selectedDirectory = selectedDirectory.map(relocation.path)
                         }
                         sidebarRelocation = relocation
                         sidebarCache.removeAll()
@@ -505,14 +528,11 @@ struct ContentView: View {
                         }
                 }
             }
+            .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 480)
         } detail: {
             editorDetail
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
-                        if store.diagnosticsEnabled {
-                            Button("Developer Tools", systemImage: "waveform.path.ecg") { store.openDevtools() }
-                                .help("Open Developer Tools")
-                        }
                         Button("Home", systemImage: "house") { showingHome = true }
                     }
                 }

@@ -36,6 +36,43 @@ pub struct Interactions {
 }
 
 impl Interactions {
+    pub fn cancel_rename(&self) {
+        let Some(path) = self.editing.take() else {
+            return;
+        };
+        if let Some(entry) = self.editor(&path)
+            && let Some(stack) = entry
+                .parent()
+                .and_then(|widget| widget.downcast::<gtk::Stack>().ok())
+        {
+            stack.set_visible_child_name("label");
+        }
+    }
+
+    pub fn attach_cancel_on_outside_click(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>) {
+        let gesture = gtk::GestureClick::new();
+        gesture.set_name(Some("sidebar-rename-outside-click"));
+        gesture.set_button(0);
+        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let state = self.clone();
+        let root = widget.upcast_ref::<gtk::Widget>().downgrade();
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            let Some(path) = state.editing.borrow().clone() else {
+                return;
+            };
+            let inside = root
+                .upgrade()
+                .and_then(|root| root.pick(x, y, gtk::PickFlags::DEFAULT))
+                .zip(state.editor(&path))
+                .is_some_and(|(target, entry)| target == entry || target.is_ancestor(&entry));
+            if !inside {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                state.cancel_rename();
+            }
+        });
+        widget.add_controller(gesture);
+    }
+
     pub fn editor(&self, path: &str) -> Option<gtk::Entry> {
         self.editors
             .borrow()
@@ -340,6 +377,40 @@ impl Interactions {
                 });
                 menu.connect_closed(|menu| menu.unparent());
                 menu.popup();
+            });
+        }
+        widget.add_controller(gesture);
+        let gesture = gtk::GestureClick::new();
+        gesture.set_name(Some("sidebar-entry-click"));
+        gesture.set_button(1);
+        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+        {
+            let state = self.clone();
+            let path = path.to_owned();
+            let disclosure = folder
+                .then(|| widget.first_child())
+                .flatten()
+                .map(|widget| widget.downgrade());
+            gesture.connect_pressed(move |gesture, _, x, _| {
+                if state.editing.borrow().is_some() || state.dragged.borrow().is_some() {
+                    return;
+                }
+                let selected = state.selected.borrow().as_deref() == Some(&path);
+                let on_disclosure = disclosure
+                    .as_ref()
+                    .and_then(glib::WeakRef::upgrade)
+                    .is_some_and(|disclosure| x < f64::from(disclosure.width()));
+                if folder && (on_disclosure || selected) {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    if let Some(callbacks) = state.callbacks.borrow().clone()
+                        && !(callbacks.expand)(&path)
+                    {
+                        (callbacks.collapse)(&path);
+                    }
+                } else if !folder && selected {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    state.begin_rename(&path);
+                }
             });
         }
         widget.add_controller(gesture);
