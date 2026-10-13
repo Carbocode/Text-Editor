@@ -37,6 +37,7 @@ ApplicationWindow {
             try {
                 switch (step++) {
                 case 0:
+                    check(!findItem(pane, "workspaceDropTarget").visible, "Idle workspace shows drop box")
                     pane.sidebarEntries()
                     var tree = findItem(pane, "fileTree")
                     tree.forceLayout()
@@ -67,17 +68,21 @@ ApplicationWindow {
                     check(controller.document_ids.indexOf("src/README.md") >= 0, "Native drop did not move file: " + controller.error_message)
                     check(pane.collapsedDirectories.src === false, "Successful drop closed destination")
                     var rootTarget = findItem(pane, "workspaceDropTarget")
-                    check(rootTarget && rootTarget.visible && rootTarget.height >= 32,
-                        "Workspace root drop block is missing")
+                    check(rootTarget && !rootTarget.visible && rootTarget.height === 0,
+                        "Workspace root drop block remained after drop")
+                    check(!pane.hoveringDrop && !pane.validDrop, "Folder drop retained feedback")
+                    pane.hoverDrop("src")
+                    check(!pane.hoveringDrop, "Late hover restored folder feedback")
                     var movedTree = findItem(pane, "fileTree")
                     check(rootTarget.parent !== movedTree, "Root drop block scrolls with tree rows")
                     movedTree.forceLayout()
                     var movedSource = movedTree.itemAtCell(Qt.point(0, pane.treeRowForPath("src/README.md")))
                     check(movedSource, "Moved source row is missing")
                     sourcePoint = movedSource.mapToItem(pane, 100, movedSource.height / 2)
-                    targetPoint = rootTarget.mapToItem(pane, rootTarget.width / 2, rootTarget.height / 2)
                     input.mousePress(pane, sourcePoint.x, sourcePoint.y)
                     input.mouseMove(pane, sourcePoint.x + 20, sourcePoint.y, 1, Qt.LeftButton)
+                    check(rootTarget.visible && rootTarget.height >= 32, "Drag did not show root drop block")
+                    targetPoint = rootTarget.mapToItem(pane, rootTarget.width / 2, rootTarget.height / 2)
                     input.mouseMove(pane, targetPoint.x, targetPoint.y, 1, Qt.LeftButton)
                     break
                 case 8:
@@ -86,9 +91,25 @@ ApplicationWindow {
                     input.mouseRelease(pane, targetPoint.x, targetPoint.y)
                     break
                 case 9:
+                    check(pane.draggingPath === "" && !pane.hoveringDrop && !pane.validDrop,
+                        "Workspace root drop retained feedback")
+                    check(!findItem(pane, "workspaceDropTarget").visible, "Root drop box remained visible")
+                    pane.hoverDrop("")
+                    check(!pane.hoveringDrop, "Late hover restored workspace feedback")
                     check(controller.document_ids.indexOf("README.md") >= 0
                         && controller.document_ids.indexOf("src/README.md") < 0,
                         "Dropping on workspace root did not move file back: " + controller.error_message)
+                    pane.startEntryDrag("README.md", Qt.point(30, 30))
+                    pane.hoverDrop("")
+                    check(!pane.validDrop, "Same-parent drop should be forbidden")
+                    check(!pane.dropEntry(""), "Same-parent drop was accepted")
+                    check(pane.draggingPath === "" && !pane.hoveringDrop && !pane.validDrop,
+                        "Rejected drop retained red feedback")
+                    pane.startEntryDrag("README.md", Qt.point(30, 30))
+                    pane.hoverDrop("src")
+                    pane.finishEntryDrag(true)
+                    check(!pane.hoveringDrop && !findItem(pane, "workspaceDropTarget").visible,
+                        "Cancelled drag retained drop feedback")
                     console.log("KDE native pointer drag smoke passed")
                     Qt.exit(0)
                 }

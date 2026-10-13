@@ -333,7 +333,11 @@ struct ContentView: View {
         }, exited: {
             sidebarDrag.leave(directory)
         }, dropped: {
-            guard canDrop(directory), let source = sidebarDrag.source else { return false }
+            guard canDrop(directory), let source = sidebarDrag.source else {
+                sidebarDrag.finish()
+                store.endSidebarDrag()
+                return false
+            }
             let accepted = store.moveEntry(source, directory: directory)
             sidebarDrag.finish(committing: accepted ? directory : nil)
             store.endSidebarDrag()
@@ -476,9 +480,6 @@ struct ContentView: View {
                 if sidebarTab == 0 {
                     SidebarRootDropLabel(drag: sidebarDrag, workspaceName: store.workspaceName ?? "workspace")
                         .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(""))
-                        .overlay { SidebarDropOutline(drag: sidebarDrag, directory: "") }
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 8)
                 }
             }
         } detail: {

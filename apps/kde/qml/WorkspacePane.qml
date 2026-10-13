@@ -244,6 +244,7 @@ Item {
     }
 
     function hoverDrop(directory) {
+        if (draggingPath.length === 0) return
         leaveDropFolder.stop()
         if (hoveringDrop && hoverDirectory === directory) {
             validDrop = canDrop(draggingPath, directory)
@@ -266,11 +267,15 @@ Item {
     }
 
     function dropEntry(directory) {
-        if (!canDrop(draggingPath, directory) || !flushEditor()) return false
+        if (!canDrop(draggingPath, directory) || !flushEditor()) {
+            finishEntryDrag(true)
+            return false
+        }
         controller.move_entry(draggingPath, directory)
         selectedResultIndex = -1
         var succeeded = controller.error_message.length === 0
         if (succeeded) { dropCommitted = true; committedDropDirectory = directory }
+        finishEntryDrag(true)
         return succeeded
     }
 
@@ -289,6 +294,8 @@ Item {
         if (!cancelled && draggingPath.length > 0 && !dropCommitted) dragGhost.Drag.drop()
         draggingPath = ""
         hoveringDrop = false
+        hoverDirectory = ""
+        validDrop = false
         expandDropFolder.stop()
         leaveDropFolder.stop()
         restoreDragDirectories(dropCommitted ? committedDropDirectory : null)
@@ -1097,7 +1104,7 @@ Item {
                                     : "#18d64545"
                                 border.width: 2
                                 border.color: root.validDrop ? palette.highlight : "#d64545"
-                                visible: root.hoveringDrop && treeRow.entry && treeRow.entry.directory
+                                visible: root.draggingPath.length > 0 && root.hoveringDrop && treeRow.entry && treeRow.entry.directory
                                     && root.hoverDirectory === treeRow.entry.path
                             }
                             rightPadding: 38
@@ -1135,9 +1142,9 @@ Item {
                         anchors.right: parent.right
                         anchors.bottom: searchRow.top
                         anchors.bottomMargin: 6
-                        height: 32
+                        height: visible ? 32 : 0
                         z: 5
-                        visible: root.sidebarTab === 0
+                        visible: root.sidebarTab === 0 && root.draggingPath.length > 0
                         color: root.hoveringDrop && root.hoverDirectory === ""
                             ? Qt.rgba(sidebarPalette.highlight.r, sidebarPalette.highlight.g, sidebarPalette.highlight.b, 0.14)
                             : sidebarPalette.base
