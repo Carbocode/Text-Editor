@@ -33,3 +33,5 @@ Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build 
 Measure listing and search latency with `cargo run -p native-workspace-application --release --example search_benchmark -- [workspace] [query]`. Without arguments it creates a temporary nested workspace with 1,000 files. Search timing includes the 150 ms debounce.
 
 See [architecture](docs/architecture.md), [development](docs/development.md), [macOS](docs/macos.md), [GNOME](docs/gnome.md), and [KDE](docs/kde.md).
+
+The proposed [Developer Tools plan](docs/devtools/README.md) describes a shared cross-platform developer console, end-to-end observability, a dedicated analytics database, persistent recordings, and offline export/import. It is a design proposal, not an implemented feature.
