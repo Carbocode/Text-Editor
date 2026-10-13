@@ -20,11 +20,13 @@ The following phases are proposed and have not been implemented yet:
 
 6. **Complete file management:** rename, move, and delete files and folders, including safe handling of open documents and unsaved changes.
 7. **Edit multiple files:** show open documents as tabs in all three frontends, mark unsaved changes, switch and close tabs safely, and add Save All. The core already preserves unsaved content when switching documents; this phase makes open documents explicit. Side-by-side editing can follow as a separate extension.
-8. **Find and replace:** replace matches in the current document and across the workspace, with a preview before workspace-wide changes.
-9. **Restore sessions:** reopen the last workspace and its open documents after restarting the app.
-10. **Integrated terminal:** run commands in the current workspace from each native frontend.
-11. **Basic Git integration:** show changed files and diffs before committing.
-12. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
+8. **Drag and drop from the operating system:** accept external files dragged onto the editor window in all three frontends. Dropping onto the editor or tab area opens the files as tabs, including files outside the current workspace. Dropping onto the file tree moves the files into the destination folder indicated by the drop target (the containing folder for a file row, or the workspace root for the tree background). Show a drag preview and highlight the destination; expand closed folders after a brief hover. Handle name collisions, failed moves, open documents, and unsaved changes safely, without silently overwriting existing files.
+9. **Open files and folders through the app icon:** on macOS, support dropping files or folders onto the application's Dock or Finder icon, both when the app is running and when it must launch. Open files as editor tabs and folders as workspaces. Verify equivalent desktop integration on GNOME and KDE and implement it where supported, documenting platform limitations.
+10. **Find and replace:** replace matches in the current document and across the workspace, with a preview before workspace-wide changes.
+11. **Restore sessions:** reopen the last workspace and its open documents after restarting the app.
+12. **Integrated terminal:** run commands in the current workspace from each native frontend.
+13. **Basic Git integration:** show changed files and diffs before committing.
+14. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
 
 Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build or start a frontend with cargo xtask build-macos, build-gnome, build-kde or their run-* counterparts. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
 
