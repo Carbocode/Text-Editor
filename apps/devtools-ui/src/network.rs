@@ -18,6 +18,8 @@ pub enum Command {
     Select(Uuid),
     AutoSelect,
     Follow(bool),
+    Operation(Option<u64>),
+    Pin(Uuid, bool),
     Internal(bool),
     Paused(bool),
     Page(u64),
@@ -34,7 +36,9 @@ pub struct View {
     pub analysis: Analysis,
     pub message: String,
     pub connected: bool,
+    pub capabilities: Vec<String>,
     pub follow: bool,
+    pub operation: Option<u64>,
     pub received_ms: u64,
 }
 pub fn spawn(context: egui::Context) -> (SyncSender<Command>, Receiver<View>) {
@@ -115,6 +119,7 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
     let mut auto = selected.is_none();
     let mut follow = true;
     let mut internal = false;
+    let mut operation = None;
     let mut after = 0;
     let mut paused = false;
     let mut registered = None;
@@ -135,6 +140,7 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
         if paused && (command.is_none() || matches!(command, Some(Command::Changed))) {
             continue;
         }
+        let mut reachable = false;
         let result = (|| -> Result<View, Box<dyn std::error::Error>> {
             let d = Descriptor::read(&diagnostics_dir().join("service.json"))?;
             let base = d.base_url();
@@ -147,6 +153,7 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
             if health.version != VERSION || health.service != d.service {
                 return Err("incompatible service version".into());
             }
+            reachable = true;
             if registered != Some(d.service) {
                 client
                     .post(format!("{base}/v1/console"))
@@ -161,23 +168,47 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
             match command {
                 Some(Command::Select(id)) => {
                     selected = Some(id);
+                    operation = None;
                     auto = false;
                     after = 0;
                     follow = false;
                     message.clear();
                 }
                 Some(Command::AutoSelect) => {
+                    operation = None;
                     auto = true;
                     follow = true;
                     after = 0;
                     message.clear();
                 }
+                Some(Command::Refresh) => message.clear(),
                 Some(Command::Internal(value)) => {
                     internal = value;
                 }
                 Some(Command::Follow(value)) => {
                     follow = value;
+                    if value {
+                        operation = None;
+                    }
                     after = 0;
+                }
+                Some(Command::Operation(value)) => {
+                    if value.is_some()
+                        && !health
+                            .capabilities
+                            .iter()
+                            .any(|cap| cap == native_workspace_devtools_protocol::OPERATION_QUERY)
+                    {
+                        return Err(
+                            "Restart the diagnostic service to enable full operation lookup."
+                                .into(),
+                        );
+                    }
+                    operation = value;
+                    auto = false;
+                    follow = value.is_none();
+                    after = 0;
+                    message.clear();
                 }
                 Some(Command::Page(cursor)) => {
                     follow = false;
@@ -195,6 +226,42 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
                         "Collection resumed."
                     } else {
                         "Collection stopped. Recorded data is preserved."
+                    }
+                    .into();
+                }
+                Some(Command::Pin(id, pinned)) => {
+                    if !health
+                        .capabilities
+                        .iter()
+                        .any(|cap| cap == native_workspace_devtools_protocol::SESSION_PIN)
+                    {
+                        return Err(
+                            "Restart the diagnostic service to enable recording pins.".into()
+                        );
+                    }
+                    let response = client
+                        .post(format!("{base}/v1/sessions/{id}/pin"))
+                        .bearer_auth(&d.token)
+                        .json(&native_workspace_devtools_protocol::Pin { pinned })
+                        .send()?;
+                    if !response.status().is_success() {
+                        let code = response.json::<serde_json::Value>()?;
+                        let reason = match code.get("code").and_then(|value| value.as_str()) {
+                            Some("pin_limit_reached") => {
+                                "Up to 64 recordings can be pinned. Unpin one before adding another."
+                            }
+                            Some("session_not_found") => "This recording is no longer available.",
+                            Some("service_busy") => {
+                                "The collector is busy. Try pinning again shortly."
+                            }
+                            _ => "The collector could not save the recording pin.",
+                        };
+                        return Err(reason.into());
+                    }
+                    message = if pinned {
+                        "Recording pinned."
+                    } else {
+                        "Recording unpinned."
                     }
                     .into();
                 }
@@ -241,6 +308,7 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
                         .error_for_status()?
                         .json()?;
                     selected = Some(id);
+                    operation = None;
                     auto = false;
                     follow = false;
                     after = 0;
@@ -248,7 +316,7 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
                 }
                 _ => {}
             }
-            let sessions: Vec<SessionSummary> = client
+            let mut sessions: Vec<SessionSummary> = client
                 .get(format!("{base}/v1/sessions"))
                 .bearer_auth(&d.token)
                 .send()?
@@ -257,16 +325,39 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
             if auto {
                 selected = sessions
                     .iter()
-                    .find(|s| s.status == "recording" && s.session.frontend != "synthetic")
+                    .filter(|s| s.status == "recording" && s.session.frontend != "synthetic")
+                    .max_by_key(|s| s.session.started_unix_ms)
                     .map(|s| s.session.id);
+            }
+            if let Some(id) = selected
+                && !sessions.iter().any(|session| session.session.id == id)
+                && health
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap == native_workspace_devtools_protocol::SESSION_LOOKUP)
+            {
+                let header = client
+                    .get(format!("{base}/v1/sessions/{id}"))
+                    .bearer_auth(&d.token)
+                    .send()?
+                    .error_for_status()?
+                    .json::<SessionSummary>()?;
+                if sessions.len() >= 200 {
+                    sessions.pop();
+                }
+                sessions.push(header);
+                sessions.sort_by_key(|session| {
+                    std::cmp::Reverse((session.pinned, session.session.started_unix_ms))
+                });
             }
             let mut page = None;
             let mut analysis = Analysis::default();
             if let Some(id) = selected {
+                let scope = operation.map_or(String::new(), |id| format!("&operation={id}"));
                 page = Some(
                     client
                         .get(format!(
-                            "{base}/v1/sessions/{id}/events?after={after}&limit=500&tail={follow}&internal={internal}"
+                            "{base}/v1/sessions/{id}/events?after={after}&limit=500&tail={follow}&internal={internal}{scope}"
                         ))
                         .bearer_auth(&d.token)
                         .send()?
@@ -304,7 +395,9 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
                 analysis,
                 message: message.clone(),
                 connected: true,
+                capabilities: health.capabilities,
                 follow,
+                operation,
                 received_ms: unix_ms(),
             })
         })();
@@ -312,8 +405,13 @@ fn worker(commands: Receiver<Command>, updates: SyncSender<View>, context: egui:
             Ok(v) => v,
             Err(e) => {
                 let mut view = previous.clone();
-                view.connected = false;
-                view.message = format!("Connection interrupted: {e}");
+                view.connected = reachable;
+                message = if view.connected {
+                    format!("Request failed: {e}")
+                } else {
+                    format!("Connection interrupted: {e}")
+                };
+                view.message = message.clone();
                 view
             }
         };

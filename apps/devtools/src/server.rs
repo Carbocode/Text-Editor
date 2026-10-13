@@ -37,6 +37,7 @@ enum Write {
     Ingest(Batch, oneshot::Sender<Result<Ack>>),
     Samples(Vec<native_workspace_devtools_protocol::ResourceSample>),
     Control(Uuid, bool, oneshot::Sender<Result<()>>),
+    Pin(Uuid, bool, oneshot::Sender<Result<()>>),
     Import(
         Vec<u8>,
         Arc<OwnedSemaphorePermit>,
@@ -52,8 +53,22 @@ enum Archive {
 }
 enum Read {
     Sessions(oneshot::Sender<Result<Vec<SessionSummary>>>),
-    Page(Uuid, u64, usize, bool, oneshot::Sender<Result<Page>>),
-    Tail(Uuid, usize, bool, oneshot::Sender<Result<Page>>),
+    Session(Uuid, oneshot::Sender<Result<Option<SessionSummary>>>),
+    Page(
+        Uuid,
+        u64,
+        usize,
+        bool,
+        Option<u64>,
+        oneshot::Sender<Result<Page>>,
+    ),
+    Tail(
+        Uuid,
+        usize,
+        bool,
+        Option<u64>,
+        oneshot::Sender<Result<Page>>,
+    ),
     Resources(
         Uuid,
         u64,
@@ -102,6 +117,13 @@ impl Service {
                             if result.is_ok() { writer_resources.set_recording(id,value); let _ = notifications.send(serde_json::json!({"session":id,"recording":value,"control":true}).to_string()); }
                             let _ = reply.send(result);
                         }
+                        Write::Pin(id, pinned, reply) => {
+                            let result = store.set_pin(id, pinned);
+                            if result.is_ok() {
+                                let _ = notifications.send(serde_json::json!({"session":id,"reload":true}).to_string());
+                            }
+                            let _ = reply.send(result);
+                        }
                         Write::Import(bytes, _budget, reply) => {
                             let _ = reply.send(store.import(&bytes));
                         }
@@ -116,11 +138,15 @@ impl Service {
                         Read::Sessions(reply) => {
                             let _ = reply.send(reader.sessions());
                         }
-                        Read::Page(id, after, limit, internal, reply) => {
-                            let _ = reply.send(reader.filtered_page(id, after, limit, internal));
+                        Read::Session(id, reply) => {
+                            let _ = reply.send(reader.session(id));
                         }
-                        Read::Tail(id, limit, internal, reply) => {
-                            let _ = reply.send(reader.filtered_tail(id, limit, internal));
+                        Read::Page(id, after, limit, internal, operation, reply) => {
+                            let _ = reply
+                                .send(reader.query_page(id, after, limit, internal, operation));
+                        }
+                        Read::Tail(id, limit, internal, operation, reply) => {
+                            let _ = reply.send(reader.query_tail(id, limit, internal, operation));
                         }
                         Read::Resources(id, after, reply) => {
                             let _ = reply.send(reader.resource_samples(id, after));
@@ -172,11 +198,13 @@ impl Service {
             .route("/v1/sessions", get(sessions))
             .route("/v1/console", post(console_hello))
             .route("/v1/console/focus", post(console_focus))
+            .route("/v1/sessions/{id}", get(session))
             .route("/v1/sessions/{id}/resources", get(resources))
             .route("/v1/sessions/{id}/analysis", get(analysis))
             .route("/v1/sessions/{id}/events", get(page))
             .route("/v1/sessions/{id}/control", get(control).post(set_control))
             .route("/v1/sessions/{id}/export", get(export))
+            .route("/v1/sessions/{id}/pin", post(set_pin))
             .route(
                 "/v1/import",
                 post(import).layer(DefaultBodyLimit::max(MAX_ARCHIVE_BYTES as usize)),
@@ -229,6 +257,11 @@ async fn health(State(s): State<Service>) -> axum::Json<Health> {
     axum::Json(Health {
         version: VERSION,
         service: s.descriptor.service,
+        capabilities: vec![
+            native_workspace_devtools_protocol::OPERATION_QUERY.into(),
+            native_workspace_devtools_protocol::SESSION_PIN.into(),
+            native_workspace_devtools_protocol::SESSION_LOOKUP.into(),
+        ],
     })
 }
 async fn ingest(State(s): State<Service>, axum::Json(batch): axum::Json<Batch>) -> ApiResult<Ack> {
@@ -256,6 +289,14 @@ async fn sessions(State(s): State<Service>) -> ApiResult<Vec<SessionSummary>> {
     s.read.try_send(Read::Sessions(tx)).map_err(|_| busy())?;
     Ok(axum::Json(wait(rx).await?))
 }
+async fn session(State(s): State<Service>, Path(id): Path<Uuid>) -> ApiResult<SessionSummary> {
+    let (tx, rx) = oneshot::channel();
+    s.read.try_send(Read::Session(id, tx)).map_err(|_| busy())?;
+    let header = wait(rx)
+        .await?
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "session_not_found"))?;
+    Ok(axum::Json(header))
+}
 #[derive(Deserialize)]
 struct PageQuery {
     #[serde(default)]
@@ -263,6 +304,7 @@ struct PageQuery {
     limit: Option<usize>,
     tail: Option<bool>,
     internal: Option<bool>,
+    operation: Option<Counter>,
 }
 async fn page(
     State(s): State<Service>,
@@ -271,18 +313,48 @@ async fn page(
 ) -> ApiResult<Page> {
     let (tx, rx) = oneshot::channel();
     let job = if q.tail.unwrap_or(false) {
-        Read::Tail(id, q.limit.unwrap_or(500), q.internal.unwrap_or(true), tx)
+        Read::Tail(
+            id,
+            q.limit.unwrap_or(500),
+            q.internal.unwrap_or(true),
+            q.operation.map(|id| id.0),
+            tx,
+        )
     } else {
         Read::Page(
             id,
             q.after.unwrap_or_default().0,
             q.limit.unwrap_or(250),
             q.internal.unwrap_or(true),
+            q.operation.map(|id| id.0),
             tx,
         )
     };
     s.read.try_send(job).map_err(|_| busy())?;
     Ok(axum::Json(wait(rx).await?))
+}
+async fn set_pin(
+    State(s): State<Service>,
+    Path(id): Path<Uuid>,
+    axum::Json(pin): axum::Json<native_workspace_devtools_protocol::Pin>,
+) -> ApiResult<native_workspace_devtools_protocol::Pin> {
+    let (tx, rx) = oneshot::channel();
+    s.write
+        .try_send(Write::Pin(id, pin.pinned, tx))
+        .map_err(|_| busy())?;
+    match tokio::time::timeout(Duration::from_secs(10), rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            let (status, code) = match e.to_string().as_str() {
+                "session_not_found" => (StatusCode::NOT_FOUND, "session_not_found"),
+                "pin_limit_reached" => (StatusCode::CONFLICT, "pin_limit_reached"),
+                _ => (StatusCode::CONFLICT, "storage_rejected"),
+            };
+            return Err(error(status, code));
+        }
+        _ => return Err(busy()),
+    }
+    Ok(axum::Json(pin))
 }
 async fn control(State(s): State<Service>, Path(id): Path<Uuid>) -> ApiResult<Control> {
     let (tx, rx) = oneshot::channel();

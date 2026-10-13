@@ -120,6 +120,12 @@ impl Console {
     fn records(&self) -> &[Record] {
         self.view.page.as_ref().map_or(&[], |p| &p.records)
     }
+    fn supports(&self, capability: &str) -> bool {
+        self.view
+            .capabilities
+            .iter()
+            .any(|value| value == capability)
+    }
     fn state(&self, name: &str) -> Option<u64> {
         self.view
             .analysis
@@ -302,7 +308,9 @@ impl Console {
                     if response.clicked() {
                         self.panel = panel;
                         self.filter.clear();
-                        self.operation = None;
+                        if self.operation.is_some() {
+                            self.send(Command::Operation(None));
+                        }
                     }
                 }
                 ui.add_space(24.0);
@@ -322,6 +330,18 @@ impl Console {
                         "Connecting"
                     });
                 });
+                if self.view.connected
+                    && (!self.supports(native_workspace_devtools_protocol::OPERATION_QUERY)
+                        || !self.supports(native_workspace_devtools_protocol::SESSION_PIN))
+                {
+                    ui.colored_label(theme::AMBER, "Collector update required");
+                    ui.label(
+                        theme::muted(
+                            "Restart the diagnostic service to enable operation lookup and pins.",
+                        )
+                        .size(12.0),
+                    );
+                }
                 if let Some(session) = self.session() {
                     ui.label(
                         theme::muted(format!("{} recorded events", session.records.0)).size(12.0),
@@ -611,10 +631,23 @@ impl Console {
             if let Some(id) = self.operation {
                 theme::badge(ui, &format!("Operation {id}"), theme::ACCENT);
                 if ui.small_button("Clear filter").clicked() {
-                    self.operation = None;
+                    self.send(Command::Operation(None));
+                }
+            }
+            if !self.view.follow {
+                if ui.small_button("First page").clicked() {
+                    self.send(Command::Page(0));
+                }
+                if let Some(next) = self.view.page.as_ref().and_then(|page| page.next)
+                    && ui.small_button("Next page").clicked()
+                {
+                    self.send(Command::Page(next.0));
                 }
             }
         });
+        if self.operation.is_some() {
+            ui.label(theme::muted("Operation retrieved from the full recording. Use Next page if more records are available.").size(11.0));
+        }
         ui.add_space(12.0);
     }
     fn events(&mut self, ui: &mut egui::Ui, filesystem: bool) {
@@ -712,16 +745,6 @@ impl Console {
                 ))
                 .size(12.0),
             );
-            if !self.view.follow {
-                if ui.button("First page").clicked() {
-                    self.send(Command::Page(0));
-                }
-                if let Some(next) = self.view.page.as_ref().and_then(|page| page.next)
-                    && ui.button("Next page").clicked()
-                {
-                    self.send(Command::Page(next.0));
-                }
-            }
         });
     }
     fn timeline(&mut self, ui: &mut egui::Ui) {
@@ -856,6 +879,21 @@ impl Console {
                             self.send(Command::Select(session.session.id));
                             self.panel = Panel::Overview;
                         }
+                        if ui
+                            .add_enabled(
+                                self.supports(native_workspace_devtools_protocol::SESSION_PIN),
+                                egui::Button::new(if session.pinned { "Unpin" } else { "Pin" }),
+                            )
+                            .on_hover_text(
+                                "Keep this recording at the top of the list (up to 64 pins)",
+                            )
+                            .clicked()
+                        {
+                            self.send(Command::Pin(session.session.id, !session.pinned));
+                        }
+                        if session.pinned {
+                            theme::badge(ui, "Pinned", theme::ACCENT);
+                        }
                         let state = match session.status.as_str() {
                             "recording" => "Recording",
                             "completed" => "Completed",
@@ -921,8 +959,11 @@ impl Console {
                     });
                 }
                 ui.add_space(16.0);
-                if record.operation.0 != 0 && ui.button("Show this operation").clicked() {
-                    self.operation = Some(record.operation.0);
+                if record.operation.0 != 0 && ui.add_enabled(self.supports(native_workspace_devtools_protocol::OPERATION_QUERY), egui::Button::new("Show this operation"))
+                    .on_hover_text("Retrieve this operation from the full recording. Requires an updated collector.").clicked() {
+                    self.send(Command::Operation(Some(record.operation.0)));
+                    self.filter.clear();
+                    self.errors_only = false;
                     self.panel = Panel::Timeline;
                 }
                 ui.add_space(16.0);
@@ -1005,6 +1046,10 @@ impl eframe::App for Console {
                 self.detail = None;
                 self.operation = None;
             }
+            if view.operation != self.view.operation {
+                self.timeline = timeline::Timeline::default();
+            }
+            self.operation = view.operation;
             self.view = view;
         }
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));

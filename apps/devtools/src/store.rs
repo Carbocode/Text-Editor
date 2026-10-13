@@ -137,7 +137,7 @@ impl Store {
         })
     }
     pub fn sessions(&self) -> Result<Vec<SessionSummary>> {
-        let mut stmt=self.connection.prepare("SELECT metadata,status,committed,records,dropped,recording FROM sessions ORDER BY CAST(regexp_extract(metadata, '\"started_unix_ms\":\"([0-9]+)\"', 1) AS UBIGINT) DESC, id LIMIT 200")?;
+        let mut stmt=self.connection.prepare("SELECT metadata,status,committed,records,dropped,recording,EXISTS(SELECT 1 FROM session_pins WHERE session=sessions.id) AS pinned FROM sessions ORDER BY pinned DESC, CAST(regexp_extract(metadata, '\"started_unix_ms\":\"([0-9]+)\"', 1) AS UBIGINT) DESC, id LIMIT 200")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -146,11 +146,12 @@ impl Store {
                 r.get::<_, u64>(3)?,
                 r.get::<_, u64>(4)?,
                 r.get::<_, bool>(5)?,
+                r.get::<_, bool>(6)?,
             ))
         })?;
         let mut sessions: Vec<SessionSummary> = rows
             .map(|r| {
-                let (metadata, status, committed, records, dropped, recording) = r?;
+                let (metadata, status, committed, records, dropped, recording, pinned) = r?;
                 Ok(SessionSummary {
                     session: serde_json::from_str(&metadata)?,
                     status,
@@ -158,11 +159,31 @@ impl Store {
                     records: Counter(records),
                     dropped: Counter(dropped),
                     recording,
+                    pinned,
                 })
             })
             .collect::<Result<_>>()?;
-        sessions.sort_by_key(|session| std::cmp::Reverse(session.session.started_unix_ms));
+        sessions.sort_by_key(|session| {
+            std::cmp::Reverse((session.pinned, session.session.started_unix_ms))
+        });
         Ok(sessions)
+    }
+    pub fn session(&self, id: Uuid) -> Result<Option<SessionSummary>> {
+        let row = self.connection.query_row("SELECT metadata,status,committed,records,dropped,recording,EXISTS(SELECT 1 FROM session_pins WHERE session=sessions.id) FROM sessions WHERE id=?", params![id.to_string()], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,u64>(2)?,r.get::<_,u64>(3)?,r.get::<_,u64>(4)?,r.get::<_,bool>(5)?,r.get::<_,bool>(6)?))).optional()?;
+        row.map(
+            |(metadata, status, committed, records, dropped, recording, pinned)| {
+                Ok(SessionSummary {
+                    session: serde_json::from_str(&metadata)?,
+                    status,
+                    committed_sequence: Counter(committed),
+                    records: Counter(records),
+                    dropped: Counter(dropped),
+                    recording,
+                    pinned,
+                })
+            },
+        )
+        .transpose()
     }
     pub fn page(&self, id: Uuid, after: u64, limit: usize) -> Result<Page> {
         self.filtered_page(id, after, limit, true)
@@ -174,10 +195,28 @@ impl Store {
         limit: usize,
         internal: bool,
     ) -> Result<Page> {
+        self.query_page(id, after, limit, internal, None)
+    }
+    /// Filter before pagination so traces are not restricted to the live page.
+    pub fn query_page(
+        &self,
+        id: Uuid,
+        after: u64,
+        limit: usize,
+        internal: bool,
+        operation: Option<u64>,
+    ) -> Result<Page> {
         let limit = limit.clamp(1, MAX_PAGE);
-        let mut stmt=self.connection.prepare("SELECT sequence,time_ns,component,lane,name,kind,outcome,operation,span,parent_span,generation,revision,value FROM events WHERE session=? AND sequence>? AND (? OR (name NOT IN ('command.search_poll','command.workspace_poll') AND name NOT LIKE 'state.%')) ORDER BY sequence LIMIT ?")?;
+        let mut stmt=self.connection.prepare("SELECT sequence,time_ns,component,lane,name,kind,outcome,operation,span,parent_span,generation,revision,value FROM events WHERE session=? AND sequence>? AND (?::UBIGINT IS NULL OR operation=?::UBIGINT) AND (? OR (name NOT IN ('command.search_poll','command.workspace_poll') AND name NOT LIKE 'state.%')) ORDER BY sequence LIMIT ?")?;
         let rows = stmt.query_map(
-            params![id.to_string(), after, internal, (limit + 1) as u64],
+            params![
+                id.to_string(),
+                after,
+                operation,
+                operation,
+                internal,
+                (limit + 1) as u64
+            ],
             |r| {
                 Ok((
                     r.get::<_, u64>(0)?,
@@ -242,8 +281,23 @@ impl Store {
         self.filtered_tail(id, limit, true)
     }
     pub fn filtered_tail(&self, id: Uuid, limit: usize, internal: bool) -> Result<Page> {
-        let first: Option<u64> = self.connection.query_row("SELECT min(sequence) FROM (SELECT sequence FROM events WHERE session=? AND (? OR (name NOT IN ('command.search_poll','command.workspace_poll') AND name NOT LIKE 'state.%')) ORDER BY sequence DESC LIMIT ?)", params![id.to_string(),internal,limit.clamp(1,MAX_PAGE) as u64], |r|r.get(0))?;
-        self.filtered_page(id, first.unwrap_or(1).saturating_sub(1), limit, internal)
+        self.query_tail(id, limit, internal, None)
+    }
+    pub fn query_tail(
+        &self,
+        id: Uuid,
+        limit: usize,
+        internal: bool,
+        operation: Option<u64>,
+    ) -> Result<Page> {
+        let first: Option<u64> = self.connection.query_row("SELECT min(sequence) FROM (SELECT sequence FROM events WHERE session=? AND (?::UBIGINT IS NULL OR operation=?::UBIGINT) AND (? OR (name NOT IN ('command.search_poll','command.workspace_poll') AND name NOT LIKE 'state.%')) ORDER BY sequence DESC LIMIT ?)", params![id.to_string(),operation,operation,internal,limit.clamp(1,MAX_PAGE) as u64], |r|r.get(0))?;
+        self.query_page(
+            id,
+            first.unwrap_or(1).saturating_sub(1),
+            limit,
+            internal,
+            operation,
+        )
     }
     pub fn resource_samples(
         &self,
@@ -357,6 +411,36 @@ impl Store {
             params![id.to_string()],
             |r| r.get(0),
         )?)
+    }
+    pub fn set_pin(&mut self, id: Uuid, pinned: bool) -> Result<()> {
+        let tx = self.connection.transaction()?;
+        let id = id.to_string();
+        let exists: u64 = tx.query_row(
+            "SELECT count(*) FROM sessions WHERE id=?",
+            params![id],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            return Err("session_not_found".into());
+        }
+        if pinned {
+            let existing: u64 = tx.query_row(
+                "SELECT count(*) FROM session_pins WHERE session=?",
+                params![id],
+                |r| r.get(0),
+            )?;
+            let count: u64 = tx.query_row("SELECT count(*) FROM session_pins", [], |r| r.get(0))?;
+            if existing == 0 {
+                if count >= 64 {
+                    return Err("pin_limit_reached".into());
+                }
+                tx.execute("INSERT INTO session_pins VALUES (?)", params![id])?;
+            }
+        } else {
+            tx.execute("DELETE FROM session_pins WHERE session=?", params![id])?;
+        }
+        tx.commit()?;
+        Ok(())
     }
     pub fn set_control(&self, id: Uuid, recording: bool) -> Result<()> {
         if self.connection.execute(

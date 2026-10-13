@@ -206,3 +206,169 @@ fn resources_analysis_and_offline_namespace_round_trip() {
         "offline resources must not include the current collector"
     );
 }
+
+#[test]
+fn operation_query_recovers_span_across_unrelated_pages_and_preserves_cursor_scope() {
+    use native_workspace_devtools_protocol::{Kind, MAX_PAGE};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("analytics.duckdb")).unwrap();
+    let mut batch = synthetic();
+    batch.session.id = Uuid::new_v4();
+    let operation = (1_u64 << 63) + 29;
+    let mut records = Vec::new();
+    for sequence in 1..=1203 {
+        let mut record = batch.records[0].clone();
+        record.sequence = Counter(sequence);
+        record.monotonic_ns = Counter(sequence * 1000);
+        record.operation = Counter(if sequence == 1 || sequence == 1203 {
+            operation
+        } else {
+            17
+        });
+        record.span = Counter(if sequence == 1 || sequence == 1203 {
+            7
+        } else {
+            0
+        });
+        record.name = if sequence == 1 || sequence == 1203 {
+            "search.execute"
+        } else {
+            "document.changed"
+        }
+        .into();
+        record.kind = if sequence == 1 {
+            Kind::SpanStart
+        } else if sequence == 1203 {
+            Kind::SpanEnd
+        } else {
+            Kind::Event
+        };
+        records.push(record);
+    }
+    for chunk in records.chunks(256) {
+        batch.id = Uuid::new_v4();
+        batch.records = chunk.to_vec();
+        store.ingest(&batch).unwrap();
+    }
+    let id = batch.session.id;
+    assert!(
+        !store
+            .tail(id, MAX_PAGE)
+            .unwrap()
+            .records
+            .iter()
+            .any(|r| r.sequence == Counter(1))
+    );
+    let trace = store
+        .query_page(id, 0, MAX_PAGE, false, Some(operation))
+        .unwrap();
+    assert_eq!(
+        trace
+            .records
+            .iter()
+            .map(|r| r.sequence.0)
+            .collect::<Vec<_>>(),
+        [1, 1203]
+    );
+    assert_eq!(trace.records[0].kind, Kind::SpanStart);
+    assert_eq!(trace.records[1].kind, Kind::SpanEnd);
+    assert_eq!(trace.records[0].span, trace.records[1].span);
+    assert!(trace.next.is_none());
+    let first = store.query_page(id, 0, 1, false, Some(operation)).unwrap();
+    assert_eq!(first.next, Some(Counter(1)));
+    let next = store
+        .query_page(id, first.next.unwrap().0, 1, false, Some(operation))
+        .unwrap();
+    assert_eq!(next.records[0].sequence, Counter(1203));
+    assert!(next.next.is_none());
+    let tail = store.query_tail(id, 1, false, Some(operation)).unwrap();
+    assert_eq!(tail.records[0].sequence, Counter(1203));
+    assert!(
+        store
+            .query_page(id, 0, MAX_PAGE, true, Some(operation + 1))
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    // Filtering cannot leak another session's operation with the same numeric ID.
+    assert!(
+        store
+            .query_page(Uuid::new_v4(), 0, MAX_PAGE, true, Some(operation))
+            .unwrap()
+            .records
+            .is_empty()
+    );
+    let first = store.query_page(id, 0, MAX_PAGE, false, Some(17)).unwrap();
+    assert_eq!(first.records.len(), MAX_PAGE);
+    assert_eq!(first.next, Some(Counter(501)));
+    assert!(first.records.iter().all(|r| r.operation == Counter(17)));
+}
+
+#[test]
+fn pins_persist_and_stay_visible_beyond_the_session_header_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("analytics.duckdb");
+    let mut store = Store::open(&path).unwrap();
+    let mut ids = Vec::new();
+    for index in 0..205 {
+        let mut batch = synthetic();
+        batch.id = Uuid::new_v4();
+        batch.session.id = Uuid::new_v4();
+        batch.session.started_unix_ms = Counter(1000 + index);
+        store.ingest(&batch).unwrap();
+        ids.push(batch.session.id);
+    }
+    for id in &ids[..64] {
+        store.set_pin(*id, true).unwrap();
+    }
+    store.set_pin(ids[0], true).unwrap(); // Idempotent even at the limit.
+    assert_eq!(
+        store.set_pin(ids[64], true).unwrap_err().to_string(),
+        "pin_limit_reached"
+    );
+    assert_eq!(
+        store.set_pin(Uuid::new_v4(), true).unwrap_err().to_string(),
+        "session_not_found"
+    );
+    let sessions = store.sessions().unwrap();
+    assert_eq!(sessions.len(), 200);
+    assert_eq!(sessions.iter().filter(|session| session.pinned).count(), 64);
+    assert_eq!(sessions[0].session.id, ids[63]);
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session.id == ids[0] && session.pinned)
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.session.id == ids[204] && !session.pinned)
+    );
+    let bytes = store.export(ids[0]).unwrap();
+    let imported = store.import(&bytes).unwrap();
+    assert!(!store.session(imported).unwrap().unwrap().pinned);
+    assert!(store.session(Uuid::new_v4()).unwrap().is_none());
+    drop(store);
+    let mut reopened = Store::open(&path).unwrap();
+    assert!(
+        reopened
+            .sessions()
+            .unwrap()
+            .iter()
+            .find(|session| session.session.id == ids[0])
+            .unwrap()
+            .pinned
+    );
+    reopened.set_pin(ids[0], false).unwrap();
+    reopened.set_pin(ids[0], false).unwrap();
+    reopened.set_pin(ids[64], true).unwrap();
+    assert!(
+        reopened
+            .sessions()
+            .unwrap()
+            .iter()
+            .find(|session| session.session.id == ids[64])
+            .unwrap()
+            .pinned
+    );
+}

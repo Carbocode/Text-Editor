@@ -102,9 +102,22 @@ on HTTP and WebSocket requests.
   or minimized views stop automatic query updates without stopping collection.
 - Console holds up to 200 session headers and one page of at most 500 records;
   event rows are virtualized and timeline bars are clipped to the visible time
-  window. Filters apply to the current page. Tail queries remove poll/state noise
+  window. Text/outcome filters apply to the current page. Operation filtering is
+  applied by the database before pagination, so Show this operation retrieves
+  related events from the entire recording, including across unrelated pages. Tail queries remove poll/state noise
   before applying the page limit; live selection follows the newest real editor
   session. Demo/offline sessions require explicit selection.
+- Up to 64 recordings can be pinned persistently and appear first, including
+  recordings older than the 200-header recent list. Live selection still chooses
+  the newest real session, independently of pin order. A selected/imported session
+  missing from the recent list is loaded by its UUID without exceeding the
+  console's 200-header budget. Pins are local preferences and are not exported.
+- Collector health advertises supported API capabilities. An older running
+  collector can still serve existing views; the console explicitly disables
+  unsupported operation lookup/pinning and asks for a diagnostic service restart.
+  Additive header fields decode with defaults and do not change protocol/archive
+  version 1. Request failures keep the cached view and distinguish a reachable
+  collector from a disconnected one.
 - Timeline: five stable logical actor lanes (application, search worker,
   filesystem, frontend, collection), shared time axis, internal overlap tracks,
   fit, zoom, pan, interval measurement and click/hover details. Missing span ends
@@ -140,9 +153,9 @@ links and frame hooks remain to be added. FFI wait/hold spans,
 minimap/highlighting and complete state checkpoints/deltas are not yet
 instrumented. Scalar state and aggregated watcher/reconciliation facts are live. The synthetic watcher is labelled as synthetic capability.
 
-Marker/note editing, pinned sessions, automatic retention/disk quotas, time-range
+Marker/note editing, automatic retention/disk quotas, time-range
 export, artifact export, JSONL/CSV/Perfetto export, advanced server-side filters/rollups,
-trace lookup across pages, comparison panels, query cancellation and packaging
+comparison panels, query cancellation and packaging
 installers remain open. Disk errors currently reject ingestion and cause bounded
 producer retry/loss; they do not alter editor commands. Editor/collector/console RSS and CPU are available; separate per-hook producer
 cost and controlled before/after p95 overhead dashboards remain open.
@@ -176,6 +189,10 @@ collision rollback, restart classification, pagination, Parquet correlations,
 repeated import namespaces, unsafe ZIP paths/checksums and local authentication. Additional tests cover hard
 collector termination/recovery, filtered live tails, resource archive round trips,
 offline isolation and stable actor lanes with overlapping/incomplete operations.
+Operation queries are tested with a span separated by 1,200 unrelated events,
+64-bit identifiers above 2^63, filtered pagination/tails and session isolation.
+Pin tests cover restart persistence, idempotency, the 64-pin budget, visibility
+beyond 200 sessions, archive isolation and authenticated APIs.
 
 macOS: the packaged Swift application and all native smoke checks passed. A
 normal isolated launch had no telemetry until the Developer Tools shortcut was

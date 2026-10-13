@@ -8,6 +8,9 @@ use std::{
 pub use uuid::Uuid;
 
 pub const VERSION: u32 = 1;
+pub const OPERATION_QUERY: &str = "events.operation";
+pub const SESSION_PIN: &str = "sessions.pin";
+pub const SESSION_LOOKUP: &str = "sessions.lookup";
 pub const MAX_RECORDS: usize = 256;
 pub const MAX_BATCH_BYTES: usize = 256 * 1024;
 pub const MAX_PAGE: usize = 500;
@@ -166,11 +169,17 @@ pub struct SessionSummary {
     pub records: Counter,
     pub dropped: Counter,
     pub recording: bool,
+    #[serde(default)]
+    pub pinned: bool,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page {
     pub records: Vec<Record>,
     pub next: Option<Counter>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Pin {
+    pub pinned: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Control {
@@ -180,6 +189,8 @@ pub struct Control {
 pub struct Health {
     pub version: u32,
     pub service: Uuid,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Descriptor {
@@ -494,4 +505,32 @@ pub struct Analysis {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConsoleHello {
     pub pid: u32,
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_headers_decode_without_claiming_new_capabilities_or_pins() {
+        let health: Health = serde_json::from_value(serde_json::json!({
+            "version": VERSION, "service": Uuid::from_u128(1)
+        }))
+        .unwrap();
+        assert!(health.capabilities.is_empty());
+        let summary = SessionSummary {
+            session: synthetic().session,
+            status: "recording".into(),
+            committed_sequence: Counter(14),
+            records: Counter(14),
+            dropped: Counter(0),
+            recording: true,
+            pinned: true,
+        };
+        let mut value = serde_json::to_value(summary).unwrap();
+        value.as_object_mut().unwrap().remove("pinned");
+        let legacy: SessionSummary = serde_json::from_value(value).unwrap();
+        assert!(!legacy.pinned);
+        assert_eq!(legacy.records.0, 14);
+    }
 }
