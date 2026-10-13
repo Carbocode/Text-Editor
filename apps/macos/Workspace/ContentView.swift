@@ -7,6 +7,11 @@ struct ContentView: View {
     @State private var choosingWorkspace = false
     @State private var showingHome = true
     @State private var resolvingExternalChange = false
+    @State private var renamePath: String?
+    @State private var renameName = ""
+    @State private var draggedPath: String?
+    @State private var dropDirectory: String?
+    @State private var hoverGeneration = UUID()
     @State private var creatingEntry = false
     @State private var creatingDirectory = false
     @State private var newEntryPath = ""
@@ -178,7 +183,7 @@ struct ContentView: View {
         switch row.kind {
         case .directory(let path):
             Button {
-                toggleDirectory(path)
+                if renamePath != path { toggleDirectory(path) }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty
@@ -187,22 +192,29 @@ struct ContentView: View {
                                                       expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty) {
                         Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
                     }
-                    Text(path.split(separator: "/").last.map(String.init) ?? path)
+                    entryName(path)
                 }
                 .padding(.leading, CGFloat(row.depth) * 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onDrag { dragProvider(path) } preview: { dragPreview(path, directory: true) }
+            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(path))
+            .overlay { dropOutline(path) }
+            .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
+            .contextMenu {
+                Button("Rename") { beginRename(path) }
+            }
         case .file(let group):
             Button {
-                store.openSearchFile(group.id)
+                if renamePath != group.id { store.openSearchFile(group.id) }
             } label: {
                 HStack(spacing: 8) {
                     if let icon = WorkspaceIcons.image(for: group.id) {
                         Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
                     }
-                    Text(group.id.split(separator: "/").last.map(String.init) ?? group.id)
+                    entryName(group.id)
                     Spacer(minLength: 0)
                     if store.externalChangeIDs.contains(group.id) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
@@ -214,6 +226,12 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onDrag { dragProvider(group.id) } preview: { dragPreview(group.id, directory: false) }
+            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(parentDirectory(group.id)))
+            .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
+            .contextMenu {
+                Button("Rename") { beginRename(group.id) }
+            }
             .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
                 ? Color.accentColor.opacity(0.12) : Color.clear)
         case .match(let match):
@@ -237,6 +255,95 @@ struct ContentView: View {
         }
     }
 
+    private let sidebarDragType = UTType(exportedAs: "org.nativeworkspace.sidebar-entry")
+
+    private func parentDirectory(_ path: String) -> String {
+        path.split(separator: "/").dropLast().joined(separator: "/")
+    }
+
+    @ViewBuilder private func entryName(_ path: String) -> some View {
+        if renamePath == path {
+            SidebarInlineRename(name: $renameName, directory: store.directories.contains(path),
+                                submit: { commitRename() }, cancel: { renamePath = nil })
+                .frame(height: 22)
+        } else {
+            Text(path.split(separator: "/").last.map(String.init) ?? path)
+        }
+    }
+
+    private func beginRename(_ path: String) {
+        renamePath = path
+        renameName = path.split(separator: "/").last.map(String.init) ?? path
+    }
+
+    private func commitRename() {
+        guard let path = renamePath else { return }
+        store.renameEntry(path, newName: renameName)
+        if store.errorMessage == nil { renamePath = nil }
+    }
+
+    private func dragProvider(_ path: String) -> NSItemProvider {
+        renamePath = nil
+        draggedPath = path
+        dropDirectory = nil
+        hoverGeneration = UUID()
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: sidebarDragType.identifier, visibility: .ownProcess) {
+            completion in completion(Data(path.utf8), nil); return nil
+        }
+        return provider
+    }
+
+    private func dragPreview(_ path: String, directory: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: directory ? "folder.fill" : "doc.fill")
+            Text(path.split(separator: "/").last.map(String.init) ?? path)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .shadow(radius: 5, y: 3)
+    }
+
+    private func canDrop(_ directory: String) -> Bool {
+        guard let source = draggedPath else { return false }
+        let name = source.split(separator: "/").last.map(String.init) ?? source
+        let target = directory.isEmpty ? name : directory + "/" + name
+        return target != source && !target.hasPrefix(source + "/")
+            && !store.documents.contains(where: { $0.id == target || $0.id.hasPrefix(target + "/") })
+            && !store.directories.contains(target)
+    }
+
+    @ViewBuilder private func dropOutline(_ directory: String) -> some View {
+        if dropDirectory == directory {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(canDrop(directory) ? Color.accentColor : Color.red, lineWidth: 2)
+                .allowsHitTesting(false)
+        }
+    }
+
+    private func entryDropDelegate(_ directory: String) -> SidebarEntryDropDelegate {
+        SidebarEntryDropDelegate(type: sidebarDragType, canDrop: { canDrop(directory) }, entered: {
+            dropDirectory = directory
+            let generation = UUID()
+            hoverGeneration = generation
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+                guard hoverGeneration == generation, dropDirectory == directory,
+                      canDrop(directory), !directory.isEmpty,
+                      !expandedDirectories.contains(directory) else { return }
+                toggleDirectory(directory)
+            }
+        }, exited: {
+            if dropDirectory == directory { dropDirectory = nil; hoverGeneration = UUID() }
+        }, dropped: {
+            guard canDrop(directory), let source = draggedPath else { return false }
+            store.moveEntry(source, directory: directory)
+            dropDirectory = nil
+            draggedPath = nil
+            hoverGeneration = UUID()
+            return store.errorMessage == nil
+        })
+    }
+
     var body: some View {
         ZStack {
         if store.workspaceName != nil {
@@ -249,7 +356,13 @@ struct ContentView: View {
                         sidebarRow(row)
                     }
                     if sidebarTab == 0 {
-                        Color.clear.frame(height: 52).listRowSeparator(.hidden)
+                        Text(dropDirectory == "" ? "Move to \(store.workspaceName ?? "workspace")" : "")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 52)
+                            .contentShape(Rectangle())
+                            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(""))
+                            .overlay { dropOutline("") }
+                            .listRowSeparator(.hidden)
                     }
                 }
                 .onReceive(store.$workspaceRoot) { root in
@@ -524,4 +637,20 @@ private struct WindowTitleView: NSViewRepresentable {
             window.title = title
         }
     }
+}
+
+private struct SidebarEntryDropDelegate: DropDelegate {
+    let type: UTType
+    let canDrop: () -> Bool
+    let entered: () -> Void
+    let exited: () -> Void
+    let dropped: () -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool { info.hasItemsConforming(to: [type]) }
+    func dropEntered(info: DropInfo) { entered() }
+    func dropExited(info: DropInfo) { exited() }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: canDrop() ? .move : .forbidden)
+    }
+    func performDrop(info: DropInfo) -> Bool { dropped() }
 }

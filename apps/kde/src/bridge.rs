@@ -56,6 +56,10 @@ pub mod qobject {
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
+        fn move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString);
+        #[qinvokable]
+        fn rename_entry(self: Pin<&mut Self>, path: &QString, new_name: &QString);
+        #[qinvokable]
         fn create_entry(self: Pin<&mut Self>, path: &QString, directory: bool);
         #[qinvokable]
         fn refresh_workspace(self: Pin<&mut Self>);
@@ -337,6 +341,26 @@ impl qobject::AppController {
             .map(|value| PathBuf::from(value.to_string()))
             .unwrap_or_else(|| PathBuf::from(input.to_string()));
         self.dispatch(AppCommand::OpenWorkspace(path));
+    }
+
+    pub fn move_entry(mut self: Pin<&mut Self>, path: &QString, directory: &QString) {
+        match DocumentId::parse(path.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::MoveEntry {
+                id,
+                directory: directory.to_string(),
+            }),
+            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
+        }
+    }
+
+    pub fn rename_entry(mut self: Pin<&mut Self>, path: &QString, new_name: &QString) {
+        match DocumentId::parse(path.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::RenameEntry {
+                id,
+                new_name: new_name.to_string(),
+            }),
+            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
+        }
     }
 
     pub fn create_entry(mut self: Pin<&mut Self>, path: &QString, directory: bool) {

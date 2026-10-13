@@ -10,6 +10,7 @@ grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 notify = "8.2"
 regex = "1"
+libc = "0.2"
 thiserror = "2"
 
 [dev-dependencies]

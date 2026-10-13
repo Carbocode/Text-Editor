@@ -1,5 +1,6 @@
 mod editor_chrome;
 mod material_icons;
+mod sidebar_interactions;
 mod syntax;
 
 use adw::prelude::*;
@@ -47,6 +48,7 @@ struct Ui {
 
 #[derive(Clone)]
 struct SidebarView {
+    interactions: Rc<sidebar_interactions::Interactions>,
     files: gtk::ListView,
     file_model: gtk::StringList,
     file_selection: gtk::SingleSelection,
@@ -759,11 +761,13 @@ fn build_sidebar(
     let file_selection = gtk::SingleSelection::new(Some(file_model.clone()));
     file_selection.set_autoselect(false);
     file_selection.set_can_unselect(true);
+    let interactions = Rc::new(sidebar_interactions::Interactions::default());
     let factory = gtk::SignalListItemFactory::new();
     {
         let visible_entries = visible_entries.clone();
         let collapsed_directories = collapsed_directories.clone();
         let file_query = file_query.clone();
+        let interactions = interactions.clone();
         factory.connect_bind(move |_, item| {
             let item = item
                 .downcast_ref::<gtk::ListItem>()
@@ -772,7 +776,15 @@ fn build_sidebar(
                 let collapsed = matches!(&entry.row, SidebarRow::Directory(path)
                     if !text_mode && file_query.borrow().trim().is_empty()
                         && collapsed_directories.borrow().contains(path));
-                item.set_child(Some(&sidebar_entry_widget(entry, collapsed)));
+                let widget = sidebar_entry_widget(entry, collapsed);
+                if !matches!(entry.row, SidebarRow::Match(_)) {
+                    interactions.attach(
+                        &widget,
+                        &entry.path,
+                        matches!(entry.row, SidebarRow::Directory(_)),
+                    );
+                }
+                item.set_child(Some(&widget));
             }
         });
     }
@@ -796,7 +808,14 @@ fn build_sidebar(
     let overlay = gtk::Overlay::new();
     overlay.set_child(Some(&scroll));
     overlay.add_overlay(&files_placeholder);
+    let root_drop = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    root_drop.set_halign(gtk::Align::Fill);
+    root_drop.set_valign(gtk::Align::End);
+    root_drop.append(&gtk::Label::new(Some("Move to workspace root")));
+    interactions.attach_root(&root_drop);
+    overlay.add_overlay(&root_drop);
     SidebarView {
+        interactions,
         files,
         file_model,
         file_selection,
@@ -1126,6 +1145,99 @@ fn build_window(app: &adw::Application) {
                 let snapshot = ui.snapshot.borrow().clone();
                 ui.render(snapshot);
             });
+    }
+    for sidebar in &ui.sidebars {
+        let rename_ui = ui.clone();
+        let move_ui = ui.clone();
+        let validate_ui = ui.clone();
+        let expand_ui = ui.clone();
+        sidebar
+            .interactions
+            .callbacks
+            .replace(Some(sidebar_interactions::Callbacks {
+                rename: Rc::new(move |path, name| {
+                    let Ok(id) = DocumentId::parse(path) else {
+                        return false;
+                    };
+                    let result = rename_ui
+                        .core
+                        .borrow_mut()
+                        .dispatch(AppCommand::RenameEntry { id, new_name: name });
+                    match result {
+                        Ok(snapshot) => {
+                            rename_ui.render(snapshot);
+                            true
+                        }
+                        Err(error) => {
+                            rename_ui.status.set_label(&error.to_string());
+                            false
+                        }
+                    }
+                }),
+                move_entry: Rc::new(move |path, directory| {
+                    let Ok(id) = DocumentId::parse(path) else {
+                        return false;
+                    };
+                    let result = move_ui
+                        .core
+                        .borrow_mut()
+                        .dispatch(AppCommand::MoveEntry { id, directory });
+                    match result {
+                        Ok(snapshot) => {
+                            move_ui.render(snapshot);
+                            true
+                        }
+                        Err(error) => {
+                            move_ui.status.set_label(&error.to_string());
+                            false
+                        }
+                    }
+                }),
+                can_move: Rc::new(move |source, directory| {
+                    let name = source.rsplit('/').next().unwrap_or(source);
+                    let target = if directory.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{directory}/{name}")
+                    };
+                    let snapshot = validate_ui.snapshot.borrow();
+                    target != source
+                        && !target.starts_with(&format!("{source}/"))
+                        && !snapshot.directories.contains(&target)
+                        && !snapshot.documents.iter().any(|doc| {
+                            doc.id.as_str() == target
+                                || doc.id.as_str().starts_with(&format!("{target}/"))
+                        })
+                }),
+                expand: Rc::new(move |path| {
+                    if expand_ui.collapsed_directories.borrow().contains(path) {
+                        expand_ui.toggle_directory(path);
+                    }
+                }),
+            }));
+        let interactions = sidebar.interactions.clone();
+        let rows = sidebar.sidebar_rows.clone();
+        let selection = sidebar.file_selection.clone();
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::F2 {
+                let path = rows
+                    .borrow()
+                    .get(selection.selected() as usize)
+                    .map(|row| match row {
+                        SidebarRow::Directory(path) => path.clone(),
+                        SidebarRow::File(id) => id.as_str().to_owned(),
+                        SidebarRow::Match(result) => result.id.as_str().to_owned(),
+                    });
+                if let Some(path) = path {
+                    interactions.begin_rename(&path);
+                }
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        sidebar.files.add_controller(keys);
     }
     for (button, directory) in [(new_file, false), (new_folder, true)] {
         let ui = ui.clone();
@@ -1687,6 +1799,54 @@ fn build_window(app: &adw::Application) {
             ui.buffer.set_text("");
             assert!(ui.editor.line_yrange(&ui.buffer.start_iter()).1 > 0);
             println!("GTK editor full-width/active-line smoke test passed");
+            ui.buffer.set_text("unsaved rename");
+            // Let the virtualized row bind before activating its inline editor.
+            for _ in 0..100 {
+                glib::MainContext::default().iteration(false);
+            }
+            ui.sidebars[0].interactions.begin_rename("notes");
+            let entry = ui.sidebars[0]
+                .interactions
+                .editor("notes")
+                .expect("inline rename entry");
+            assert!(entry.has_focus());
+            entry.set_text("renamed");
+            entry.emit_activate();
+            let active = ui.snapshot.borrow().active_document.clone().unwrap();
+            assert_eq!(active.id.as_str(), "renamed/todo.md");
+            assert_eq!(active.content, "unsaved rename");
+            assert!(active.dirty);
+            ui.dispatch(AppCommand::SaveDocument(active.id));
+            assert_eq!(
+                std::fs::read_to_string(workspace_path.join("renamed/todo.md")).unwrap(),
+                "unsaved rename"
+            );
+            println!("GTK rename/buffer smoke test passed");
+            ui.create_entry("destination", true);
+            ui.buffer.set_text("unsaved move");
+            ui.sidebars[0].interactions.start_drag("renamed");
+            assert!(ui.sidebars[0].interactions.hover("destination", true));
+            assert!(
+                ui.sidebars[0]
+                    .interactions
+                    .drop_entry("renamed", "destination")
+            );
+            let active = ui.snapshot.borrow().active_document.clone().unwrap();
+            assert_eq!(active.id.as_str(), "destination/renamed/todo.md");
+            assert_eq!(active.content, "unsaved move");
+            assert!(active.dirty);
+            ui.dispatch(AppCommand::MoveEntry {
+                id: active.id,
+                directory: String::new(),
+            });
+            ui.dispatch(AppCommand::SaveDocument(
+                DocumentId::parse("todo.md").unwrap(),
+            ));
+            assert_eq!(
+                std::fs::read_to_string(workspace_path.join("todo.md")).unwrap(),
+                "unsaved move"
+            );
+            println!("GTK drag-and-drop/buffer smoke test passed");
             println!("GTK workspace edit/save smoke test passed");
         }
         app.quit();

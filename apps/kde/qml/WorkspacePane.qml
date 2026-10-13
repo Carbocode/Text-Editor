@@ -43,8 +43,16 @@ Item {
     property var matchIndicesByFile: ({})
     property bool sidebarEntriesDirty: true
     property string lastWorkspaceRoot: ""
+    property string renamePath: ""
+    property string renameName: ""
+    property string draggingPath: ""
+    property string hoverDirectory: ""
+    property bool hoveringDrop: false
+    property bool validDrop: false
+
     signal browseRequested()
 
+    SystemPalette { id: sidebarPalette }
     ListModel { id: sidebarModel }
     TreeModel {
         id: fileTreeModel
@@ -168,6 +176,116 @@ Item {
         controller.create_entry(path, directory)
         if (!directory && controller.error_message.length === 0)
             controller.open_document(path)
+    }
+
+    function beginRename(path) {
+        renamePath = path
+        renameName = path.split("/").pop()
+    }
+
+    function commitRename() {
+        if (renamePath.length === 0 || !flushEditor()) return
+        controller.rename_entry(renamePath, renameName)
+        if (controller.error_message.length === 0) renamePath = ""
+    }
+
+    function parentDirectory(path) { return path.split("/").slice(0, -1).join("/") }
+
+    function canDrop(source, directory) {
+        if (source.length === 0) return false
+        var target = (directory.length > 0 ? directory + "/" : "") + source.split("/").pop()
+        return target !== source && !target.startsWith(source + "/")
+            && controller.directory_ids.indexOf(target) === -1
+            && !controller.document_ids.some(path => path === target || path.startsWith(target + "/"))
+    }
+
+    function hoverDrop(directory) {
+        if (hoveringDrop && hoverDirectory === directory) return
+        expandDropFolder.stop()
+        hoverDirectory = directory
+        hoveringDrop = true
+        validDrop = canDrop(draggingPath, directory)
+        if (validDrop && directory.length > 0 && collapsedDirectories[directory] !== false)
+            expandDropFolder.restart()
+    }
+
+    function leaveDrop(directory) {
+        if (hoveringDrop && hoverDirectory === directory) {
+            expandDropFolder.stop()
+            hoveringDrop = false
+        }
+    }
+
+    function dropEntry(directory) {
+        if (!canDrop(draggingPath, directory) || !flushEditor()) return false
+        controller.move_entry(draggingPath, directory)
+        selectedResultIndex = -1
+        return controller.error_message.length === 0
+    }
+
+    function startEntryDrag(path, point) {
+        renamePath = ""
+        draggingPath = path
+        dragGhost.x = point.x + 12
+        dragGhost.y = point.y + 12
+    }
+
+    function finishEntryDrag(cancelled) {
+        if (!cancelled && draggingPath.length > 0) dragGhost.Drag.drop()
+        draggingPath = ""
+        hoveringDrop = false
+        expandDropFolder.stop()
+    }
+
+    Timer {
+        id: expandDropFolder
+        interval: 650
+        onTriggered: {
+            if (root.hoveringDrop && root.canDrop(root.draggingPath, root.hoverDirectory)
+                && root.collapsedDirectories[root.hoverDirectory] !== false)
+                root.toggleDirectory(root.hoverDirectory)
+        }
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        enabled: root.draggingPath.length > 0 || root.renamePath.length > 0
+        onActivated: { root.renamePath = ""; root.finishEntryDrag(true) }
+    }
+
+    Rectangle {
+        id: dragGhost
+        objectName: "sidebarDragGhost"
+        z: 1000
+        visible: root.draggingPath.length > 0
+        width: ghostLabel.implicitWidth + 36
+        height: 34
+        radius: 5
+        color: sidebarPalette.base
+        opacity: 0.9
+        border.color: sidebarPalette.highlight
+        border.width: 1
+        Drag.active: root.draggingPath.length > 0
+        Drag.source: root
+        Drag.keys: ["native-workspace-entry"]
+        Drag.hotSpot.x: -12
+        Drag.hotSpot.y: -12
+        Drag.supportedActions: Qt.MoveAction
+        Rectangle {
+            anchors.fill: parent
+            anchors.topMargin: 4
+            anchors.leftMargin: 3
+            anchors.rightMargin: -3
+            anchors.bottomMargin: -4
+            radius: 5
+            color: "#40000000"
+            z: -1
+        }
+        Label {
+            id: ghostLabel
+            anchors.centerIn: parent
+            text: root.draggingPath.split("/").pop()
+        }
     }
 
     Dialog {
@@ -766,6 +884,35 @@ Item {
                             visible: root.visibleSidebarEntries.length === 0
                             text: root.fileNameQuery.length > 0 ? "No matching names" : "No files"
                         }
+                        Rectangle {
+                            objectName: "workspaceDropTarget"
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            height: 32
+                            z: 5
+                            visible: root.draggingPath.length > 0
+                            color: palette.base
+                            border.width: root.hoveringDrop && root.hoverDirectory === "" ? 2 : 1
+                            border.color: root.hoveringDrop && root.hoverDirectory === "" && !root.validDrop
+                                ? "#d64545" : palette.highlight
+                            Label {
+                                anchors.centerIn: parent
+                                text: "Move to " + root.controller.workspace_name
+                            }
+                            DropArea {
+                                anchors.fill: parent
+                                keys: ["native-workspace-entry"]
+                                onEntered: function(drag) {
+                                    if (drag.source === root) root.hoverDrop("")
+                                    else drag.accepted = false
+                                }
+                                onExited: root.leaveDrop("")
+                                onDropped: function(drop) {
+                                    if (drop.source === root && root.dropEntry("")) drop.accept(Qt.MoveAction)
+                                }
+                            }
+                        }
                         delegate: TreeViewDelegate {
                             id: treeRow
                             // Expanding changes the mapping of view rows even
@@ -789,16 +936,97 @@ Item {
                                     Layout.preferredHeight: 16
                                 }
                                 Label {
+                                    visible: !renameField.visible
                                     text: treeRow.text
                                     color: treeRow.highlighted ? treeRow.palette.highlightedText : treeRow.palette.text
                                     elide: Text.ElideRight
                                     Layout.fillWidth: true
                                 }
+                                TextField {
+                                    id: renameField
+                                    objectName: "sidebarRenameField"
+                                    visible: treeRow.entry && root.renamePath === treeRow.entry.path
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 26
+                                    text: visible ? root.renameName : ""
+                                    onTextEdited: root.renameName = text
+                                    onVisibleChanged: if (visible) Qt.callLater(function() {
+                                        renameField.forceActiveFocus()
+                                        var dot = root.controller.directory_ids.indexOf(root.renamePath) === -1
+                                            ? text.lastIndexOf(".") : -1
+                                        select(0, dot > 0 ? dot : text.length)
+                                    })
+                                    onAccepted: root.commitRename()
+                                    Keys.onEscapePressed: root.renamePath = ""
+                                    onActiveFocusChanged: if (!activeFocus && visible) root.renamePath = ""
+                                    ToolTip.visible: activeFocus && root.controller.error_message.length > 0
+                                    ToolTip.text: root.controller.error_message
+                                }
+                            }
+                            TapHandler {
+                                acceptedButtons: Qt.RightButton
+                                onTapped: if (treeRow.entry) {
+                                    entryMenu.path = treeRow.entry.path
+                                    entryMenu.popup()
+                                }
+                            }
+                            Menu {
+                                id: entryMenu
+                                property string path: ""
+                                MenuItem {
+                                    text: "Rename…"
+                                    onTriggered: root.beginRename(entryMenu.path)
+                                }
+                            }
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_F2 && entry) {
+                                    root.beginRename(entry.path)
+                                    event.accepted = true
+                                }
+                            }
+                            DragHandler {
+                                id: rowDrag
+                                target: null
+                                enabled: treeRow.entry && root.renamePath.length === 0
+                                acceptedButtons: Qt.LeftButton
+                                onActiveChanged: {
+                                    if (active) root.startEntryDrag(treeRow.entry.path,
+                                        root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y))
+                                    else root.finishEntryDrag(false)
+                                }
+                                onCentroidChanged: if (active) {
+                                    var point = root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y)
+                                    dragGhost.x = point.x + 12
+                                    dragGhost.y = point.y + 12
+                                }
+                            }
+                            DropArea {
+                                anchors.fill: parent
+                                keys: ["native-workspace-entry"]
+                                property string directory: treeRow.entry ? (treeRow.entry.directory
+                                    ? treeRow.entry.path : root.parentDirectory(treeRow.entry.path)) : ""
+                                onEntered: function(drag) {
+                                    if (drag.source !== root) { drag.accepted = false; return }
+                                    root.hoverDrop(directory)
+                                }
+                                onExited: root.leaveDrop(directory)
+                                onDropped: function(drop) {
+                                    if (drop.source === root && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
+                                }
+                            }
+                            Rectangle {
+                                anchors.fill: parent
+                                z: 2
+                                color: "transparent"
+                                border.width: 2
+                                border.color: root.validDrop ? palette.highlight : "#d64545"
+                                visible: root.hoveringDrop && treeRow.entry && treeRow.entry.directory
+                                    && root.hoverDirectory === treeRow.entry.path
                             }
                             rightPadding: 38
                             highlighted: entry && !entry.directory && root.controller.active_document_id === entry.path
                             onClicked: {
-                                if (!entry || entry.directory) return
+                                if (!entry || entry.directory || root.renamePath.length > 0 || root.draggingPath.length > 0) return
                                 if (root.flushEditor()) {
                                     root.controller.open_document(entry.path)
                                     root.selectedResultIndex = -1

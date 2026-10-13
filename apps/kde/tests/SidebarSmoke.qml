@@ -31,10 +31,15 @@ ApplicationWindow {
         if (!condition) throw new Error(message)
     }
 
-    function findItem(item, name) {
-        if (item.objectName === name) return item
-        for (var child of item.children || []) {
-            var found = findItem(child, name)
+    function findItem(item, name, visited) {
+        visited = visited || new Set()
+        if (!item || visited.has(item)) return null
+        visited.add(item)
+        if (item.objectName === name && (name !== "sidebarRenameField" || item.visible)) return item
+        var candidates = [...(item.children || []), ...(item.resources || [])]
+        if (item.contentItem) candidates.push(item.contentItem)
+        for (var child of candidates) {
+            var found = findItem(child, name, visited)
             if (found) return found
         }
         return null
@@ -235,6 +240,62 @@ ApplicationWindow {
                     check(activeLine.parent.clip, "Offscreen highlight is not clipped to the viewport")
                     checkNumberAlignment([25, 40, 100])
                     console.log("KDE editor scrolling active-line smoke test passed")
+                    pane.editorText = "unsaved rename"
+                    pane.beginRename("src")
+                    break
+                case 13:
+                    var renameField = findItem(pane, "sidebarRenameField")
+                    check(renameField && renameField.visible, "Inline rename field is missing")
+                    check(renameField.selectedText === "src", "Folder name was not selected")
+                    renameField.text = "renamed"
+                    pane.renameName = renameField.text
+                    pane.commitRename()
+                    break
+                case 14:
+                    check(controller.error_message.length === 0, "Folder rename failed")
+                    check(controller.active_document_id === "renamed/new.rs", "Rename lost active document")
+                    check(controller.active_document_text === "unsaved rename" && controller.active_document_dirty,
+                        "Rename lost unsaved edits")
+                    console.log("KDE inline rename/buffer smoke test passed")
+                    controller.create_entry("destination", true)
+                    pane.editorText = "unsaved move"
+                    pane.startEntryDrag("renamed", Qt.point(30, 30))
+                    check(findItem(pane, "sidebarDragGhost").visible, "Drag ghost is missing")
+                    check(!pane.canDrop("renamed", "renamed"), "Folder accepted a drop inside itself")
+                    check(!pane.canDrop("README.md", ""), "Same-parent drop should be forbidden")
+                    pane.hoverDrop("destination")
+                    check(pane.collapsedDirectories["destination"] !== false, "Folder expanded before hover delay")
+                    switchedAt = Date.now()
+                    break
+                case 15:
+                    if (Date.now() - switchedAt < 750) { --step; break }
+                    check(pane.collapsedDirectories["destination"] === false, "Hover did not expand closed folder")
+                    check(pane.dropEntry("destination"), "Folder drop failed")
+                    pane.finishEntryDrag(true)
+                    break
+                case 16:
+                    check(controller.active_document_id === "destination/renamed/new.rs", "Move lost active document")
+                    check(controller.active_document_text === "unsaved move" && controller.active_document_dirty,
+                        "Move lost unsaved edits")
+                    pane.startEntryDrag("destination/renamed/new.rs", Qt.point(30, 30))
+                    check(pane.dropEntry(""), "Drop to root failed")
+                    pane.finishEntryDrag(true)
+                    controller.save_document()
+                    check(controller.error_message.length === 0 && !controller.active_document_dirty,
+                        "Could not save moved document")
+                    pane.beginRename("new.rs")
+                    break
+                case 17:
+                    var fileRename = findItem(pane, "sidebarRenameField")
+                    check(fileRename && fileRename.selectedText === "new", "File rename should select its stem")
+                    fileRename.text = "renamed.rs"
+                    pane.renameName = fileRename.text
+                    pane.commitRename()
+                    break
+                case 18:
+                    check(controller.active_document_id === "renamed.rs", "Inline file rename failed")
+                    check(controller.active_document_text === "unsaved move", "Inline rename lost content")
+                    console.log("KDE drag ghost/drop/hover expansion smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {

@@ -14,11 +14,13 @@ Phase 5 watches the full directory tree with `notify` for files added, removed, 
 
 The editors use a monospaced font, line numbers, and a clickable and draggable minimap. The minimap renders 1×2 character glyphs with indentation and syntax colors, samples long documents to fit, and overlays the visible viewport. The glyph atlas comes from VS Code; see [attribution](assets/MINIMAP_ATTRIBUTION.md). A shared Rust syntax crate identifies token ranges for common code formats and Markdown; the native frontends color those ranges without changing document content. On macOS, text styling is limited to visible lines and the minimap raster is prepared in the background so large files stay responsive.
 
+Files and folders can be renamed or moved from their sidebar context menu in all three frontends. Renaming or moving a folder updates every open document beneath it while preserving unsaved buffers and external-change conflicts. Moves keep the original name and accept an existing destination folder inside the workspace; an empty destination moves to the workspace root. Existing destinations are never replaced, and folders cannot be moved inside themselves.
+
 ## Planned phases
 
-The following phases are proposed and have not been implemented yet:
+The following work is planned:
 
-6. **Complete file management:** rename, move, and delete files and folders, including safe handling of open documents and unsaved changes.
+6. **Complete file management:** delete files and folders (rename and move are implemented), including safe handling of open documents and unsaved changes.
 7. **Edit multiple files:** show open documents as tabs in all three frontends, mark unsaved changes, switch and close tabs safely, and add Save All. The core already preserves unsaved content when switching documents; this phase makes open documents explicit. Side-by-side editing can follow as a separate extension.
 8. **Find and replace:** replace matches in the current document and across the workspace, with a preview before workspace-wide changes.
 9. **Restore sessions:** reopen the last workspace and its open documents after restarting the app.

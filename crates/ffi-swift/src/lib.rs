@@ -166,6 +166,8 @@ pub enum WorkspaceError {
     ExternalChanges(String),
     #[error("invalid document name")]
     InvalidDocumentId,
+    #[error("a folder cannot be moved inside itself")]
+    InvalidMove,
     #[error("filesystem error: {0}")]
     Filesystem(String),
     #[error("metadata storage error: {0}")]
@@ -181,6 +183,8 @@ pub enum WorkspaceError {
 impl From<AppError> for WorkspaceError {
     fn from(error: AppError) -> Self {
         match error {
+            AppError::InvalidMove => Self::InvalidMove,
+            AppError::InvalidEntryName => Self::InvalidDocumentId,
             AppError::WorkspaceNotOpen => Self::WorkspaceNotOpen,
             AppError::DocumentNotFound(id) => Self::DocumentNotFound(id),
             AppError::DocumentNotOpen(id) => Self::DocumentNotOpen(id),
@@ -244,6 +248,28 @@ impl WorkspaceApplication {
 
     pub fn refresh_workspace(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
         self.dispatch(AppCommand::RefreshWorkspace)
+    }
+
+    pub fn move_entry(
+        &self,
+        path: String,
+        directory: String,
+    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::MoveEntry {
+            id: Self::parse_id(path)?,
+            directory,
+        })
+    }
+
+    pub fn rename_entry(
+        &self,
+        path: String,
+        new_name: String,
+    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::RenameEntry {
+            id: Self::parse_id(path)?,
+            new_name,
+        })
     }
 
     pub fn create_entry(

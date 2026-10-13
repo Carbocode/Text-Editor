@@ -80,6 +80,28 @@ final class WorkspaceStore: ObservableObject {
         updateWorkspace { try core.refreshWorkspace() }
     }
 
+    func moveEntry(_ path: String, directory: String) {
+        do {
+            try flushLocalEdits()
+            apply(try core.moveEntry(path: path, directory: directory))
+            selectedSearchResultIndex = nil
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func renameEntry(_ path: String, newName: String) {
+        do {
+            try flushLocalEdits()
+            apply(try core.renameEntry(path: path, newName: newName))
+            selectedSearchResultIndex = nil
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func createEntry(_ path: String, directory: Bool) {
         do {
             try flushLocalEdits()

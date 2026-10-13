@@ -13,3 +13,9 @@ listview.compact-files row {
 listview.compact-files row > box {
   min-height: 0;
 }
+
+.sidebar-rename { min-height: 20px; padding: 0 4px; }
+.sidebar-drop-valid { outline: 2px solid @accent_color; outline-offset: -2px; background: alpha(@accent_color, 0.15); }
+.sidebar-drop-invalid { outline: 2px solid @error_color; outline-offset: -2px; }
+.sidebar-root-drop { padding: 8px; background: @window_bg_color; border-top: 1px solid @accent_color; }
+.sidebar-drag-ghost { padding: 8px 12px; border-radius: 6px; background: @window_bg_color; border: 1px solid @accent_color; box-shadow: 0 3px 8px alpha(black, 0.35); }
