@@ -56,6 +56,96 @@ struct EditorLayoutSmoke {
         NoWrapTextEditor.selectSearchRange(match, in: searchTextView)
         precondition(searchTextView.selectedRange() == match)
         precondition(searchView.contentView.bounds.origin.y > 0)
+        // Short documents must accept clicks across the viewport, including the final empty line.
+        let clickScrollView = NoWrapTextEditor.makeScrollView(text: "first\nsecond\n")
+        let clickContainer = EditorContainer(scrollView: clickScrollView, fileName: "click.txt")
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 240),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = clickContainer
+        clickContainer.layoutSubtreeIfNeeded()
+        clickContainer.refreshContent()
+        let clickTextView = clickContainer.textView as! EditorTextView
+        clickTextView.layoutManager!.ensureLayout(for: clickTextView.textContainer!)
+        precondition(clickTextView.frame.width >= clickScrollView.contentSize.width)
+        precondition(clickTextView.frame.height >= clickScrollView.contentSize.height)
+        func click(_ point: NSPoint, modifiers: NSEvent.ModifierFlags = []) {
+            let location = clickTextView.convert(point, to: nil)
+            let event = NSEvent.mouseEvent(with: .leftMouseDown, location: location, modifierFlags: modifiers,
+                                          timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                          eventNumber: 0, clickCount: 1, pressure: 1)!
+            let release = NSEvent.mouseEvent(with: .leftMouseUp, location: location, modifierFlags: [],
+                                            timestamp: 0.1, windowNumber: window.windowNumber, context: nil,
+                                            eventNumber: 1, clickCount: 1, pressure: 0)!
+            NSApplication.shared.postEvent(release, atStart: true)
+            let target = window.contentView!.hitTest(window.contentView!.convert(location, from: nil))!
+            target.mouseDown(with: event)
+        }
+        let height = clickContainer.lineHeight
+        let right = clickScrollView.contentSize.width - 5
+        click(NSPoint(x: right, y: clickTextView.textContainerOrigin.y + height * 2.5))
+        precondition(clickTextView.selectedRange() == NSRange(location: 13, length: 0))
+        let lastLine = clickTextView.activeLineRect!
+        precondition(abs(lastLine.minY - (clickTextView.textContainerOrigin.y + height * 2)) < 1)
+        precondition(lastLine.width == clickTextView.bounds.width)
+        click(NSPoint(x: right, y: clickTextView.textContainerOrigin.y + height * 0.5))
+        precondition(clickTextView.selectedRange() == NSRange(location: 5, length: 0))
+        precondition(clickTextView.activeLineRect!.minY < lastLine.minY)
+        click(NSPoint(x: -20, y: clickTextView.textContainerOrigin.y + height * 1.5))
+        precondition(clickTextView.selectedRange() == NSRange(location: 6, length: 0))
+        clickTextView.setSelectedRange(NSRange(location: 13, length: 0))
+        precondition(clickTextView.activeLineRect == lastLine)
+        clickTextView.string = "first\nsecond"
+        clickContainer.refreshContent()
+        click(NSPoint(x: right, y: clickTextView.textContainerOrigin.y + height * 1.5))
+        precondition(clickTextView.selectedRange() == NSRange(location: 12, length: 0))
+        precondition(abs(clickTextView.activeLineRect!.minY - (clickTextView.textContainerOrigin.y + height)) < 1)
+        clickTextView.string = ""
+        clickContainer.refreshContent()
+        click(NSPoint(x: right, y: clickTextView.textContainerOrigin.y + height * 0.5))
+        precondition(clickTextView.selectedRange() == NSRange(location: 0, length: 0))
+        precondition(clickTextView.activeLineRect!.height > 0)
+        // A trailing empty line must also be reachable before keyboard navigation in a long document.
+        clickTextView.string = String(repeating: longLine + "\n", count: 80)
+        clickTextView.setSelectedRange(NSRange(location: 0, length: 0))
+        clickContainer.refreshContent()
+        let manager = clickTextView.layoutManager!
+        manager.ensureLayout(for: clickTextView.textContainer!)
+        let finalRow = manager.extraLineFragmentRect.offsetBy(dx: 0, dy: clickTextView.textContainerOrigin.y)
+        let clip = clickScrollView.contentView
+        clip.scroll(to: NSPoint(x: 0, y: max(0, clickTextView.bounds.height - clip.bounds.height)))
+        clickScrollView.reflectScrolledClipView(clip)
+        precondition(finalRow.maxY <= clickTextView.bounds.maxY, "Final empty line is outside the clickable text view")
+        for x in [CGFloat(24), clickScrollView.contentSize.width / 2, clickScrollView.contentSize.width - 24] {
+            for y in [finalRow.minY + 1, finalRow.midY, finalRow.maxY - 1] {
+                clickTextView.setSelectedRange(NSRange(location: 0, length: 0))
+                click(NSPoint(x: x, y: y))
+                precondition(clickTextView.selectedRange().location == clickTextView.string.utf16.count,
+                             "Clicking the last empty row did not move the caret to EOF")
+            }
+        }
+        let end = clickTextView.string.utf16.count
+        clickTextView.setSelectedRange(NSRange(location: 0, length: 0))
+        click(NSPoint(x: 24, y: finalRow.midY), modifiers: .shift)
+        precondition(clickTextView.selectedRange() == NSRange(location: 0, length: end))
+        click(NSPoint(x: 24, y: finalRow.midY))
+        let dragPoint = clickTextView.convert(NSPoint(x: 24, y: finalRow.minY - height / 2), to: nil)
+        let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: dragPoint, modifierFlags: [],
+                                     timestamp: 0.2, windowNumber: window.windowNumber, context: nil,
+                                     eventNumber: 2, clickCount: 1, pressure: 1)!
+        clickTextView.mouseDragged(with: drag)
+        precondition(clickTextView.selectedRange().length > 0)
+        precondition(NSMaxRange(clickTextView.selectedRange()) == end)
+        for source in ["first\r\nsecond\r\n", "first\n\n\n", "🙂\n"] {
+            clickTextView.string = source
+            clickTextView.setSelectedRange(NSRange(location: 0, length: 0))
+            clickContainer.refreshContent()
+            manager.ensureLayout(for: clickTextView.textContainer!)
+            clip.scroll(to: .zero)
+            clickScrollView.reflectScrolledClipView(clip)
+            let emptyY = clickTextView.textContainerOrigin.y + manager.extraLineFragmentRect.midY
+            click(NSPoint(x: 24, y: emptyY))
+            precondition(clickTextView.selectedRange().location == source.utf16.count)
+        }
         print("AppKit horizontal overflow smoke test passed")
     }
 }

@@ -31,7 +31,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
 
-        let textView = NSTextView(frame: NSRect(origin: .zero, size: scrollView.contentSize))
+        let textView = EditorTextView(frame: NSRect(origin: .zero, size: scrollView.contentSize))
         textView.isRichText = false
         textView.allowsUndo = true
         textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
@@ -121,12 +121,92 @@ struct NoWrapTextEditor: NSViewRepresentable {
     }
 }
 
+final class EditorTextView: NSTextView {
+    static var activeLineColor: NSColor { .selectedContentBackgroundColor.withAlphaComponent(0.10) }
+    private var emptyLineSelectionAnchor: Int?
+
+    override func mouseDown(with event: NSEvent) {
+        emptyLineSelectionAnchor = nil
+        let point = convert(event.locationInWindow, from: nil)
+        if event.clickCount == 1,
+           string.isEmpty || string.hasSuffix("\n") || string.hasSuffix("\r"),
+           let manager = layoutManager, let container = textContainer {
+            manager.ensureLayout(forBoundingRect: NSRect(x: 0,
+                y: max(0, point.y - textContainerOrigin.y), width: 1, height: 1), in: container)
+            let line = manager.extraLineFragmentRect.offsetBy(dx: textContainerOrigin.x,
+                                                            dy: textContainerOrigin.y)
+            if manager.extraLineFragmentTextContainer === container,
+               point.y >= line.minY, point.y < line.maxY {
+                // Make the final empty fragment a cursor target across the full text view width.
+                let end = (string as NSString).length
+                let anchor = event.modifierFlags.contains(.shift) ? selectedRange().location : end
+                emptyLineSelectionAnchor = anchor
+                window?.makeFirstResponder(self)
+                setSelectedRange(NSRange(location: min(anchor, end), length: abs(end - anchor)))
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let anchor = emptyLineSelectionAnchor else {
+            super.mouseDragged(with: event)
+            return
+        }
+        autoscroll(with: event)
+        let location = characterIndexForInsertion(at: convert(event.locationInWindow, from: nil))
+        setSelectedRange(NSRange(location: min(anchor, location), length: abs(location - anchor)))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if emptyLineSelectionAnchor != nil {
+            emptyLineSelectionAnchor = nil
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    var activeLineRect: NSRect? {
+        guard let manager = layoutManager, let container = textContainer else { return nil }
+        let location = min(selectedRange().location, (string as NSString).length)
+        manager.ensureLayout(forCharacterRange: NSRange(location: location, length: 0))
+        let fragment: NSRect
+        if location == (string as NSString).length,
+           manager.extraLineFragmentTextContainer === container {
+            fragment = manager.extraLineFragmentRect
+        } else if manager.numberOfGlyphs > 0 {
+            let glyph = manager.glyphIndexForCharacter(at: min(location, (string as NSString).length - 1))
+            fragment = manager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        } else {
+            fragment = NSRect(x: 0, y: 0, width: 0,
+                              height: manager.defaultLineHeight(for: font ?? .systemFont(ofSize: NSFont.systemFontSize)))
+        }
+        return NSRect(x: bounds.minX, y: textContainerOrigin.y + fragment.minY,
+                      width: bounds.width, height: fragment.height)
+    }
+
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard let line = activeLineRect else { return }
+        Self.activeLineColor.setFill()
+        line.intersection(rect).fill()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let viewport = enclosingScrollView?.contentSize ?? .zero
+        super.setFrameSize(NSSize(width: max(newSize.width, viewport.width),
+                                  height: max(newSize.height, viewport.height)))
+    }
+}
+
 final class EditorContainer: NSView {
     let scrollView: NSScrollView
     var fileName: String
     private let gutter = EditorGutter()
     private let minimap = EditorMinimap()
     private var scrollObserver: NSObjectProtocol?
+    private var selectionObserver: NSObjectProtocol?
     private var highlightWork: DispatchWorkItem?
     private var minimapWork: DispatchWorkItem?
     private var minimapGeneration = 0
@@ -153,12 +233,20 @@ final class EditorContainer: NSView {
             self.scheduleHighlight()
             self.refreshChrome()
         }
+        selectionObserver = NotificationCenter.default.addObserver(
+            forName: NSTextView.didChangeSelectionNotification,
+            object: scrollView.documentView,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshChrome()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
 
     deinit {
         if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
+        if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) }
         minimapWork?.cancel()
         highlightWork?.cancel()
     }
@@ -168,6 +256,10 @@ final class EditorContainer: NSView {
         gutter.frame = NSRect(x: 0, y: 0, width: 48, height: bounds.height)
         scrollView.frame = NSRect(x: 48, y: 0, width: max(0, bounds.width - 148), height: bounds.height)
         minimap.frame = NSRect(x: max(48, bounds.width - 100), y: 0, width: 100, height: bounds.height)
+        if let textView {
+            textView.minSize = scrollView.contentSize
+            textView.setFrameSize(textView.frame.size)
+        }
         refreshChrome()
     }
 
@@ -220,6 +312,7 @@ final class EditorContainer: NSView {
     }
 
     func refreshChrome() {
+        textView?.needsDisplay = true
         gutter.needsDisplay = true
         minimap.needsDisplay = true
     }
@@ -242,6 +335,11 @@ private final class EditorGutter: NSView {
         NSGraphicsContext.saveGraphicsState()
         NSBezierPath(rect: bounds).addClip()
         defer { NSGraphicsContext.restoreGraphicsState() }
+        if let line = (textView as? EditorTextView)?.activeLineRect {
+            let converted = convert(line, from: textView)
+            EditorTextView.activeLineColor.setFill()
+            NSRect(x: 0, y: converted.minY, width: bounds.width, height: converted.height).fill()
+        }
         let lineHeight = container.lineHeight
         let scrollY = container.scrollView.contentView.bounds.origin.y
         let count = lineCount
@@ -258,6 +356,18 @@ private final class EditorGutter: NSView {
             guard y + size.height > 0 && y < bounds.height else { continue }
             label.draw(at: NSPoint(x: bounds.width - size.width - 8, y: y), withAttributes: attributes)
         }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let textView = container?.textView else { return }
+        let point = textView.convert(event.locationInWindow, from: nil)
+        let location = textView.characterIndexForInsertion(at: NSPoint(x: textView.textContainerOrigin.x, y: point.y))
+        textView.window?.makeFirstResponder(textView)
+        textView.setSelectedRange(NSRange(location: location, length: 0))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        container?.scrollView.scrollWheel(with: event)
     }
 }
 

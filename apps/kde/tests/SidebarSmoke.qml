@@ -40,6 +40,19 @@ ApplicationWindow {
         return null
     }
 
+    function checkNumberAlignment(lines) {
+        var editor = findItem(pane, "documentEditor")
+        var scroll = findItem(pane, "editorScroll")
+        var gutter = findItem(pane, "editorLineNumbers")
+        for (var line of lines) {
+            var rect = editor.positionToRectangle(gutter.lineStarts[line])
+            var numberCenter = gutter.numberBaseline(line)
+                - (editorFontMetrics.ascent - editorFontMetrics.descent) / 2
+            check(Math.abs(numberCenter - (rect.y + rect.height / 2 - scroll.contentItem.contentY)) < 0.1,
+                "Line number " + (line + 1) + " is not vertically centered")
+        }
+    }
+
     function checkIcons() {
         var icons = []
         function collect(item) {
@@ -162,6 +175,66 @@ ApplicationWindow {
                 case 7:
                     check(pane.treeRowForPath(expandedPath) === -1, "Tab switch lost collapsed state")
                     console.log("KDE sidebar tab/cache/icon smoke test passed")
+                    controller.open_document("src/new.rs")
+                    pane.editorText = "first\nsecond\n"
+                    break
+                case 8:
+                    var editor = findItem(pane, "documentEditor")
+                    var scroll = findItem(pane, "editorScroll")
+                    var activeLine = findItem(pane, "editorActiveLine")
+                    check(editor.width >= scroll.availableWidth, "Short text does not fill editor width")
+                    check(editor.height >= scroll.availableHeight, "Short text does not fill editor height")
+                    var lastY = editor.positionToRectangle(editor.length).y
+                    editor.cursorPosition = editor.positionAt(scroll.availableWidth - 5,
+                        lastY + editor.cursorRectangle.height / 2)
+                    check(editor.cursorPosition === editor.length, "Right edge cannot reach final empty line")
+                    check(activeLine.y === editor.cursorRectangle.y - scroll.contentItem.contentY
+                        && activeLine.height === editor.cursorRectangle.height,
+                        "Active line does not follow final empty line")
+                    check(activeLine.width === editor.width, "Active line does not fill editor width")
+                    checkNumberAlignment([0, 1, 2])
+                    editor.cursorPosition = 0
+                    check(activeLine.y < lastY, "Active line did not follow cursor navigation")
+                    editor.text = ""
+                    break
+                case 9:
+                    var emptyEditor = findItem(pane, "documentEditor")
+                    var emptyScroll = findItem(pane, "editorScroll")
+                    check(emptyEditor.height >= emptyScroll.availableHeight, "Empty document lost clickable viewport")
+                    check(emptyEditor.positionAt(emptyScroll.availableWidth - 5,
+                        emptyEditor.topPadding + emptyEditor.cursorRectangle.height / 2) === 0,
+                        "Empty line cannot be clicked at right edge")
+                    console.log("KDE editor full-width/active-line smoke test passed")
+                    emptyEditor.text = "filler\n".repeat(100)
+                    emptyEditor.cursorPosition = 7 * 40
+                    break
+                case 10:
+                    var scroll = findItem(pane, "editorScroll")
+                    scroll.contentItem.contentY = editorFontMetrics.height * 20
+                    break
+                case 11:
+                    var editor = findItem(pane, "documentEditor")
+                    var scroll = findItem(pane, "editorScroll")
+                    var activeLine = findItem(pane, "editorActiveLine")
+                    var gutter = findItem(pane, "editorLineNumbers")
+                    check(scroll.contentItem.contentY > 0, "Editor did not scroll")
+                    checkNumberAlignment([20, 40, 100])
+                    var expectedY = editor.cursorRectangle.y - scroll.contentItem.contentY
+                    check(Math.abs(activeLine.mapToItem(gutter, 0, 0).y - expectedY) < 1,
+                        "Text highlight does not align with gutter after scrolling")
+                    scroll.contentItem.contentY += editorFontMetrics.height * 5
+                    break
+                case 12:
+                    var editor = findItem(pane, "documentEditor")
+                    var scroll = findItem(pane, "editorScroll")
+                    var activeLine = findItem(pane, "editorActiveLine")
+                    var gutter = findItem(pane, "editorLineNumbers")
+                    check(Math.abs(activeLine.mapToItem(gutter, 0, 0).y
+                        - (editor.cursorRectangle.y - scroll.contentItem.contentY)) < 1,
+                        "Text highlight stayed fixed after a second scroll")
+                    check(activeLine.parent.clip, "Offscreen highlight is not clipped to the viewport")
+                    checkNumberAlignment([25, 40, 100])
+                    console.log("KDE editor scrolling active-line smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {

@@ -81,8 +81,10 @@ pub struct EditorChrome {
     model: Rc<RefCell<MinimapModel>>,
     buffer: gtk::TextBuffer,
     minimap: gtk::DrawingArea,
-    cache: Rc<RefCell<Option<(i32, i32, i32, gtk::cairo::ImageSurface)>>>,
+    cache: MinimapCache,
 }
+
+type MinimapCache = Rc<RefCell<Option<(i32, i32, i32, gtk::cairo::ImageSurface)>>>;
 
 impl EditorChrome {
     pub fn set_file_name(&self, name: &str) {
@@ -101,8 +103,70 @@ impl EditorChrome {
 
 pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrome {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let text_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let overlay = gtk::Overlay::new();
+    overlay.set_hexpand(true);
+    overlay.set_vexpand(true);
+    overlay.set_child(Some(&text_row));
+    let active_line = gtk::DrawingArea::new();
+    active_line.set_can_target(false);
+    overlay.add_overlay(&active_line);
+    editor.set_hexpand(true);
+    editor.set_vexpand(true);
+    editor.set_bottom_margin(16);
+    let view = editor.clone();
+    let overlay_weak = overlay.downgrade();
+    active_line.set_draw_func(move |_, context, _, _| {
+        let Some(overlay) = overlay_weak.upgrade() else {
+            return;
+        };
+        let buffer = view.buffer();
+        let iter = buffer.iter_at_mark(&buffer.get_insert());
+        let (y, height) = view.line_yrange(&iter);
+        let (_, window_y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, 0, y);
+        let Some(origin) =
+            view.compute_point(&overlay, &gtk::graphene::Point::new(0.0, window_y as f32))
+        else {
+            return;
+        };
+        let Some(view_origin) = view.compute_point(&overlay, &gtk::graphene::Point::new(0.0, 0.0))
+        else {
+            return;
+        };
+        // Include the gutter, while leaving the scroller's borders and scrollbars clear.
+        let width = f64::from(view_origin.x()) + f64::from(view.width());
+        context.rectangle(
+            0.0,
+            f64::from(view_origin.y()),
+            width,
+            f64::from(view.height()),
+        );
+        context.clip();
+        let color = view
+            .style_context()
+            .lookup_color("accent_bg_color")
+            .unwrap_or_else(|| gtk::gdk::RGBA::new(0.25, 0.5, 0.9, 1.0));
+        context.set_source_rgba(
+            f64::from(color.red()),
+            f64::from(color.green()),
+            f64::from(color.blue()),
+            0.10,
+        );
+        context.rectangle(0.0, f64::from(origin.y()), width, f64::from(height));
+        let _ = context.fill();
+    });
     let gutter = gtk::DrawingArea::new();
     gutter.set_content_width(48);
+    let click = gtk::GestureClick::new();
+    click.set_button(1);
+    let view = editor.clone();
+    click.connect_pressed(move |_, _, _, y| {
+        let (_, buffer_y) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, 0, y as i32);
+        let (iter, _) = view.line_at_y(buffer_y);
+        view.grab_focus();
+        view.buffer().place_cursor(&iter);
+    });
+    gutter.add_controller(click);
     let minimap = gtk::DrawingArea::new();
     minimap.set_content_width(100);
 
@@ -149,8 +213,7 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     let model = Rc::new(RefCell::new(MinimapModel::default()));
     let file_name = Rc::new(RefCell::new(String::new()));
     let model_draw = model.clone();
-    let cache: Rc<RefCell<Option<(i32, i32, i32, gtk::cairo::ImageSurface)>>> =
-        Rc::new(RefCell::new(None));
+    let cache: MinimapCache = Rc::new(RefCell::new(None));
     let cache_draw = cache.clone();
     minimap.set_draw_func(move |_, context, width, height| {
         let count = model_draw.borrow().lines.len().max(1);
@@ -178,8 +241,9 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
             let paint = gtk::cairo::Context::new(&surface).ok()?;
             let model = model_draw.borrow();
             let first_line = (offset.max(0) as usize) / 2;
-            let last_line =
-                ((offset.max(0) as usize + height.max(0) as usize + 1) / 2).min(model.lines.len());
+            let last_line = (offset.max(0) as usize + height.max(0) as usize)
+                .div_ceil(2)
+                .min(model.lines.len());
             for line in first_line..last_line {
                 let y = (line * 2) as f64 - f64::from(offset);
                 for (column, kind, top, bottom) in &model.lines[line] {
@@ -292,13 +356,17 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     minimap.add_controller(wheel);
     let redraw_gutter = gutter.clone();
     let redraw_map = minimap.clone();
+    let redraw_line = active_line.clone();
     adjustment.connect_value_changed(move |_| {
+        redraw_line.queue_draw();
         redraw_gutter.queue_draw();
         redraw_map.queue_draw();
     });
     let redraw_gutter = gutter.clone();
     let redraw_map = minimap.clone();
+    let redraw_line = active_line.clone();
     adjustment.connect_changed(move |_| {
+        redraw_line.queue_draw();
         redraw_gutter.queue_draw();
         redraw_map.queue_draw();
     });
@@ -307,7 +375,9 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     let model_update = model.clone();
     let name_update = file_name.clone();
     let cache_update = cache.clone();
+    let redraw_line = active_line.clone();
     buffer.connect_changed(move |buffer| {
+        redraw_line.queue_draw();
         let (start, end) = buffer.bounds();
         let content = buffer.text(&start, &end, false);
         model_update
@@ -317,9 +387,16 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
         redraw_gutter.queue_draw();
         redraw_map.queue_draw();
     });
-    row.append(&gutter);
+    let redraw_line = active_line.clone();
+    buffer.connect_mark_set(move |buffer, _, mark| {
+        if *mark == buffer.get_insert() {
+            redraw_line.queue_draw();
+        }
+    });
+    text_row.append(&gutter);
     scroll.set_hexpand(true);
-    row.append(scroll);
+    text_row.append(scroll);
+    row.append(&overlay);
     row.append(&minimap);
     EditorChrome {
         row,
@@ -333,7 +410,7 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
 
 #[cfg(test)]
 mod tests {
-    use super::{minimap_offset, MinimapModel};
+    use super::{MinimapModel, minimap_offset};
 
     #[test]
     fn miniature_text_keeps_indentation_and_token_color() {

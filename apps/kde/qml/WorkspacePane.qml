@@ -984,28 +984,84 @@ Item {
                         FontInfo { id: resolvedEditorFont; font: editor.font }
                         Canvas {
                             id: lineNumbers
+                            objectName: "editorLineNumbers"
                             Layout.preferredWidth: 48
                             Layout.fillHeight: true
+                            property var lineStarts: {
+                                var starts = [0]
+                                var source = editor.text
+                                for (var offset = source.indexOf("\n"); offset >= 0;
+                                     offset = source.indexOf("\n", offset + 1))
+                                    starts.push(offset + 1)
+                                return starts
+                            }
+                            function numberBaseline(line) {
+                                var rect = editor.positionToRectangle(lineStarts[line])
+                                return rect.y - editorScroll.contentItem.contentY
+                                    + (rect.height - editorMetrics.height) / 2 + editorMetrics.ascent
+                            }
                             onPaint: {
                                 var ctx = getContext("2d")
                                 ctx.clearRect(0, 0, width, height)
+                                if (editor.enabled) {
+                                    ctx.fillStyle = editor.activeLineColor
+                                    ctx.fillRect(0, editor.cursorRectangle.y - editorScroll.contentItem.contentY,
+                                                 width, editor.cursorRectangle.height)
+                                }
                                 ctx.fillStyle = "#808080"
                                 ctx.font = resolvedEditorFont.pixelSize + 'px "' + resolvedEditorFont.family + '"'
                                 ctx.textAlign = "right"
-                                var lineHeight = editorMetrics.height
                                 var scrollY = editorScroll.contentItem.contentY
-                                var first = Math.max(0, Math.floor(scrollY / lineHeight) - 1)
-                                var last = Math.min(editor.lineCount, first + Math.ceil(height / lineHeight) + 3)
-                                for (var line = first; line < last; ++line)
-                                    ctx.fillText(String(line + 1), width - 8, editor.topPadding + (line + 1) * lineHeight - scrollY)
+                                var position = editor.positionAt(editor.leftPadding, scrollY)
+                                var low = 0
+                                var high = lineStarts.length
+                                while (low + 1 < high) {
+                                    var middle = Math.floor((low + high) / 2)
+                                    if (lineStarts[middle] <= position) low = middle
+                                    else high = middle
+                                }
+                                for (var line = Math.max(0, low - 1); line < lineStarts.length; ++line) {
+                                    var rect = editor.positionToRectangle(lineStarts[line])
+                                    if (rect.y - scrollY >= height) break
+                                    if (rect.y + rect.height - scrollY <= 0) continue
+                                    ctx.fillText(String(line + 1), width - 8, numberBaseline(line))
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: editor.enabled
+                                onPressed: function(mouse) {
+                                    editor.forceActiveFocus()
+                                    editor.cursorPosition = editor.positionAt(editor.leftPadding,
+                                        mouse.y + editorScroll.contentItem.contentY)
+                                }
                             }
                         }
                         ScrollView {
                             id: editorScroll
+                            objectName: "editorScroll"
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             TextArea {
                                 id: editor
+                                objectName: "documentEditor"
+                                width: Math.max(editorScroll.availableWidth, implicitWidth)
+                                height: Math.max(editorScroll.availableHeight, implicitHeight)
+                                property color activeLineColor: Qt.rgba(palette.highlight.r,
+                                    palette.highlight.g, palette.highlight.b, 0.10)
+                                background: Rectangle {
+                                    color: "transparent"
+                                    clip: true
+                                    Rectangle {
+                                        objectName: "editorActiveLine"
+                                        // TextArea keeps its background fixed to the scroll viewport.
+                                        y: editor.cursorRectangle.y - editorScroll.contentItem.contentY
+                                        width: parent.width
+                                        height: editor.cursorRectangle.height
+                                        color: editor.activeLineColor
+                                        visible: editor.enabled
+                                    }
+                                }
                                 font: EditorFonts.fixedFont
                                 textFormat: TextEdit.PlainText
                                 wrapMode: TextEdit.NoWrap
@@ -1015,6 +1071,10 @@ Item {
                                 }
                                 enabled: root.controller.active_document_id.length > 0
                                 placeholderText: "Select a document"
+                                onCursorRectangleChanged: lineNumbers.requestPaint()
+                                onActiveLineColorChanged: lineNumbers.requestPaint()
+                                onEnabledChanged: lineNumbers.requestPaint()
+                                onFontChanged: lineNumbers.requestPaint()
                                 onTextChanged: {
                                     root.updateHighlight()
                                     lineNumbers.requestPaint()
