@@ -485,6 +485,10 @@ struct ContentView: View {
             editorDetail
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
+                        if store.diagnosticsEnabled {
+                            Button("Developer Tools", systemImage: "waveform.path.ecg") { store.openDevtools() }
+                                .help("Open Developer Tools")
+                        }
                         Button("Home", systemImage: "house") { showingHome = true }
                     }
                 }
@@ -496,6 +500,9 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 24) {
                 Label("Native Workspace", systemImage: "folder")
                     .font(.largeTitle.bold())
+                if store.diagnosticsEnabled {
+                    Button("Developer Tools", systemImage: "waveform.path.ecg") { store.openDevtools() }
+                }
                 Button("Open Folder…", systemImage: "folder.badge.plus") {
                     choosingWorkspace = true
                 }

@@ -1,0 +1,26 @@
+[package]
+name = "native-workspace-devtools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+native-workspace-devtools-protocol = { path = "../../crates/devtools-protocol" }
+duckdb = { version = "=1.10506.0", features = ["bundled", "parquet"] }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+sha2 = "0.10"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+tempfile = "3"
+fs2 = "0.4"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "blocking"] }
+
+[dependencies.sysinfo]
+version = "=0.37.2"
+default-features = false
+features = ["system"]

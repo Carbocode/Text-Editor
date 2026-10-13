@@ -38,14 +38,25 @@ impl WorkspaceWatcher {
     }
 
     pub fn has_changes(&self) -> bool {
+        self.drain_changes().0
+    }
+    /// Consume the same notify queue while reporting bounded scalar diagnostics.
+    pub fn drain_changes(&self) -> (bool, u64, u64) {
         let mut changed = false;
+        let mut count = 0u64;
+        let mut errors = 0u64;
         while let Ok(event) = self.events.try_recv() {
-            changed |= match event {
+            let relevant = match event {
                 Ok(event) => !matches!(event.kind, EventKind::Access(_)),
-                Err(_) => true,
+                Err(_) => {
+                    errors += 1;
+                    true
+                }
             };
+            count += u64::from(relevant);
+            changed |= relevant;
         }
-        changed
+        (changed, count, errors)
     }
 }
 

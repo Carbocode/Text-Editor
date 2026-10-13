@@ -80,6 +80,7 @@ pub struct SearchLocation {
 
 #[derive(Clone, uniffi::Record)]
 pub struct WorkspaceSnapshot {
+    pub diagnostic_operation: u64,
     pub revision: u64,
     pub counter: u64,
     pub workspace_name: Option<String>,
@@ -96,6 +97,7 @@ pub struct WorkspaceSnapshot {
 impl From<AppSnapshot> for WorkspaceSnapshot {
     fn from(snapshot: AppSnapshot) -> Self {
         Self {
+            diagnostic_operation: snapshot.diagnostic_operation,
             revision: snapshot.revision,
             counter: snapshot.diagnostic_counter,
             workspace_name: snapshot.workspace_name,
@@ -201,14 +203,58 @@ impl From<AppError> for WorkspaceError {
 #[derive(uniffi::Object)]
 pub struct WorkspaceApplication {
     inner: Mutex<Application>,
+    diagnostic_observer: std::sync::OnceLock<native_workspace_application::DiagnosticObserver>,
 }
 
 #[uniffi::export]
 impl WorkspaceApplication {
     #[uniffi::constructor]
     pub fn new() -> Self {
+        let mut app = Application::new();
+        app.enable_devtools("swiftui");
+        let diagnostic_observer = std::sync::OnceLock::new();
+        let observer = app.diagnostic_observer();
+        if observer.available() {
+            let _ = diagnostic_observer.set(observer);
+        }
         Self {
-            inner: Mutex::new(Application::new()),
+            inner: Mutex::new(app),
+            diagnostic_observer,
+        }
+    }
+
+    pub fn open_devtools(&self) -> bool {
+        if self.diagnostic_observer.get().is_none() {
+            let Ok(mut app) = self.inner.try_lock() else {
+                return false;
+            };
+            app.start_devtools("swiftui");
+            let observer = app.diagnostic_observer();
+            if !observer.available() {
+                return false;
+            }
+            let _ = self.diagnostic_observer.set(observer);
+        }
+        if let Some(observer) = self.diagnostic_observer.get() {
+            observer.open_console();
+            return true;
+        }
+        false
+    }
+
+    pub fn devtools_available(&self) -> bool {
+        cfg!(feature = "devtools")
+    }
+
+    pub fn devtools_enabled(&self) -> bool {
+        self.diagnostic_observer
+            .get()
+            .is_some_and(|observer| observer.enabled())
+    }
+
+    pub fn diagnostic_snapshot_applied(&self, operation: u64, revision: u64, duration_ns: u64) {
+        if let Some(observer) = self.diagnostic_observer.get() {
+            observer.snapshot_applied(operation, revision, duration_ns);
         }
     }
 

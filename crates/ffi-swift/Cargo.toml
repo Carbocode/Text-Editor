@@ -7,6 +7,10 @@ license.workspace = true
 [lib]
 crate-type = ["cdylib", "staticlib"]
 
+[features]
+default = ["devtools"]
+devtools = ["native-workspace-application/devtools"]
+
 [dependencies]
 native-workspace-application = { path = "../application" }
 native-workspace-domain = { path = "../domain" }

@@ -1,0 +1,1 @@
+{"arch":"aarch64","archive_bytes":178789,"batches":200,"commit_p95_ms":81.274375,"commit_p99_ms":110.701834,"database_bytes":2109440,"export_ms":1002.617708,"import_ms":4344.798583,"page_p95_ms":65.962875,"page_p99_ms":78.460792,"platform":"macos","profile":"debug","records":51200,"records_per_second":4300.351695,"recovery_ms":136.879834}

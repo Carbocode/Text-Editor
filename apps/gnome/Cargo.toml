@@ -1,8 +1,13 @@
 [package]
 name = "native-workspace-gnome"
+default-run = "native-workspace-gnome"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = ["devtools"]
+devtools = ["native-workspace-application/devtools"]
 
 [dependencies]
 native-workspace-application = { path = "../../crates/application" }

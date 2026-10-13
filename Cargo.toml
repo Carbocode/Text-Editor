@@ -1,9 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/filesystem", "crates/storage", "crates/application", "crates/syntax", "crates/ffi-swift", "apps/gnome", "apps/kde", "tools/xtask"]
+members = ["crates/domain", "crates/filesystem", "crates/storage", "crates/application", "crates/syntax", "crates/ffi-swift", "apps/gnome", "apps/kde", "tools/xtask", "crates/devtools-protocol", "crates/devtools", "apps/devtools", "apps/devtools-ui"]
 default-members = ["crates/domain", "crates/filesystem", "crates/storage", "crates/application"]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 version = "0.1.0"
+
+# Bundled DuckDB C++ debug symbols dwarf the developer binaries. Keep its code
+# unoptimized for dev checks while avoiding multi-gigabyte duplicate native caches.
+[profile.dev.package.libduckdb-sys]
+debug = false

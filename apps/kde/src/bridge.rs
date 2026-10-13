@@ -18,6 +18,7 @@ pub mod qobject {
     extern "RustQt" {
         #[qobject]
         #[qml_element]
+        #[qproperty(bool, devtools_available)]
         #[qproperty(u64, counter)]
         #[qproperty(u64, revision)]
         #[qproperty(QString, workspace_name)]
@@ -43,6 +44,8 @@ pub mod qobject {
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
 
+        #[qinvokable]
+        fn open_devtools(self: Pin<&mut Self>);
         #[qinvokable]
         fn increment(self: Pin<&mut Self>);
         #[qinvokable]
@@ -109,6 +112,7 @@ pub struct AppControllerRust {
     active_document_dirty: bool,
     active_document_external_change: bool,
     error_message: QString,
+    devtools_available: bool,
     application: Application,
     background_move_error: Option<String>,
 }
@@ -140,6 +144,7 @@ impl qobject::AppController {
     }
 
     fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
+        self.as_mut().rust_mut().application.enable_devtools("qt");
         self.as_mut().rust_mut().background_move_error = None;
         let result = self.as_mut().rust_mut().application.dispatch(command);
         match result {
@@ -164,6 +169,13 @@ impl qobject::AppController {
     }
 
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
+        let diagnostic_started = self
+            .rust()
+            .application
+            .devtools_enabled()
+            .then(std::time::Instant::now);
+        let diagnostic_operation = snapshot.diagnostic_operation;
+        let diagnostic_revision = snapshot.revision;
         self.as_mut().set_revision(snapshot.revision);
         self.as_mut().set_counter(snapshot.diagnostic_counter);
         self.as_mut()
@@ -303,14 +315,22 @@ impl qobject::AppController {
                 self.as_mut()
                     .set_active_document_text(QString::from(doc.content));
                 self.as_mut().set_active_document_dirty(doc.dirty);
-                self.set_active_document_external_change(doc.external_change);
+                self.as_mut()
+                    .set_active_document_external_change(doc.external_change);
             }
             None => {
                 self.as_mut().set_active_document_id(QString::default());
                 self.as_mut().set_active_document_text(QString::default());
                 self.as_mut().set_active_document_dirty(false);
-                self.set_active_document_external_change(false);
+                self.as_mut().set_active_document_external_change(false);
             }
+        }
+        if let Some(started) = diagnostic_started {
+            self.rust().application.diagnostic_snapshot_applied(
+                diagnostic_operation,
+                diagnostic_revision,
+                started.elapsed().as_nanos() as u64,
+            );
         }
     }
 
@@ -336,7 +356,15 @@ impl qobject::AppController {
         ))
     }
 
+    pub fn open_devtools(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().application.start_devtools("qt");
+        self.rust().application.open_devtools();
+    }
+
     pub fn initialize_persistence(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().application.enable_devtools("qt");
+        let available = self.rust().application.devtools_supported();
+        self.as_mut().set_devtools_available(available);
         let result = self
             .as_mut()
             .rust_mut()

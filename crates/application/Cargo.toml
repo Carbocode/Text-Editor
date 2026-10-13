@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+devtools = ["dep:native-workspace-devtools-producer"]
+
 [dependencies]
+native-workspace-devtools-producer = { path = "../devtools", optional = true }
 native-workspace-domain = { path = "../domain" }
 native-workspace-filesystem = { path = "../filesystem" }
 native-workspace-storage = { path = "../storage" }
