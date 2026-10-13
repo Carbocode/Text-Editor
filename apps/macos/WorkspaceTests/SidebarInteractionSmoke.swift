@@ -40,6 +40,34 @@ struct SidebarInteractionSmoke {
         }
         precondition(renders.count == initialRenders, "Drag hover rebuilt the parent workspace view")
         drag.finish()
+        precondition(drag.source == nil && drag.directory == nil && !drag.valid)
+        for destination in ["", "folder"] {
+            drag.begin("source.rs")
+            drag.enter(destination, valid: true, expand: { false })
+            drag.finish(committing: destination)
+            // AppKit can deliver hover callbacks after performDrop has finished.
+            drag.enter(destination, valid: false, expand: { false })
+            drag.updateValidity(true)
+            precondition(drag.source == nil && drag.directory == nil && !drag.valid,
+                         "Late hover restored drop feedback after release")
+        }
+        let dropBox = NSHostingView(rootView: SidebarRootDropLabel(drag: drag, workspaceName: "fixture"))
+        precondition(dropBox.fittingSize.height == 0, "Inactive drop box reserves sidebar space")
+        drag.begin("source.rs")
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        precondition(dropBox.fittingSize.height >= 32, "Active drag did not show the drop box")
+        drag.finish()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        precondition(dropBox.fittingSize.height == 0, "Finished drag did not hide the drop box")
+        var mouseDown = true
+        let cancelledDrag = SidebarDragState(isDragging: { mouseDown })
+        cancelledDrag.begin("source.rs")
+        cancelledDrag.enter("", valid: false, expand: { false })
+        mouseDown = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.4))
+        precondition(cancelledDrag.source == nil && cancelledDrag.directory == nil && !cancelledDrag.valid,
+                     "Release outside a drop target retained drag feedback")
+        print("macOS drop box visibility/late hover/cancel cleanup smoke test passed")
         let hover = SidebarDragState(expansionDelay: 0.2, isDragging: { true })
         var open: Set<String> = ["already-open"]
         func over(_ folder: String) {

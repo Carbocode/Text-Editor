@@ -7,7 +7,7 @@ import SwiftUI
 final class SidebarDragState: ObservableObject {
     @Published private(set) var directory: String?
     @Published private(set) var valid = false
-    private(set) var source: String?
+    @Published private(set) var source: String?
     private var hoverToken = UUID()
     private var leaveToken = UUID()
     private var temporaryFolders: [String: () -> Void] = [:]
@@ -42,6 +42,7 @@ final class SidebarDragState: ObservableObject {
     /// child hit testing have a short grace period and do not restart that deadline.
     func enter(_ target: String, valid: Bool, expand: @escaping () -> Bool,
                collapse: @escaping () -> Void = {}) {
+        guard source != nil else { return }
         leaveToken = UUID()
         if directory == target { updateValidity(valid); return }
         restoreTemporaryFolders(exceptAncestorsOf: target)
@@ -56,7 +57,10 @@ final class SidebarDragState: ObservableObject {
         }
     }
 
-    func updateValidity(_ value: Bool) { if valid != value { valid = value } }
+    func updateValidity(_ value: Bool) {
+        let activeValue = source != nil && value
+        if valid != activeValue { valid = activeValue }
+    }
 
     func leave(_ target: String) {
         guard directory == target else { return }
@@ -88,6 +92,7 @@ final class SidebarDragState: ObservableObject {
         hoverToken = UUID()
         leaveToken = UUID()
         if directory != nil { directory = nil }
+        updateValidity(false)
         restoreTemporaryFolders(exceptAncestorsOf: destination)
         temporaryFolders.removeAll()
     }
@@ -146,13 +151,14 @@ struct SidebarEntryIcon: View {
 struct SidebarDropOutline: View {
     @ObservedObject var drag: SidebarDragState
     let directory: String
+    var cornerRadius: CGFloat = 4
 
     var body: some View {
-        if drag.directory == directory {
-            RoundedRectangle(cornerRadius: 4)
+        if drag.source != nil && drag.directory == directory {
+            RoundedRectangle(cornerRadius: cornerRadius)
                 .fill((drag.valid ? Color.accentColor : Color.red).opacity(0.14))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 4)
+                    RoundedRectangle(cornerRadius: cornerRadius)
                         .stroke(drag.valid ? Color.accentColor : Color.red, lineWidth: 2)
                 }
                 .allowsHitTesting(false)
@@ -165,15 +171,17 @@ struct SidebarRootDropLabel: View {
     let workspaceName: String
 
     var body: some View {
-        Label("Move to workspace root", systemImage: "folder")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, minHeight: 32)
-            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 4))
-            .overlay {
-                RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.35), lineWidth: 1)
-            }
-            .contentShape(Rectangle())
-            .help("Move a file or folder to the root of " + workspaceName)
+        if drag.source != nil {
+            Label("Move to workspace root", systemImage: "folder")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 32)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 10))
+                .overlay { SidebarDropOutline(drag: drag, directory: "", cornerRadius: 10) }
+                .contentShape(Rectangle())
+                .help("Move a file or folder to the root of " + workspaceName)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+        }
     }
 }
