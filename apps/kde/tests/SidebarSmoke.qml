@@ -26,15 +26,21 @@ ApplicationWindow {
     property int initialTreeResets: 0
     property string expandedPath: "src/main.rs"
     property real switchedAt: 0
+    property bool waitingMoveSave: false
 
     function check(condition, message) {
         if (!condition) throw new Error(message)
     }
 
-    function findItem(item, name) {
-        if (item.objectName === name) return item
-        for (var child of item.children || []) {
-            var found = findItem(child, name)
+    function findItem(item, name, visited) {
+        visited = visited || new Set()
+        if (!item || visited.has(item)) return null
+        visited.add(item)
+        if (item.objectName === name && (name !== "sidebarRenameField" || item.visible)) return item
+        var candidates = [...(item.children || []), ...(item.resources || [])]
+        if (item.contentItem) candidates.push(item.contentItem)
+        for (var child of candidates) {
+            var found = findItem(child, name, visited)
             if (found) return found
         }
         return null
@@ -65,6 +71,12 @@ ApplicationWindow {
             check(icon.status === Image.Ready, "Icon did not load: " + icon.source)
             check(icon.visible && icon.width === 16 && icon.height === 16,
                 "Icon has no visible 16px area")
+            var row = icon.parent.parent
+            check(Math.abs(icon.mapToItem(row, 0, icon.height / 2).y - row.height / 2) < 0.5,
+                "Sidebar icon is not centered inside its row")
+            var label = findItem(row, "sidebarEntryLabel")
+            check(label && Math.abs(label.mapToItem(row, 0, label.height / 2).y - row.height / 2) < 0.5,
+                "Sidebar text is not centered inside its row: y=" + (label ? label.mapToItem(row, 0, label.height / 2).y : "missing") + ", row=" + row.height + ", label=" + (label ? label.height : 0))
         }
         check(icons.some(icon => String(icon.source).endsWith("rust.png")),
             "Rust file did not use its bundled icon: " + icons.map(icon => String(icon.source)).join(", "))
@@ -235,6 +247,107 @@ ApplicationWindow {
                     check(activeLine.parent.clip, "Offscreen highlight is not clipped to the viewport")
                     checkNumberAlignment([25, 40, 100])
                     console.log("KDE editor scrolling active-line smoke test passed")
+                    pane.editorText = "unsaved rename"
+                    pane.beginRename("src")
+                    break
+                case 13:
+                    var renameField = pane.activeRenameEditor
+                    check(renameField && renameField.visible, "Inline rename field is missing: path=" + pane.renamePath + ", treeRows=" + tree.rows)
+                    check(renameField.selectedText === "src", "Folder name was not selected: text=" + renameField.text + ", selected=" + renameField.selectedText + ", focus=" + renameField.activeFocus)
+                    var renameRow = renameField.parent.parent
+                    var renameTopLeft = renameField.mapToItem(renameRow, 0, 0)
+                    check(renameTopLeft.y >= 0 && renameTopLeft.y + renameField.height <= renameRow.height,
+                        "Inline rename extends outside its row vertically")
+                    check(renameTopLeft.x >= 0 && renameTopLeft.x + renameField.width <= renameRow.width,
+                        "Inline rename extends outside its row horizontally")
+                    check(Math.abs(renameTopLeft.y + renameField.height / 2 - renameRow.height / 2) < 0.5,
+                        "Inline rename is not centered inside its row")
+                    renameField.text = "renamed"
+                    pane.renameName = renameField.text
+                    pane.commitRename()
+                    break
+                case 14:
+                    check(controller.error_message.length === 0, "Folder rename failed")
+                    check(controller.active_document_id === "renamed/new.rs", "Rename lost active document")
+                    check(controller.active_document_text === "unsaved rename" && controller.active_document_dirty,
+                        "Rename lost unsaved edits")
+                    console.log("KDE inline rename/buffer smoke test passed")
+                    controller.create_entry("destination", true)
+                    pane.editorText = "unsaved move"
+                    pane.startEntryDrag("renamed", Qt.point(30, 30))
+                    check(findItem(pane, "sidebarDragGhost").visible, "Drag ghost is missing")
+                    check(!pane.canDrop("renamed", "renamed"), "Folder accepted a drop inside itself")
+                    check(!pane.canDrop("README.md", ""), "Same-parent drop should be forbidden")
+                    pane.hoverDrop("destination")
+                    check(pane.collapsedDirectories["destination"] !== false, "Folder expanded before hover delay")
+                    switchedAt = Date.now()
+                    break
+                case 15:
+                    if (Date.now() - switchedAt < 500) {
+                        pane.leaveDrop("destination")
+                        pane.hoverDrop("destination")
+                        --step
+                        break
+                    }
+                    check(pane.collapsedDirectories["destination"] === false, "Hover did not expand closed folder")
+                    check(pane.dropEntry("destination"), "Folder drop failed")
+                    pane.finishEntryDrag(true)
+                    break
+                case 16:
+                    check(controller.active_document_id === "destination/renamed/new.rs", "Move lost active document")
+                    check(controller.active_document_text === "unsaved move" && controller.active_document_dirty,
+                        "Move lost unsaved edits")
+                    pane.startEntryDrag("destination/renamed/new.rs", Qt.point(30, 30))
+                    check(pane.dropEntry(""), "Drop to root failed")
+                    pane.finishEntryDrag(true)
+                    controller.save_document()
+                    waitingMoveSave = true
+                    switchedAt = Date.now()
+                    break
+                case 17:
+                    if (waitingMoveSave) {
+                        controller.poll_workspace_changes()
+                        if (controller.active_document_dirty && Date.now() - switchedAt < 3000) {
+                            --step
+                            break
+                        }
+                        check(controller.error_message.length === 0 && !controller.active_document_dirty,
+                            "Could not save moved document after background confirmation")
+                        waitingMoveSave = false
+                        pane.beginRename("new.rs")
+                        --step
+                        break
+                    }
+                    var fileRename = pane.activeRenameEditor
+                    check(fileRename && fileRename.selectedText === "new", "File rename should select its stem: field=" + fileRename + (fileRename ? ", text=" + fileRename.text + ", selected=" + fileRename.selectedText + ", focus=" + fileRename.activeFocus + ", path=" + fileRename.parent.parent.entry.path : ""))
+                    fileRename.text = "renamed.rs"
+                    pane.renameName = fileRename.text
+                    pane.commitRename()
+                    break
+                case 18:
+                    check(controller.active_document_id === "renamed.rs", "Inline file rename failed")
+                    check(controller.active_document_text === "unsaved move", "Inline rename lost content")
+                    check(pane.collapsedDirectories["destination"] === false, "Drop did not promote folder expansion")
+                    controller.create_entry("sibling", true)
+                    pane.startEntryDrag("renamed.rs", Qt.point(30, 30))
+                    pane.hoverDrop("destination/renamed")
+                    switchedAt = Date.now()
+                    break
+                case 19:
+                    if (Date.now() - switchedAt < 500) { --step; break }
+                    check(pane.collapsedDirectories["destination/renamed"] === false, "Nested folder did not open temporarily")
+                    pane.hoverDrop("sibling")
+                    check(pane.collapsedDirectories["destination/renamed"] !== false, "Sibling hover did not restore the previous branch")
+                    check(pane.collapsedDirectories["destination"] === false, "Pre-existing expansion must be retained")
+                    switchedAt = Date.now()
+                    break
+                case 20:
+                    if (Date.now() - switchedAt < 500) { --step; break }
+                    check(pane.collapsedDirectories["sibling"] === false, "Sibling folder did not open temporarily")
+                    pane.finishEntryDrag(true)
+                    check(pane.collapsedDirectories["sibling"] !== false, "Cancelled drag retained a temporary expansion")
+                    check(pane.collapsedDirectories["destination"] === false, "Cancellation lost a confirmed expansion")
+                    console.log("KDE drag ghost/drop/hover expansion/sibling rollback smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {

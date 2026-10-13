@@ -3,6 +3,7 @@ import SwiftUI
 
 struct NoWrapTextEditor: NSViewRepresentable {
     let documentID: String
+    var documentIdentity: UInt64? = nil
     let textRevision: UInt64
     @Binding var text: String
     let searchRange: NSRange?
@@ -53,10 +54,14 @@ struct NoWrapTextEditor: NSViewRepresentable {
         let scrollView = container.scrollView
         guard let textView = scrollView.documentView as? NSTextView else { return }
         context.coordinator.parent = self
-        let switchedDocument = context.coordinator.documentID != documentID
-        if switchedDocument || context.coordinator.textRevision != textRevision {
+        let pathChanged = context.coordinator.documentID != documentID
+        let switchedDocument = context.coordinator.documentIdentity != documentIdentity
+            || (documentIdentity == nil && pathChanged)
+        let languageChanged = pathChanged && (context.coordinator.documentID as NSString).pathExtension.lowercased()
+            != (documentID as NSString).pathExtension.lowercased()
+        if switchedDocument || pathChanged || context.coordinator.textRevision != textRevision {
             context.coordinator.textRevision = textRevision
-            if switchedDocument {
+            if pathChanged {
                 container.fileName = documentID
             }
             let changedText = textView.string != text
@@ -67,9 +72,10 @@ struct NoWrapTextEditor: NSViewRepresentable {
                 textView.setSelectedRange(NSRange(location: 0, length: 0))
                 scrollView.contentView.scroll(to: .zero)
                 scrollView.reflectScrolledClipView(scrollView.contentView)
-                context.coordinator.documentID = documentID
             }
-            if changedText || switchedDocument {
+            context.coordinator.documentID = documentID
+            context.coordinator.documentIdentity = documentIdentity
+            if changedText || switchedDocument || languageChanged {
                 SyntaxHighlighting.apply(to: textView, fileName: documentID)
                 container.refreshContent()
             }
@@ -95,6 +101,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: NoWrapTextEditor
         var documentID: String
+        var documentIdentity: UInt64?
         var textRevision: UInt64
         var searchNavigationRevision: UInt64 = 0
         weak var container: EditorContainer?
@@ -102,6 +109,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
         init(_ parent: NoWrapTextEditor) {
             self.parent = parent
             documentID = parent.documentID
+            documentIdentity = parent.documentIdentity
             textRevision = parent.textRevision
         }
 

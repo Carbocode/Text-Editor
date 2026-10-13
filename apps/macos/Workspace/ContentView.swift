@@ -7,6 +7,9 @@ struct ContentView: View {
     @State private var choosingWorkspace = false
     @State private var showingHome = true
     @State private var resolvingExternalChange = false
+    @State private var renamePath: String?
+    @State private var renameDraft = SidebarRenameDraft()
+    @State private var sidebarDrag = SidebarDragState()
     @State private var creatingEntry = false
     @State private var creatingDirectory = false
     @State private var newEntryPath = ""
@@ -17,6 +20,7 @@ struct ContentView: View {
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
     @State private var sidebarRows: [SidebarOutlineRow] = []
     @State private var sidebarCache: [Int: SidebarIndex] = [:]
+    @State private var sidebarRelocation: WorkspaceStore.Relocation?
     private struct SidebarIndex {
         let children: [String: [SidebarOutlineRow]]
         let rows: [SidebarOutlineRow]
@@ -62,8 +66,8 @@ struct ContentView: View {
         var groups: [SearchFileGroup] = []
         var indicesByID: [String: Int] = [:]
         let indexedResults: [(Int, SearchResult)] = textMode
-            ? store.searchResults.enumerated().compactMap { $0.element.location == nil ? nil : ($0.offset, $0.element) }
-            : store.documents.enumerated().compactMap { index, document in
+            ? store.sidebarSearchResults.enumerated().compactMap { $0.element.location == nil ? nil : ($0.offset, $0.element) }
+            : store.sidebarDocuments.enumerated().compactMap { index, document in
                 guard needle.isEmpty || document.id.split(separator: "/").last.map(String.init)?
                     .localizedCaseInsensitiveContains(needle) == true else { return nil }
                 return (index, SearchResult(id: document.id, title: document.title,
@@ -92,7 +96,7 @@ struct ContentView: View {
                 }
             }
             if !textMode {
-                for path in store.directories where path.split(separator: "/").last.map(String.init)?
+                for path in store.sidebarDirectories where path.split(separator: "/").last.map(String.init)?
                     .localizedCaseInsensitiveContains(needle) == true {
                     let parts = path.split(separator: "/")
                     for count in 1...parts.count {
@@ -101,7 +105,7 @@ struct ContentView: View {
                 }
             }
         } else {
-            directoryPaths = Set(store.directories)
+            directoryPaths = Set(store.sidebarDirectories)
         }
 
         var children: [String: [SidebarOutlineRow]] = [:]
@@ -156,7 +160,10 @@ struct ContentView: View {
         let opening = !expandedDirectories.contains(path)
         if opening { expandedDirectories.insert(path) }
         else { expandedDirectories.remove(path) }
-        if sidebarTab == 1 || !fileNameQuery.isEmpty { return }
+        if sidebarTab == 1 || !fileNameQuery.isEmpty {
+            sidebarCache.removeValue(forKey: 0)
+            return
+        }
         guard let index = sidebarRows.firstIndex(where: { $0.id == "entry:\(path)" }) else { return }
         let prefix = path + "/"
         var end = index + 1
@@ -178,43 +185,54 @@ struct ContentView: View {
         switch row.kind {
         case .directory(let path):
             Button {
-                toggleDirectory(path)
+                if renamePath != path { toggleDirectory(path) }
             } label: {
                 HStack(spacing: 8) {
                     Image(systemName: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty
                         ? "chevron.down" : "chevron.right").font(.caption)
-                    if let icon = WorkspaceIcons.image(for: path, isDirectory: true,
-                                                      expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty) {
-                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
-                    }
-                    Text(path.split(separator: "/").last.map(String.init) ?? path)
+                    SidebarEntryIcon(draft: renameDraft, originalPath: path,
+                                     displayPath: store.presentationPath(path), directory: true,
+                                     expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty)
+                    entryName(path)
                 }
                 .padding(.leading, CGFloat(row.depth) * 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .onDrag { dragProvider(path) } preview: { dragPreview(path, directory: true) }
+            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(path))
+            .overlay { SidebarDropOutline(drag: sidebarDrag, directory: path) }
+            .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
+            .contextMenu {
+                Button("Rename") { beginRename(path) }
+            }
         case .file(let group):
             Button {
-                store.openSearchFile(group.id)
+                if renamePath != group.id { store.openSearchFile(group.id) }
             } label: {
                 HStack(spacing: 8) {
-                    if let icon = WorkspaceIcons.image(for: group.id) {
-                        Image(nsImage: icon).resizable().interpolation(.high).frame(width: 16, height: 16)
-                    }
-                    Text(group.id.split(separator: "/").last.map(String.init) ?? group.id)
+                    SidebarEntryIcon(draft: renameDraft, originalPath: group.id,
+                                     displayPath: store.presentationPath(group.id))
+                    entryName(group.id)
                     Spacer(minLength: 0)
-                    if store.externalChangeIDs.contains(group.id) {
+                    if store.externalChangeIDs.contains(where: { store.presentationPath($0) == group.id }) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
-                    if group.file.dirty { Circle().fill(.secondary).frame(width: 6, height: 6) }
+                    if group.file.dirty || (store.activeDocument.map { store.presentationPath($0.id) } == group.id && store.hasDirtyActiveDocument) { Circle().fill(.secondary).frame(width: 6, height: 6) }
                 }
                 .padding(.leading, CGFloat(row.depth) * 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
+            .onDrag { dragProvider(group.id) } preview: { dragPreview(group.id, directory: false) }
+            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(parentDirectory(group.id)))
+            .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
+            .contextMenu {
+                Button("Rename") { beginRename(group.id) }
+            }
+            .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument.map { store.presentationPath($0.id) } == group.id
                 ? Color.accentColor.opacity(0.12) : Color.clear)
         case .match(let match):
             Button {
@@ -237,6 +255,92 @@ struct ContentView: View {
         }
     }
 
+    private let sidebarDragType = UTType(exportedAs: "org.nativeworkspace.sidebar-entry", conformingTo: .data)
+
+    private func parentDirectory(_ path: String) -> String {
+        path.split(separator: "/").dropLast().joined(separator: "/")
+    }
+
+    @ViewBuilder private func entryName(_ path: String) -> some View {
+        if renamePath == path {
+            SidebarInlineRename(name: Binding(get: { renameDraft.name }, set: { renameDraft.changeName($0) }),
+                                directory: store.directories.contains(path),
+                                submit: { commitRename() }, cancel: { cancelRename() })
+                .frame(height: 22)
+        } else {
+            Text(store.presentationPath(path).split(separator: "/").last.map(String.init) ?? path)
+        }
+    }
+
+    private func beginRename(_ path: String) {
+        renamePath = path
+        renameDraft.begin(path)
+        store.setSidebarRenaming(true)
+    }
+
+    private func commitRename() {
+        guard let path = renamePath else { return }
+        if store.renameEntry(path, newName: renameDraft.name) { cancelRename() }
+    }
+
+    private func cancelRename() {
+        if renamePath != nil { renamePath = nil }
+        renameDraft.finish()
+        store.setSidebarRenaming(false)
+    }
+
+    private func dragProvider(_ path: String) -> NSItemProvider {
+        cancelRename()
+        sidebarDrag.begin(path)
+        store.beginSidebarDrag()
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: sidebarDragType.identifier, visibility: .ownProcess) {
+            completion in completion(Data(path.utf8), nil); return nil
+        }
+        return provider
+    }
+
+    private func dragPreview(_ path: String, directory: Bool) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: directory ? "folder.fill" : "doc.fill")
+            Text(path.split(separator: "/").last.map(String.init) ?? path)
+        }
+        .padding(10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+        .shadow(radius: 5, y: 3)
+    }
+
+    private func canDrop(_ directory: String) -> Bool {
+        guard let source = sidebarDrag.source else { return false }
+        return store.canMoveEntry(source, directory: directory)
+    }
+
+    private func entryDropDelegate(_ directory: String) -> SidebarEntryDropDelegate {
+        SidebarEntryDropDelegate(type: sidebarDragType, hasActiveDrag: { sidebarDrag.source != nil }, canDrop: {
+            let valid = canDrop(directory)
+            sidebarDrag.updateValidity(valid)
+            return valid
+        }, entered: {
+            sidebarDrag.enter(directory, valid: canDrop(directory), expand: {
+                guard sidebarTab == 0, fileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      canDrop(directory), !directory.isEmpty,
+                      !expandedDirectories.contains(directory) else { return false }
+                toggleDirectory(directory)
+                return true
+            }, collapse: {
+                if expandedDirectories.contains(directory) { toggleDirectory(directory) }
+            })
+        }, exited: {
+            sidebarDrag.leave(directory)
+        }, dropped: {
+            guard canDrop(directory), let source = sidebarDrag.source else { return false }
+            let accepted = store.moveEntry(source, directory: directory)
+            sidebarDrag.finish(committing: accepted ? directory : nil)
+            store.endSidebarDrag()
+            return accepted
+        })
+    }
+
     var body: some View {
         ZStack {
         if store.workspaceName != nil {
@@ -248,12 +352,12 @@ struct ContentView: View {
                     ForEach(sidebarRows) { row in
                         sidebarRow(row)
                     }
-                    if sidebarTab == 0 {
-                        Color.clear.frame(height: 52).listRowSeparator(.hidden)
-                    }
                 }
                 .onReceive(store.$workspaceRoot) { root in
                     if currentWorkspaceRoot != root {
+                        sidebarDrag.finish()
+                        store.endSidebarDrag()
+                        cancelRename()
                         currentWorkspaceRoot = root
                         expandedDirectories.removeAll()
                         sidebarCache.removeAll()
@@ -262,6 +366,24 @@ struct ContentView: View {
                 }
                 .onReceive(store.$sidebarRevision) { _ in
                     DispatchQueue.main.async {
+                        sidebarCache.removeAll()
+                        rebuildSidebarIndex()
+                    }
+                }
+                .onReceive(store.$pendingRelocation) { relocation in
+                    DispatchQueue.main.async {
+                        if let previous = sidebarRelocation, relocation == nil {
+                            let confirmed = store.directories.contains(previous.target)
+                                || store.documents.contains { $0.id == previous.target }
+                            if !confirmed {
+                                let inverse = WorkspaceStore.Relocation(source: previous.target, target: previous.source)
+                                expandedDirectories = Set(expandedDirectories.map(inverse.path))
+                            }
+                        }
+                        if let relocation, sidebarRelocation != relocation {
+                            expandedDirectories = Set(expandedDirectories.map(relocation.path))
+                        }
+                        sidebarRelocation = relocation
                         sidebarCache.removeAll()
                         rebuildSidebarIndex()
                     }
@@ -350,6 +472,13 @@ struct ContentView: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, 8)
                     }
+                }
+                if sidebarTab == 0 {
+                    SidebarRootDropLabel(drag: sidebarDrag, workspaceName: store.workspaceName ?? "workspace")
+                        .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(""))
+                        .overlay { SidebarDropOutline(drag: sidebarDrag, directory: "") }
+                        .padding(.horizontal, 10)
+                        .padding(.bottom, 8)
                 }
             }
         } detail: {
@@ -451,7 +580,7 @@ struct ContentView: View {
                         .font(.callout)
                         .padding(8)
                     }
-                    NoWrapTextEditor(documentID: active.id,
+                    NoWrapTextEditor(documentID: active.id, documentIdentity: store.editorDocumentIdentity,
                                      textRevision: store.editorContentRevision,
                                      text: Binding(
                         get: { store.editorText },
@@ -524,4 +653,26 @@ private struct WindowTitleView: NSViewRepresentable {
             window.title = title
         }
     }
+}
+
+private struct SidebarEntryDropDelegate: DropDelegate {
+    let type: UTType
+    let hasActiveDrag: () -> Bool
+    let canDrop: () -> Bool
+    let entered: () -> Void
+    let exited: () -> Void
+    let dropped: () -> Bool
+
+    func validateDrop(info: DropInfo) -> Bool {
+        // suggestedName is optional and is not preserved by every native
+        // pasteboard bridge. The own-process type and live session identify us.
+        hasActiveDrag() && info.hasItemsConforming(to: [type])
+    }
+    func dropEntered(info: DropInfo) { entered() }
+    func dropExited(info: DropInfo) { exited() }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        entered()
+        return DropProposal(operation: canDrop() ? .move : .forbidden)
+    }
+    func performDrop(info: DropInfo) -> Bool { validateDrop(info: info) && dropped() }
 }

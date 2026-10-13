@@ -6,4 +6,10 @@
   <key>CFBundleName</key><string>Native Workspace</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>UTExportedTypeDeclarations</key>
+  <array><dict>
+    <key>UTTypeIdentifier</key><string>org.nativeworkspace.sidebar-entry</string>
+    <key>UTTypeDescription</key><string>Workspace sidebar entry</string>
+    <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+  </dict></array>
 </dict></plist>

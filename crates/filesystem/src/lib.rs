@@ -87,6 +87,28 @@ pub trait WorkspaceFilesystem: Send + Sync {
         id: &DocumentId,
         content: &str,
     ) -> Result<(), FilesystemError>;
+    fn rename_entry(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        target: &DocumentId,
+    ) -> Result<(), FilesystemError> {
+        let source_path = RealFilesystem::safe_document_location(root, id)?;
+        let target_path = RealFilesystem::safe_document_location(root, target)?;
+        let metadata =
+            fs::symlink_metadata(&source_path).map_err(|source| FilesystemError::Io {
+                path: source_path.clone(),
+                source,
+            })?;
+        if !(metadata.is_file() || metadata.is_dir()) {
+            return Err(FilesystemError::InvalidDocument(source_path));
+        }
+        rename_without_replacing(&source_path, &target_path).map_err(|source| FilesystemError::Io {
+            path: target_path,
+            source,
+        })
+    }
+
     fn create_entry(
         &self,
         root: &Path,
@@ -105,6 +127,44 @@ pub trait WorkspaceFilesystem: Send + Sync {
                 .map_err(|source| FilesystemError::Io { path, source })
         }
     }
+}
+
+// Both supported Unix platforms offer an atomic no-replace rename, including folders.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn rename_without_replacing(from: &Path, to: &Path) -> io::Result<()> {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let from = CString::new(from.as_os_str().as_bytes())?;
+    let to = CString::new(to.as_os_str().as_bytes())?;
+    // SAFETY: both pointers refer to live, NUL-terminated path strings.
+    let result = unsafe {
+        #[cfg(target_os = "macos")]
+        {
+            libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        }
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn rename_without_replacing(_from: &Path, _to: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "safe rename is unavailable on this platform",
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -304,6 +364,76 @@ impl WorkspaceFilesystem for RealFilesystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rename_never_replaces_existing_files_or_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let filesystem = RealFilesystem;
+        for name in ["a", "b"] {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        fs::write(dir.path().join("a/note"), "keep").unwrap();
+        assert!(
+            filesystem
+                .rename_entry(
+                    dir.path(),
+                    &DocumentId::parse("a").unwrap(),
+                    &DocumentId::parse("b").unwrap()
+                )
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a/note")).unwrap(),
+            "keep"
+        );
+        filesystem
+            .rename_entry(
+                dir.path(),
+                &DocumentId::parse("a").unwrap(),
+                &DocumentId::parse("renamed").unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("renamed/note")).unwrap(),
+            "keep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rename_rejects_symlink_sources_destinations_and_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "outside").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("secret"), dir.path().join("alias"))
+            .unwrap();
+        fs::write(dir.path().join("note"), "inside").unwrap();
+        for (from, to) in [
+            ("alias", "new"),
+            ("linked/secret", "new"),
+            ("note", "linked/new"),
+            ("note", "alias"),
+        ] {
+            assert!(
+                RealFilesystem
+                    .rename_entry(
+                        dir.path(),
+                        &DocumentId::parse(from).unwrap(),
+                        &DocumentId::parse(to).unwrap()
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "outside"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("note")).unwrap(),
+            "inside"
+        );
+    }
 
     #[test]
     fn lists_nested_files_and_directories_and_round_trips_content() {

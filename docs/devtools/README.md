@@ -405,4 +405,3 @@ Se i volumi reali superano il budget del motore scelto, valutare partizionamento
 - [egui](https://github.com/emilk/egui), [eframe](https://docs.rs/eframe/latest/eframe/) e [righe virtualizzate](https://docs.rs/egui_extras/latest/egui_extras/struct.TableBody.html), console desktop scelta.
 - [egui_plot](https://docs.rs/egui_plot/latest/egui_plot/), grafici, e [iced](https://iced.rs/), alternativa esaminata.
 - [ClickHouse: architettura analitica colonnare](https://clickhouse.com/docs/get-started/about/intro), possibile evoluzione della raccolta centralizzata.
-

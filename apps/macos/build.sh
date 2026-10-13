@@ -40,3 +40,20 @@ swiftc -parse-as-library \
   apps/macos/WorkspaceTests/IconSmoke.swift \
   -o apps/macos/.build/IconSmoke
 apps/macos/.build/IconSmoke
+swiftc -parse-as-library \
+  apps/macos/Workspace/SidebarInlineRename.swift \
+  apps/macos/Workspace/SidebarInteractionState.swift \
+  apps/macos/Workspace/WorkspaceIcons.swift \
+  apps/macos/WorkspaceTests/SidebarInteractionSmoke.swift \
+  -o apps/macos/.build/SidebarInteractionSmoke
+apps/macos/.build/SidebarInteractionSmoke
+swiftc -parse-as-library -I apps/macos/generated \
+  -Xcc -fmodule-map-file=apps/macos/generated/native_workspace_ffi_swiftFFI.modulemap \
+  apps/macos/generated/native_workspace_ffi_swift.swift \
+  apps/macos/Workspace/WorkspaceStore.swift \
+  apps/macos/Workspace/SidebarInteractionState.swift \
+  apps/macos/Workspace/WorkspaceIcons.swift \
+  apps/macos/WorkspaceTests/WorkspaceStoreSmoke.swift \
+  target/debug/libnative_workspace_ffi_swift.a \
+  -o apps/macos/.build/WorkspaceStoreSmoke
+apps/macos/.build/WorkspaceStoreSmoke
