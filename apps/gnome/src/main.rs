@@ -1654,6 +1654,39 @@ fn build_window(app: &adw::Application) {
             ui.create_entry("notes", true);
             ui.create_entry("notes/todo.md", false);
             assert!(workspace_path.join("notes/todo.md").is_file());
+            ui.buffer.set_text("first\nsecond\n");
+            horizontal.set_value(0.0);
+            for _ in 0..100 {
+                glib::MainContext::default().iteration(false);
+            }
+            assert!(ui.editor.hexpands() && ui.editor.vexpands());
+            let last = ui.buffer.end_iter();
+            let (last_y, line_height) = ui.editor.line_yrange(&last);
+            let (clicked, _) = ui.editor.line_at_y(last_y + line_height / 2);
+            assert_eq!(
+                clicked.offset(),
+                last.offset(),
+                "final empty line is unreachable"
+            );
+            ui.buffer.place_cursor(&clicked);
+            assert_eq!(ui.buffer.cursor_position(), 13);
+            let (first_y, _) = ui.editor.line_yrange(&ui.buffer.start_iter());
+            assert!(last_y > first_y);
+            let overlay = ui
+                .editor_chrome
+                .row
+                .first_child()
+                .unwrap()
+                .downcast::<gtk::Overlay>()
+                .unwrap();
+            let origin = ui
+                .editor
+                .compute_point(&overlay, &gtk::graphene::Point::new(0.0, 0.0))
+                .unwrap();
+            assert!(origin.x() >= 48.0, "active line cannot include the gutter");
+            ui.buffer.set_text("");
+            assert!(ui.editor.line_yrange(&ui.buffer.start_iter()).1 > 0);
+            println!("GTK editor full-width/active-line smoke test passed");
             println!("GTK workspace edit/save smoke test passed");
         }
         app.quit();
