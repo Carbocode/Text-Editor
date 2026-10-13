@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
     @State private var sidebarRows: [SidebarOutlineRow] = []
     @State private var sidebarCache: [Int: SidebarIndex] = [:]
+    @State private var sidebarRelocation: WorkspaceStore.Relocation?
     private struct SidebarIndex {
         let children: [String: [SidebarOutlineRow]]
         let rows: [SidebarOutlineRow]
@@ -65,8 +66,8 @@ struct ContentView: View {
         var groups: [SearchFileGroup] = []
         var indicesByID: [String: Int] = [:]
         let indexedResults: [(Int, SearchResult)] = textMode
-            ? store.searchResults.enumerated().compactMap { $0.element.location == nil ? nil : ($0.offset, $0.element) }
-            : store.documents.enumerated().compactMap { index, document in
+            ? store.sidebarSearchResults.enumerated().compactMap { $0.element.location == nil ? nil : ($0.offset, $0.element) }
+            : store.sidebarDocuments.enumerated().compactMap { index, document in
                 guard needle.isEmpty || document.id.split(separator: "/").last.map(String.init)?
                     .localizedCaseInsensitiveContains(needle) == true else { return nil }
                 return (index, SearchResult(id: document.id, title: document.title,
@@ -95,7 +96,7 @@ struct ContentView: View {
                 }
             }
             if !textMode {
-                for path in store.directories where path.split(separator: "/").last.map(String.init)?
+                for path in store.sidebarDirectories where path.split(separator: "/").last.map(String.init)?
                     .localizedCaseInsensitiveContains(needle) == true {
                     let parts = path.split(separator: "/")
                     for count in 1...parts.count {
@@ -104,7 +105,7 @@ struct ContentView: View {
                 }
             }
         } else {
-            directoryPaths = Set(store.directories)
+            directoryPaths = Set(store.sidebarDirectories)
         }
 
         var children: [String: [SidebarOutlineRow]] = [:]
@@ -215,10 +216,10 @@ struct ContentView: View {
                                      displayPath: store.presentationPath(group.id))
                     entryName(group.id)
                     Spacer(minLength: 0)
-                    if store.externalChangeIDs.contains(group.id) {
+                    if store.externalChangeIDs.contains(where: { store.presentationPath($0) == group.id }) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
-                    if group.file.dirty || (store.activeDocument?.id == group.id && store.hasDirtyActiveDocument) { Circle().fill(.secondary).frame(width: 6, height: 6) }
+                    if group.file.dirty || (store.activeDocument.map { store.presentationPath($0.id) } == group.id && store.hasDirtyActiveDocument) { Circle().fill(.secondary).frame(width: 6, height: 6) }
                 }
                 .padding(.leading, CGFloat(row.depth) * 14)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -231,7 +232,7 @@ struct ContentView: View {
             .contextMenu {
                 Button("Rename") { beginRename(group.id) }
             }
-            .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument?.id == group.id
+            .listRowBackground(store.selectedSearchResultIndex == nil && store.activeDocument.map { store.presentationPath($0.id) } == group.id
                 ? Color.accentColor.opacity(0.12) : Color.clear)
         case .match(let match):
             Button {
@@ -365,6 +366,24 @@ struct ContentView: View {
                 }
                 .onReceive(store.$sidebarRevision) { _ in
                     DispatchQueue.main.async {
+                        sidebarCache.removeAll()
+                        rebuildSidebarIndex()
+                    }
+                }
+                .onReceive(store.$pendingRelocation) { relocation in
+                    DispatchQueue.main.async {
+                        if let previous = sidebarRelocation, relocation == nil {
+                            let confirmed = store.directories.contains(previous.target)
+                                || store.documents.contains { $0.id == previous.target }
+                            if !confirmed {
+                                let inverse = WorkspaceStore.Relocation(source: previous.target, target: previous.source)
+                                expandedDirectories = Set(expandedDirectories.map(inverse.path))
+                            }
+                        }
+                        if let relocation, sidebarRelocation != relocation {
+                            expandedDirectories = Set(expandedDirectories.map(relocation.path))
+                        }
+                        sidebarRelocation = relocation
                         sidebarCache.removeAll()
                         rebuildSidebarIndex()
                     }

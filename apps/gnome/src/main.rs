@@ -43,6 +43,7 @@ struct Ui {
     recent_list: gtk::Box,
     recent_empty: gtk::Label,
     updating: Rc<Cell<bool>>,
+    background_move_error: Rc<RefCell<Option<String>>>,
     collapsed_directories: Rc<RefCell<std::collections::HashSet<String>>>,
 }
 
@@ -119,6 +120,7 @@ impl Ui {
     }
 
     fn dispatch(&self, command: AppCommand) {
+        self.background_move_error.replace(None);
         let opening_workspace = matches!(command, AppCommand::OpenWorkspace(_));
         let result = self.core.borrow_mut().dispatch(command);
         match result {
@@ -129,6 +131,13 @@ impl Ui {
                 }
             }
             Err(error) => self.status.set_label(&error.to_string()),
+        }
+        let background_error = self.core.borrow_mut().take_background_error();
+        if let Some(error) = background_error {
+            self.background_move_error.replace(Some(error.clone()));
+            let snapshot = self.core.borrow().snapshot();
+            self.render(snapshot);
+            self.status.set_label(&error);
         }
     }
 
@@ -205,6 +214,9 @@ impl Ui {
                 Some(_) => "Saved",
                 None => "Select a document",
             });
+        if let Some(error) = self.background_move_error.borrow().as_deref() {
+            self.status.set_label(error);
+        }
         if recent_changed {
             while let Some(child) = self.recent_list.first_child() {
                 self.recent_list.remove(&child);
@@ -1119,6 +1131,7 @@ fn build_window(app: &adw::Application) {
         recent_list,
         recent_empty,
         updating: Rc::new(Cell::new(false)),
+        background_move_error: Rc::new(RefCell::new(None)),
         collapsed_directories,
     };
     ui.render(snapshot);
@@ -1193,13 +1206,14 @@ fn build_window(app: &adw::Application) {
                     }
                 }),
                 move_entry: Rc::new(move |path, directory| {
+                    move_ui.background_move_error.replace(None);
                     let Ok(id) = DocumentId::parse(path) else {
                         return false;
                     };
                     let result = move_ui
                         .core
                         .borrow_mut()
-                        .dispatch(AppCommand::MoveEntry { id, directory });
+                        .dispatch(AppCommand::MoveEntryOptimistic { id, directory });
                     match result {
                         Ok(snapshot) => {
                             move_ui.render(snapshot);
@@ -1517,6 +1531,13 @@ fn build_window(app: &adw::Application) {
                     Ok(None) => {}
                     Err(error) => ui.status.set_label(&error.to_string()),
                 }
+            }
+            let background_error = ui.core.borrow_mut().take_background_error();
+            if let Some(error) = background_error {
+                ui.background_move_error.replace(Some(error.clone()));
+                let snapshot = ui.core.borrow().snapshot();
+                ui.render(snapshot);
+                ui.status.set_label(&error);
             }
             glib::ControlFlow::Continue
         });
@@ -1896,6 +1917,19 @@ fn build_window(app: &adw::Application) {
             ui.dispatch(AppCommand::SaveDocument(
                 DocumentId::parse("todo.md").unwrap(),
             ));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while ui.core.borrow().has_pending_move() && std::time::Instant::now() < deadline {
+                let result = ui
+                    .core
+                    .borrow_mut()
+                    .dispatch_if_changed(AppCommand::PollSearchResults)
+                    .unwrap();
+                if let Some(snapshot) = result {
+                    ui.render(snapshot);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(!ui.core.borrow().has_pending_move());
             assert_eq!(
                 std::fs::read_to_string(workspace_path.join("todo.md")).unwrap(),
                 "unsaved move"

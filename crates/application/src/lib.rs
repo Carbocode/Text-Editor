@@ -1,6 +1,8 @@
 //! Shared application commands, events, state, and owned snapshots.
 
 mod icons;
+#[cfg(test)]
+mod optimistic_move_tests;
 pub use icons::{file_icon_name, folder_icon_name};
 
 use native_workspace_domain::{DiagnosticState, DocumentId, Workspace};
@@ -29,14 +31,31 @@ pub enum AppCommand {
     QueueSearchQuery(String),
     PollSearchResults,
     OpenWorkspace(PathBuf),
-    CreateEntry { id: DocumentId, directory: bool },
-    RenameEntry { id: DocumentId, new_name: String },
-    MoveEntry { id: DocumentId, directory: String },
+    CreateEntry {
+        id: DocumentId,
+        directory: bool,
+    },
+    RenameEntry {
+        id: DocumentId,
+        new_name: String,
+    },
+    MoveEntry {
+        id: DocumentId,
+        directory: String,
+    },
+    /// Publish the new tree immediately and confirm the filesystem move off-thread.
+    MoveEntryOptimistic {
+        id: DocumentId,
+        directory: String,
+    },
     RefreshWorkspace,
     PollWorkspaceChanges,
     OpenDocument(DocumentId),
     CloseDocument(DocumentId),
-    ChangeDocument { id: DocumentId, content: String },
+    ChangeDocument {
+        id: DocumentId,
+        content: String,
+    },
     SaveDocument(DocumentId),
     ReloadDocument(DocumentId),
     OverwriteDocument(DocumentId),
@@ -307,7 +326,10 @@ pub struct AppState {
 fn renamed_path(path: &str, id: &DocumentId, target: &DocumentId) -> String {
     if path == id.as_str() {
         target.as_str().to_owned()
-    } else if let Some(suffix) = path.strip_prefix(&format!("{}/", id.as_str())) {
+    } else if let Some(suffix) = path
+        .strip_prefix(id.as_str())
+        .and_then(|suffix| suffix.strip_prefix('/'))
+    {
         format!("{}/{suffix}", target.as_str())
     } else {
         path.to_owned()
@@ -363,13 +385,23 @@ impl AppState {
     fn apply(&mut self, event: &AppEvent) {
         match event {
             AppEvent::EntryRenamed { id, target } | AppEvent::EntryMoved { id, target } => {
+                let affected = |path: &str| {
+                    path == id.as_str()
+                        || path
+                            .strip_prefix(id.as_str())
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                };
                 for entry in &mut self.documents {
-                    entry.id =
-                        DocumentId::parse(renamed_path(entry.id.as_str(), id, target)).unwrap();
+                    if affected(entry.id.as_str()) {
+                        entry.id =
+                            DocumentId::parse(renamed_path(entry.id.as_str(), id, target)).unwrap();
+                    }
                 }
                 self.documents.sort_by(|a, b| a.id.cmp(&b.id));
                 for path in &mut self.directories {
-                    *path = renamed_path(path, id, target);
+                    if affected(path) {
+                        *path = renamed_path(path, id, target);
+                    }
                 }
                 self.directories.sort();
                 if let Some(active) = &mut self.active_document {
@@ -516,6 +548,57 @@ pub struct Application {
     search_jobs: Sender<SearchJob>,
     search_results_rx: Receiver<SearchFinished>,
     search_generation: Arc<AtomicU64>,
+    pending_move: Option<PendingMove>,
+    deferred_commands: Vec<AppCommand>,
+    background_error: Option<String>,
+}
+
+struct PendingMove {
+    id: DocumentId,
+    target: DocumentId,
+    result: Receiver<Result<(), FilesystemError>>,
+}
+
+fn move_target(id: &DocumentId, directory: &str) -> Result<DocumentId, AppError> {
+    let name = id.as_str().rsplit('/').next().unwrap();
+    if directory.is_empty() {
+        return Ok(DocumentId::parse(name).unwrap());
+    }
+    let parent = DocumentId::parse(directory).map_err(|_| AppError::InvalidEntryName)?;
+    Ok(DocumentId::parse(format!("{}/{name}", parent.as_str())).unwrap())
+}
+
+fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) -> AppCommand {
+    let map =
+        |id: DocumentId| DocumentId::parse(renamed_path(id.as_str(), source, target)).unwrap();
+    match command {
+        AppCommand::OpenDocument(id) => AppCommand::OpenDocument(map(id)),
+        AppCommand::CloseDocument(id) => AppCommand::CloseDocument(map(id)),
+        AppCommand::SaveDocument(id) => AppCommand::SaveDocument(map(id)),
+        AppCommand::ReloadDocument(id) => AppCommand::ReloadDocument(map(id)),
+        AppCommand::OverwriteDocument(id) => AppCommand::OverwriteDocument(map(id)),
+        AppCommand::ChangeDocument { id, content } => AppCommand::ChangeDocument {
+            id: map(id),
+            content,
+        },
+        AppCommand::CreateEntry { id, directory } => AppCommand::CreateEntry {
+            id: map(id),
+            directory,
+        },
+        AppCommand::RenameEntry { id, new_name } => AppCommand::RenameEntry {
+            id: map(id),
+            new_name,
+        },
+        AppCommand::MoveEntry { id, directory } => AppCommand::MoveEntry {
+            id: map(id),
+            directory: renamed_path(&directory, source, target),
+        },
+        AppCommand::MoveEntryOptimistic { id, directory } => AppCommand::MoveEntryOptimistic {
+            id: map(id),
+            directory: renamed_path(&directory, source, target),
+        },
+        other => other,
+    }
 }
 
 struct SearchJob {
@@ -617,6 +700,9 @@ impl Application {
             search_jobs,
             search_results_rx,
             search_generation,
+            pending_move: None,
+            deferred_commands: Vec::new(),
+            background_error: None,
         }
     }
 
@@ -640,6 +726,14 @@ impl Application {
         self.state.snapshot()
     }
 
+    pub fn take_background_error(&mut self) -> Option<String> {
+        self.background_error.take()
+    }
+
+    pub fn has_pending_move(&self) -> bool {
+        self.pending_move.is_some()
+    }
+
     fn search_results(&self, documents: &[DocumentEntry], query: &str) -> Vec<SearchResult> {
         collect_search_results(
             self.filesystem.as_ref(),
@@ -654,6 +748,9 @@ impl Application {
     }
 
     fn queue_current_search(&mut self) {
+        if self.pending_move.is_some() {
+            return;
+        }
         let generation = self.search_generation.fetch_add(1, Ordering::Relaxed) + 1;
         if let Some(workspace) = &self.state.workspace
             && !self.state.search_query.0.trim().is_empty()
@@ -673,8 +770,8 @@ impl Application {
             .map(|outcome| outcome.snapshot)
     }
 
-    /// Performs external I/O first, then applies the resulting events to state.
-    /// Failed and no-op commands produce no events and do not advance revision.
+    /// Synchronous commands perform I/O before publishing events. Optimistic moves
+    /// publish first; subsequent dispatches confirm or roll back their paths.
     pub fn dispatch_with_events(&mut self, command: AppCommand) -> Result<AppOutcome, AppError> {
         let events = self.execute(command)?;
         Ok(AppOutcome {
@@ -688,11 +785,66 @@ impl Application {
         &mut self,
         command: AppCommand,
     ) -> Result<Option<AppSnapshot>, AppError> {
-        let events = self.execute(command)?;
-        Ok((!events.is_empty()).then(|| self.snapshot()))
+        let revision = self.state.revision;
+        self.execute(command)?;
+        Ok((self.state.revision != revision).then(|| self.snapshot()))
+    }
+
+    fn finish_pending_move(&mut self) -> Option<(DocumentId, DocumentId)> {
+        let pending = self.pending_move.as_ref()?;
+        let result = match pending.result.try_recv() {
+            Ok(result) => result.map_err(|error| error.to_string()),
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Err("Move worker stopped before confirming the operation".into())
+            }
+        };
+        let pending = self.pending_move.take().unwrap();
+        let rollback = if let Err(error) = result {
+            self.state.apply(&AppEvent::EntryMoved {
+                id: pending.target.clone(),
+                target: pending.id.clone(),
+            });
+            self.state.revision += 1;
+            self.background_error = Some(error);
+            Some((pending.target, pending.id))
+        } else {
+            None
+        };
+        self.queue_current_search();
+        for command in std::mem::take(&mut self.deferred_commands) {
+            let command = if let Some((source, target)) = &rollback {
+                remap_command(command, source, target)
+            } else {
+                command
+            };
+            if let Err(error) = self.execute(command) {
+                self.background_error = Some(error.to_string());
+            }
+        }
+        rollback
     }
 
     fn execute(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
+        let command = if let Some((source, target)) = self.finish_pending_move() {
+            remap_command(command, &source, &target)
+        } else {
+            command
+        };
+        if self.pending_move.is_some() {
+            match &command {
+                AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults => {
+                    return Ok(Vec::new());
+                }
+                AppCommand::ChangeDocument { .. }
+                | AppCommand::CloseDocument(_)
+                | AppCommand::IncrementDiagnostic => {}
+                _ => {
+                    self.deferred_commands.push(command);
+                    return Ok(Vec::new());
+                }
+            }
+        }
         let queued_query = matches!(command, AppCommand::QueueSearchQuery(_));
         let synchronous_query = matches!(command, AppCommand::SetSearchQuery(_));
         let explicit_refresh = matches!(command, AppCommand::RefreshWorkspace);
@@ -755,6 +907,15 @@ impl Application {
 
     /// Rename and move share the same filesystem operation and buffer protection.
     fn relocate_entry(&self, id: &DocumentId, target: &DocumentId) -> Result<bool, AppError> {
+        if !self.validate_relocation(id, target)? {
+            return Ok(false);
+        }
+        let root = &self.state.workspace.as_ref().unwrap().root;
+        self.filesystem.rename_entry(root, id, target)?;
+        Ok(true)
+    }
+
+    fn validate_relocation(&self, id: &DocumentId, target: &DocumentId) -> Result<bool, AppError> {
         let root = &self
             .state
             .workspace
@@ -783,6 +944,11 @@ impl Application {
             .documents
             .iter()
             .any(|entry| &entry.id == target || entry.id.as_str().starts_with(&target_prefix))
+            || self
+                .state
+                .directories
+                .iter()
+                .any(|path| path == target.as_str() || path.starts_with(&target_prefix))
         {
             return Err(AppError::Filesystem(FilesystemError::Io {
                 path: root.join(target.as_str()),
@@ -792,7 +958,6 @@ impl Application {
                 ),
             }));
         }
-        self.filesystem.rename_entry(root, id, target)?;
         Ok(true)
     }
 
@@ -973,6 +1138,27 @@ impl Application {
                 } else {
                     Vec::new()
                 }
+            }
+            AppCommand::MoveEntryOptimistic { id, directory } => {
+                let target = move_target(&id, &directory)?;
+                if !self.validate_relocation(&id, &target)? {
+                    return Ok(Vec::new());
+                }
+                let root = self.state.workspace.as_ref().unwrap().root.clone();
+                let filesystem = Arc::clone(&self.filesystem);
+                let source = id.clone();
+                let destination = target.clone();
+                let (sender, result) = mpsc::channel();
+                self.search_generation.fetch_add(1, Ordering::Relaxed);
+                self.pending_move = Some(PendingMove {
+                    id: id.clone(),
+                    target: target.clone(),
+                    result,
+                });
+                thread::spawn(move || {
+                    let _ = sender.send(filesystem.rename_entry(&root, &source, &destination));
+                });
+                vec![AppEvent::EntryMoved { id, target }]
             }
             AppCommand::MoveEntry { id, directory } => {
                 let name = id.as_str().rsplit('/').next().unwrap();

@@ -47,6 +47,8 @@ final class WorkspaceStore: ObservableObject {
     private let operationQueue: DispatchQueue
     private var deferredActions: [() -> Void] = []
     private var committedRelocation: Relocation?
+    private var failedRelocation: Relocation?
+    private var relocationFailure: String?
     private var protectedPaths: Set<String> = []
     private var sidebarDragging = false
     private var sidebarRenaming = false
@@ -65,6 +67,24 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func presentationPath(_ path: String) -> String { pendingRelocation?.path(path) ?? path }
+
+    var sidebarDirectories: [String] { directories.map(presentationPath) }
+    var sidebarDocuments: [DocumentSummary] {
+        documents.map { document in
+            var displayed = document
+            displayed.id = presentationPath(document.id)
+            displayed.title = displayed.id.split(separator: "/").last.map(String.init) ?? displayed.id
+            return displayed
+        }
+    }
+    var sidebarSearchResults: [SearchResult] {
+        searchResults.map { result in
+            var displayed = result
+            displayed.id = presentationPath(result.id)
+            displayed.title = displayed.id.split(separator: "/").last.map(String.init) ?? displayed.id
+            return displayed
+        }
+    }
 
     func canMoveEntry(_ source: String, directory: String) -> Bool {
         guard pendingRelocation == nil else { return false }
@@ -85,6 +105,10 @@ final class WorkspaceStore: ObservableObject {
 
     private func deferredPath(_ path: String) -> String {
         if documents.contains(where: { $0.id == path }) || directories.contains(path) { return path }
+        if let failedRelocation {
+            let original = Relocation(source: failedRelocation.target, target: failedRelocation.source).path(path)
+            if documents.contains(where: { $0.id == original }) || directories.contains(original) { return original }
+        }
         return committedRelocation?.path(path) ?? path
     }
 
@@ -116,6 +140,7 @@ final class WorkspaceStore: ObservableObject {
                 if let snapshot = finishedSnapshot { self.apply(snapshot, preserveEditorText: preserveEdits) }
                 if let relocation {
                     if finishedFailure == nil { self.committedRelocation = relocation }
+                    else { self.failedRelocation = relocation; self.relocationFailure = finishedFailure }
                     if self.pendingRelocation == relocation { self.pendingRelocation = nil }
                 }
                 if let failure = finishedFailure { self.errorMessage = failure }
@@ -127,6 +152,7 @@ final class WorkspaceStore: ObservableObject {
                 while !self.backendBusy && !self.deferredActions.isEmpty {
                     self.deferredActions.removeFirst()()
                 }
+                if let failure = self.relocationFailure { self.errorMessage = failure }
             }
         }
     }
@@ -164,6 +190,8 @@ final class WorkspaceStore: ObservableObject {
             try flushLocalEdits()
             apply(try core.openWorkspace(path: url.path))
             committedRelocation = nil
+            failedRelocation = nil
+            relocationFailure = nil
             selectedSearchResultIndex = nil
             errorMessage = nil
         } catch {
@@ -182,6 +210,8 @@ final class WorkspaceStore: ObservableObject {
         let name = path.split(separator: "/").last.map(String.init) ?? path
         let target = directory.isEmpty ? name : directory + "/" + name
         let relocation = Relocation(source: path, target: target)
+        failedRelocation = nil
+        relocationFailure = nil
         pendingRelocation = relocation
         errorMessage = nil
         selectedSearchResultIndex = nil
@@ -215,6 +245,8 @@ final class WorkspaceStore: ObservableObject {
             return false
         }
         let relocation = Relocation(source: path, target: target)
+        failedRelocation = nil
+        relocationFailure = nil
         pendingRelocation = relocation
         errorMessage = nil
         selectedSearchResultIndex = nil

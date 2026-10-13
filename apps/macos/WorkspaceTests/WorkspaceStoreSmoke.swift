@@ -55,7 +55,12 @@ struct WorkspaceStoreSmoke {
         precondition(externalContent == "external")
 
         queue.suspend()
+        let moveStarted = Date()
         precondition(store.moveEntry("new.rs", directory: "dest"))
+        precondition(Date().timeIntervalSince(moveStarted) < 0.1, "Drop blocked the UI")
+        precondition(store.sidebarDocuments.contains { $0.id == "dest/new.rs" }, "Moved file is not immediately in its destination branch")
+        precondition(!store.sidebarDocuments.contains { $0.id == "new.rs" }, "Moved file remained in the original branch")
+        precondition(FileManager.default.fileExists(atPath: root.appendingPathComponent("new.rs").path))
         store.saveDocument() // queued behind the move
         store.openSearchFile("new.rs") // its old path must resolve after confirmation
         queue.resume()
@@ -76,6 +81,24 @@ struct WorkspaceStoreSmoke {
         precondition(store.activeDocument?.id == "dest/final.rs")
         precondition(store.editorText == "edit while poll and rename are queued")
         precondition(store.pendingRelocation == nil)
+
+        queue.suspend()
+        precondition(store.moveEntry("dest/final.rs", directory: ""))
+        precondition(store.sidebarDocuments.contains { $0.id == "final.rs" })
+        try "external destination".write(to: root.appendingPathComponent("final.rs"), atomically: true, encoding: .utf8)
+        store.changeDocument("typing during rejected move")
+        store.openSearchFile("final.rs") // click the optimistic row before confirmation
+        store.saveDocument()
+        queue.resume()
+        finishBackend()
+        precondition(store.activeDocument?.id == "dest/final.rs", "Failed move did not restore the clicked row's original path")
+        precondition(store.sidebarDocuments.contains { $0.id == "dest/final.rs" })
+        precondition(store.editorText == "typing during rejected move")
+        precondition(store.errorMessage != nil, "Deferred actions hid the failed move error")
+        let restoredContent = try String(contentsOf: root.appendingPathComponent("dest/final.rs"), encoding: .utf8)
+        precondition(restoredContent == store.editorText)
+        let externalDestination = try String(contentsOf: root.appendingPathComponent("final.rs"), encoding: .utf8)
+        precondition(externalDestination == "external destination")
 
         let draft = SidebarRenameDraft()
         draft.begin("README.md")

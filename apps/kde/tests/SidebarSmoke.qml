@@ -26,6 +26,7 @@ ApplicationWindow {
     property int initialTreeResets: 0
     property string expandedPath: "src/main.rs"
     property real switchedAt: 0
+    property bool waitingMoveSave: false
 
     function check(condition, message) {
         if (!condition) throw new Error(message)
@@ -300,11 +301,23 @@ ApplicationWindow {
                     check(pane.dropEntry(""), "Drop to root failed")
                     pane.finishEntryDrag(true)
                     controller.save_document()
-                    check(controller.error_message.length === 0 && !controller.active_document_dirty,
-                        "Could not save moved document")
-                    pane.beginRename("new.rs")
+                    waitingMoveSave = true
+                    switchedAt = Date.now()
                     break
                 case 17:
+                    if (waitingMoveSave) {
+                        controller.poll_workspace_changes()
+                        if (controller.active_document_dirty && Date.now() - switchedAt < 3000) {
+                            --step
+                            break
+                        }
+                        check(controller.error_message.length === 0 && !controller.active_document_dirty,
+                            "Could not save moved document after background confirmation")
+                        waitingMoveSave = false
+                        pane.beginRename("new.rs")
+                        --step
+                        break
+                    }
                     var fileRename = pane.activeRenameEditor
                     check(fileRename && fileRename.selectedText === "new", "File rename should select its stem: field=" + fileRename + (fileRename ? ", text=" + fileRename.text + ", selected=" + fileRename.selectedText + ", focus=" + fileRename.activeFocus + ", path=" + fileRename.parent.parent.entry.path : ""))
                     fileRename.text = "renamed.rs"

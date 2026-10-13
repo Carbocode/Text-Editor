@@ -110,6 +110,7 @@ pub struct AppControllerRust {
     active_document_external_change: bool,
     error_message: QString,
     application: Application,
+    background_move_error: Option<String>,
 }
 
 impl qobject::AppController {
@@ -139,13 +140,26 @@ impl qobject::AppController {
     }
 
     fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
+        self.as_mut().rust_mut().background_move_error = None;
         let result = self.as_mut().rust_mut().application.dispatch(command);
         match result {
             Ok(snapshot) => {
                 self.as_mut().set_error_message(QString::default());
-                self.update_snapshot(snapshot);
+                self.as_mut().update_snapshot(snapshot);
             }
-            Err(error) => self.set_error_message(QString::from(error.to_string())),
+            Err(error) => self
+                .as_mut()
+                .set_error_message(QString::from(error.to_string())),
+        }
+        self.as_mut().report_background_error();
+    }
+
+    fn report_background_error(mut self: Pin<&mut Self>) {
+        if let Some(error) = self.as_mut().rust_mut().application.take_background_error() {
+            self.as_mut().rust_mut().background_move_error = Some(error.clone());
+            let snapshot = self.rust().application.snapshot();
+            self.as_mut().update_snapshot(snapshot);
+            self.set_error_message(QString::from(error));
         }
     }
 
@@ -345,7 +359,7 @@ impl qobject::AppController {
 
     pub fn move_entry(mut self: Pin<&mut Self>, path: &QString, directory: &QString) {
         match DocumentId::parse(path.to_string()) {
-            Ok(id) => self.as_mut().dispatch(AppCommand::MoveEntry {
+            Ok(id) => self.as_mut().dispatch(AppCommand::MoveEntryOptimistic {
                 id,
                 directory: directory.to_string(),
             }),
@@ -396,12 +410,17 @@ impl qobject::AppController {
             .dispatch_if_changed(AppCommand::PollWorkspaceChanges);
         match result {
             Ok(Some(snapshot)) => {
-                self.as_mut().set_error_message(QString::default());
-                self.update_snapshot(snapshot);
+                if self.rust().background_move_error.is_none() {
+                    self.as_mut().set_error_message(QString::default());
+                }
+                self.as_mut().update_snapshot(snapshot);
             }
             Ok(None) => {}
-            Err(error) => self.set_error_message(QString::from(error.to_string())),
+            Err(error) => self
+                .as_mut()
+                .set_error_message(QString::from(error.to_string())),
         }
+        self.as_mut().report_background_error();
     }
 
     pub fn poll_search_results(mut self: Pin<&mut Self>) {
@@ -411,10 +430,13 @@ impl qobject::AppController {
             .application
             .dispatch_if_changed(AppCommand::PollSearchResults);
         match result {
-            Ok(Some(snapshot)) => self.update_snapshot(snapshot),
+            Ok(Some(snapshot)) => self.as_mut().update_snapshot(snapshot),
             Ok(None) => {}
-            Err(error) => self.set_error_message(QString::from(error.to_string())),
+            Err(error) => self
+                .as_mut()
+                .set_error_message(QString::from(error.to_string())),
         }
+        self.as_mut().report_background_error();
     }
 
     pub fn open_document(mut self: Pin<&mut Self>, id: &QString) {
@@ -443,13 +465,16 @@ impl qobject::AppController {
                                 .set_active_document_external_change(doc.external_change);
                         }
                     }
-                    Err(error) => self.set_error_message(QString::from(error.to_string())),
+                    Err(error) => self
+                        .as_mut()
+                        .set_error_message(QString::from(error.to_string())),
                 }
             }
             Err(_) => self
                 .as_mut()
                 .set_error_message(QString::from("Invalid document name")),
         }
+        self.as_mut().report_background_error();
     }
 
     pub fn change_document(mut self: Pin<&mut Self>, text: &QString) {
