@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
     @State private var choosingWorkspace = false
-    @State private var showingHome = true
+    @Environment(\.openWindow) private var openWindow
     @State private var resolvingExternalChange = false
     @State private var renamePath: String?
     @State private var renameDraft = SidebarRenameDraft()
@@ -23,7 +23,10 @@ struct ContentView: View {
     @State private var sidebarChildren: [String: [SidebarOutlineRow]] = [:]
     @State private var sidebarRows: [SidebarOutlineRow] = []
     @State private var sidebarCache: [Int: SidebarIndex] = [:]
+    @State private var sidebarIndexGeneration = UUID()
+    @State private var sidebarIndexInProgress = false
     @State private var sidebarRelocation: WorkspaceStore.Relocation?
+
     private struct SidebarIndex {
         let children: [String: [SidebarOutlineRow]]
         let rows: [SidebarOutlineRow]
@@ -53,24 +56,64 @@ struct ContentView: View {
     }
 
     private func rebuildSidebarIndex() {
+        sidebarIndexGeneration = UUID()
         if sidebarTab >= 2 {
+            sidebarIndexInProgress = false
             sidebarChildren = [:]
             sidebarRows = []
             return
         }
         if let cached = sidebarCache[sidebarTab] {
+            sidebarIndexInProgress = false
             sidebarChildren = cached.children
             sidebarRows = cached.rows
             return
         }
-        let textMode = sidebarTab == 1
-        let needle = fileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        sidebarIndexInProgress = true
+        let generation = UUID()
+        sidebarIndexGeneration = generation
+        let tab = sidebarTab
+        let query = fileNameQuery
+        let documents = store.documents
+        let directories = store.directories
+        let searchResults = store.searchResults
+        let relocation = store.pendingRelocation
+        DispatchQueue.global(qos: .userInitiated).async {
+            let children = Self.buildSidebarChildren(documents: documents, directories: directories,
+                searchResults: searchResults, relocation: relocation, tab: tab, query: query)
+            DispatchQueue.main.async {
+                guard sidebarIndexGeneration == generation, sidebarTab == tab else { return }
+                sidebarIndexInProgress = false
+                sidebarChildren = children
+                refreshSidebarRows()
+                sidebarCache[tab] = SidebarIndex(children: children, rows: sidebarRows)
+            }
+        }
+    }
+
+    nonisolated private static func buildSidebarChildren(documents: [DocumentSummary], directories: [String],
+        searchResults: [SearchResult], relocation: WorkspaceStore.Relocation?, tab: Int, query: String)
+        -> [String: [SidebarOutlineRow]] {
+        let documents = documents.map { document in
+            var displayed = document
+            displayed.id = relocation?.path(document.id) ?? document.id
+            displayed.title = displayed.id.split(separator: "/").last.map(String.init) ?? displayed.id
+            return displayed
+        }
+        let directories = directories.map { relocation?.path($0) ?? $0 }
+        let searchResults = searchResults.map { result in
+            var displayed = result
+            displayed.id = relocation?.path(result.id) ?? result.id
+            return displayed
+        }
+        let textMode = tab == 1
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let searching = textMode || !needle.isEmpty
         var groups: [SearchFileGroup] = []
         var indicesByID: [String: Int] = [:]
         let indexedResults: [(Int, SearchResult)] = textMode
-            ? store.sidebarSearchResults.enumerated().compactMap { $0.element.location == nil ? nil : ($0.offset, $0.element) }
-            : store.sidebarDocuments.enumerated().compactMap { index, document in
+            ? searchResults.enumerated().compactMap { $0.element.location == nil ? nil : ($0.offset, $0.element) }
+            : documents.enumerated().compactMap { index, document in
                 guard needle.isEmpty || document.id.split(separator: "/").last.map(String.init)?
                     .localizedCaseInsensitiveContains(needle) == true else { return nil }
                 return (index, SearchResult(id: document.id, title: document.title,
@@ -99,7 +142,7 @@ struct ContentView: View {
                 }
             }
             if !textMode {
-                for path in store.sidebarDirectories where path.split(separator: "/").last.map(String.init)?
+                for path in directories where path.split(separator: "/").last.map(String.init)?
                     .localizedCaseInsensitiveContains(needle) == true {
                     let parts = path.split(separator: "/")
                     for count in 1...parts.count {
@@ -108,7 +151,7 @@ struct ContentView: View {
                 }
             }
         } else {
-            directoryPaths = Set(store.sidebarDirectories)
+            directoryPaths = Set(directories)
         }
 
         var children: [String: [SidebarOutlineRow]] = [:]
@@ -129,9 +172,7 @@ struct ContentView: View {
                 return left.id.localizedStandardCompare(right.id) == .orderedAscending
             }
         }
-        sidebarChildren = children
-        refreshSidebarRows()
-        sidebarCache[sidebarTab] = SidebarIndex(children: children, rows: sidebarRows)
+        return children
     }
 
     private func refreshSidebarRows() {
@@ -203,7 +244,8 @@ struct ContentView: View {
                         SidebarEntryIcon(draft: renameDraft, originalPath: path,
                                          displayPath: store.presentationPath(path), directory: true,
                                          expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty)
-                        entryName(path)
+                        entryName(path).opacity(isPendingMove(path) ? 0.5 : 1)
+                        pendingMoveIndicator(path)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -213,8 +255,8 @@ struct ContentView: View {
             .padding(.leading, CGFloat(row.depth) * 14 + 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
-            .onDrag { dragProvider(path) } preview: { dragPreview(path, directory: true) }
-            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(path))
+            .background(nativeDragSource(path, directory: true))
+            .overlay(nativeDropTarget(path))
             .overlay { SidebarDropOutline(drag: sidebarDrag, directory: path, selected: selectedDirectory == path) }
             .listRowBackground(Color.clear)
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
@@ -236,8 +278,9 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     SidebarEntryIcon(draft: renameDraft, originalPath: group.id,
                                      displayPath: store.presentationPath(group.id))
-                    entryName(group.id)
+                    entryName(group.id).opacity(isPendingMove(group.id) ? 0.5 : 1)
                     Spacer(minLength: 0)
+                    pendingMoveIndicator(group.id)
                     if store.externalChangeIDs.contains(where: { store.presentationPath($0) == group.id }) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
@@ -248,8 +291,8 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .onDrag { dragProvider(group.id) } preview: { dragPreview(group.id, directory: false) }
-            .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(parentDirectory(group.id)))
+            .background(nativeDragSource(group.id, directory: false))
+            .overlay(nativeDropTarget(parentDirectory(group.id)))
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
             .contextMenu {
                 Button("Rename") { beginRename(group.id) }
@@ -321,25 +364,101 @@ struct ContentView: View {
         store.setSidebarRenaming(false)
     }
 
-    private func dragProvider(_ path: String) -> NSItemProvider {
-        cancelRename()
-        sidebarDrag.begin(path)
-        store.beginSidebarDrag()
-        let provider = NSItemProvider()
-        provider.registerDataRepresentation(forTypeIdentifier: sidebarDragType.identifier, visibility: .ownProcess) {
-            completion in completion(Data(path.utf8), nil); return nil
-        }
-        return provider
+    private func isPendingMove(_ path: String) -> Bool {
+        guard let target = store.pendingRelocation?.target else { return false }
+        return path == target || path.hasPrefix(target + "/")
     }
 
-    private func dragPreview(_ path: String, directory: Bool) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: directory ? "folder.fill" : "doc.fill")
-            Text(path.split(separator: "/").last.map(String.init) ?? path)
+    @ViewBuilder private func pendingMoveIndicator(_ path: String) -> some View {
+        if isPendingMove(path) {
+            ProgressView().controlSize(.mini)
+                .accessibilityLabel("Moving… Waiting for confirmation")
+                .help("Moving… Waiting for confirmation")
         }
-        .padding(10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-        .shadow(radius: 5, y: 3)
+    }
+
+    private func nativeDragSource(_ path: String, directory: Bool) -> some View {
+        SidebarNativeDragSource(path: path, directory: directory,
+            type: NSPasteboard.PasteboardType(sidebarDragType.identifier),
+            enabled: renamePath == nil && !isPendingMove(path), state: sidebarDrag, begin: {
+                cancelRename()
+                sidebarDrag.begin(path)
+                store.beginSidebarDrag()
+            }, end: { store.endSidebarDrag() }, rowReady: { store.sidebarDropRowReady(path) })
+    }
+
+    private func relocateSidebarChildren(_ relocation: WorkspaceStore.Relocation) {
+        func remap(_ row: SidebarOutlineRow) -> SidebarOutlineRow {
+            let kind: SidebarOutlineRow.Kind
+            let path: String
+            switch row.kind {
+            case .directory(let original):
+                path = relocation.path(original)
+                kind = .directory(path)
+            case .file(var group):
+                path = relocation.path(group.id)
+                var file = group.file
+                file.id = path
+                file.title = path.split(separator: "/").last.map(String.init) ?? path
+                let matches = group.matches.map { match in
+                    var result = match.result
+                    result.id = path
+                    result.title = file.title
+                    return SearchMatchRow(index: match.index, result: result)
+                }
+                group = SearchFileGroup(id: path, file: file, matches: matches)
+                kind = .file(group)
+            case .match: return row
+            }
+            return SidebarOutlineRow(id: "entry:\(path)", depth: path.split(separator: "/").count - 1, kind: kind)
+        }
+        let sourceParent = parentDirectory(relocation.source)
+        let targetParent = parentDirectory(relocation.target)
+        guard let root = sidebarChildren[sourceParent]?.first(where: { $0.id == "entry:\(relocation.source)" }) else { return }
+        sidebarChildren[sourceParent]?.removeAll { $0.id == root.id }
+        for key in Array(sidebarChildren.keys) where key == relocation.source || key.hasPrefix(relocation.source + "/") {
+            let rows = sidebarChildren.removeValue(forKey: key) ?? []
+            sidebarChildren[relocation.path(key)] = rows.map(remap)
+        }
+        let moved = remap(root)
+        var siblings = sidebarChildren[targetParent] ?? []
+        let index = siblings.firstIndex { row in
+            let rowDirectory: Bool
+            let movedDirectory: Bool
+            if case .directory = row.kind { rowDirectory = true } else { rowDirectory = false }
+            if case .directory = moved.kind { movedDirectory = true } else { movedDirectory = false }
+            if rowDirectory != movedDirectory { return movedDirectory }
+            return moved.id.localizedStandardCompare(row.id) == .orderedAscending
+        } ?? siblings.count
+        siblings.insert(moved, at: index)
+        sidebarChildren[targetParent] = siblings
+        refreshSidebarRows()
+    }
+
+    private func applySidebarRelocation(_ relocation: WorkspaceStore.Relocation?) {
+        if let previous = sidebarRelocation, relocation == nil {
+            let confirmed = store.directories.contains(previous.target)
+                || store.documents.contains { $0.id == previous.target }
+            if !confirmed {
+                let inverse = WorkspaceStore.Relocation(source: previous.target, target: previous.source)
+                expandedDirectories = Set(expandedDirectories.map(inverse.path))
+                selectedDirectory = selectedDirectory.map(inverse.path)
+            }
+        }
+        if let relocation, sidebarRelocation != relocation {
+            expandedDirectories = Set(expandedDirectories.map(relocation.path))
+            selectedDirectory = selectedDirectory.map(relocation.path)
+        }
+        if let relocation, sidebarRelocation != relocation {
+            relocateSidebarChildren(relocation)
+        } else if let previous = sidebarRelocation, relocation == nil,
+                  !store.directories.contains(previous.target),
+                  !store.documents.contains(where: { $0.id == previous.target }) {
+            relocateSidebarChildren(WorkspaceStore.Relocation(source: previous.target, target: previous.source))
+        }
+        sidebarRelocation = relocation
+        sidebarCache.removeAll()
+        rebuildSidebarIndex()
     }
 
     private func canDrop(_ directory: String) -> Bool {
@@ -347,8 +466,8 @@ struct ContentView: View {
         return store.canMoveEntry(source, directory: directory)
     }
 
-    private func entryDropDelegate(_ directory: String) -> SidebarEntryDropDelegate {
-        SidebarEntryDropDelegate(type: sidebarDragType, hasActiveDrag: { sidebarDrag.source != nil }, canDrop: {
+    private func nativeDropTarget(_ directory: String) -> SidebarNativeDropTarget {
+        SidebarNativeDropTarget(type: NSPasteboard.PasteboardType(sidebarDragType.identifier), state: sidebarDrag, canDrop: {
             let valid = canDrop(directory)
             sidebarDrag.updateValidity(valid)
             return valid
@@ -368,13 +487,25 @@ struct ContentView: View {
             guard canDrop(directory), let source = sidebarDrag.source else {
                 sidebarDrag.finish()
                 store.endSidebarDrag()
+                store.sidebarDropHandlerFinished(false)
                 return false
             }
-            let accepted = store.moveEntry(source, directory: directory)
-            sidebarDrag.finish(committing: accepted ? directory : nil)
-            store.endSidebarDrag()
-            return accepted
-        })
+            sidebarDrag.hidePreview()
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            let result = withTransaction(transaction) {
+                let accepted = store.moveEntry(source, directory: directory)
+                sidebarDrag.finish(committing: accepted ? directory : nil)
+                store.endSidebarDrag()
+                if accepted {
+                    if !directory.isEmpty { expandedDirectories.insert(directory) }
+                    applySidebarRelocation(store.pendingRelocation)
+                }
+                return accepted
+            }
+            store.sidebarDropHandlerFinished(result)
+            return result
+        }, beginDrop: { store.beginSidebarDrop() }, previewHidden: { store.sidebarDropPreviewHidden() })
     }
 
     private var sidebarHeader: some View {
@@ -440,31 +571,17 @@ struct ContentView: View {
                     }
                 }
                 .onReceive(store.$pendingRelocation) { relocation in
-                    DispatchQueue.main.async {
-                        if let previous = sidebarRelocation, relocation == nil {
-                            let confirmed = store.directories.contains(previous.target)
-                                || store.documents.contains { $0.id == previous.target }
-                            if !confirmed {
-                                let inverse = WorkspaceStore.Relocation(source: previous.target, target: previous.source)
-                                expandedDirectories = Set(expandedDirectories.map(inverse.path))
-                                selectedDirectory = selectedDirectory.map(inverse.path)
-                            }
-                        }
-                        if let relocation, sidebarRelocation != relocation {
-                            expandedDirectories = Set(expandedDirectories.map(relocation.path))
-                            selectedDirectory = selectedDirectory.map(relocation.path)
-                        }
-                        sidebarRelocation = relocation
-                        sidebarCache.removeAll()
-                        rebuildSidebarIndex()
-                    }
+                    DispatchQueue.main.async { applySidebarRelocation(relocation) }
                 }
+
                 .onChange(of: fileNameQuery) { _, _ in
                     sidebarCache.removeValue(forKey: 0)
                     rebuildSidebarIndex()
                 }
                 .overlay {
-                    if sidebarTab < 2 && store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
+                    if sidebarRows.isEmpty && sidebarIndexInProgress {
+                        ProgressView("Loading files…")
+                    } else if sidebarTab < 2 && store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
                         Text(sidebarTab == 1
                              ? (store.searchQuery.isEmpty ? "Search file contents" : "No text matches")
                              : (fileNameQuery.isEmpty ? "No files" : "No matching names"))
@@ -520,7 +637,7 @@ struct ContentView: View {
                 }
                 if sidebarTab == 0 {
                     SidebarRootDropLabel(drag: sidebarDrag, workspaceName: store.workspaceName ?? "workspace")
-                        .onDrop(of: [sidebarDragType], delegate: entryDropDelegate(""))
+                        .overlay(nativeDropTarget(""))
                         .onGeometryChange(for: CGFloat.self) { geometry in
                             geometry.size.height
                         } action: { height in
@@ -533,56 +650,10 @@ struct ContentView: View {
             editorDetail
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
-                        Button("Home", systemImage: "house") { showingHome = true }
+                        Button("Home", systemImage: "house") { openWindow(id: "home") }
                     }
                 }
         }
-        .opacity(showingHome ? 0 : 1)
-        .allowsHitTesting(!showingHome)
-        }
-        if showingHome || store.workspaceName == nil {
-            VStack(alignment: .leading, spacing: 24) {
-                Label("Native Workspace", systemImage: "folder")
-                    .font(.largeTitle.bold())
-                if store.diagnosticsEnabled {
-                    Button("Developer Tools", systemImage: "waveform.path.ecg") { store.openDevtools() }
-                }
-                Button("Open Folder…", systemImage: "folder.badge.plus") {
-                    choosingWorkspace = true
-                }
-                .buttonStyle(.borderedProminent)
-                Text("Recent Workspaces").font(.title2.bold())
-                if store.recentWorkspaces.isEmpty {
-                    Text("No recent workspaces").foregroundStyle(.secondary)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            ForEach(store.recentWorkspaces, id: \.root) { workspace in
-                                Button {
-                                    openWorkspace(URL(fileURLWithPath: workspace.root, isDirectory: true))
-                                } label: {
-                                    Label {
-                                        VStack(alignment: .leading) {
-                                            Text(workspace.name)
-                                            Text(workspace.root).font(.caption).foregroundStyle(.secondary)
-                                        }
-                                    } icon: { Image(systemName: "folder") }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                                .padding(8)
-                            }
-                        }
-                    }
-                }
-                Spacer(minLength: 0)
-                if let error = store.errorMessage {
-                    Text(error).foregroundStyle(.red)
-                }
-            }
-            .padding(32)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         }
         .background(WindowTitleView(title: store.workspaceName ?? "Native Workspace"))
@@ -673,7 +744,6 @@ struct ContentView: View {
 
     private func openWorkspace(_ url: URL) {
         store.openWorkspace(url)
-        if store.workspaceRoot == url.path { showingHome = false }
     }
 }
 
@@ -704,26 +774,4 @@ private struct WindowTitleView: NSViewRepresentable {
             window.title = title
         }
     }
-}
-
-private struct SidebarEntryDropDelegate: DropDelegate {
-    let type: UTType
-    let hasActiveDrag: () -> Bool
-    let canDrop: () -> Bool
-    let entered: () -> Void
-    let exited: () -> Void
-    let dropped: () -> Bool
-
-    func validateDrop(info: DropInfo) -> Bool {
-        // suggestedName is optional and is not preserved by every native
-        // pasteboard bridge. The own-process type and live session identify us.
-        hasActiveDrag() && info.hasItemsConforming(to: [type])
-    }
-    func dropEntered(info: DropInfo) { entered() }
-    func dropExited(info: DropInfo) { exited() }
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        entered()
-        return DropProposal(operation: canDrop() ? .move : .forbidden)
-    }
-    func performDrop(info: DropInfo) -> Bool { validateDrop(info: info) && dropped() }
 }

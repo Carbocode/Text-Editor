@@ -99,7 +99,12 @@ impl Session {
             build: env!("CARGO_PKG_VERSION").into(),
             started_unix_ms: Counter(unix_ms()),
             clock_uncertainty_ns: Counter(1_000_000),
-            capabilities: vec!["dispatch".into(), "search".into(), "snapshot_apply".into()],
+            capabilities: vec![
+                "dispatch".into(),
+                "search".into(),
+                "snapshot_apply".into(),
+                "sidebar_drop".into(),
+            ],
         }
     }
     pub fn validate(&self) -> bool {

@@ -53,6 +53,24 @@ final class WorkspaceStore: ObservableObject {
     private var protectedPaths: Set<String> = []
     private var sidebarDragging = false
     private var sidebarRenaming = false
+    private var sidebarDropTrace: WorkspaceDropTrace?
+    private var sidebarDropTarget: String?
+    private var sidebarDropAccepting = false
+    private var diagnosticHeartbeat: Timer?
+
+    func beginSidebarDrop() {
+        sidebarDropTrace = core.devtoolsEnabled() ? core.beginSidebarDrop(origin: 1) : nil
+        sidebarDropAccepting = true
+        sidebarDropTarget = nil
+    }
+    func sidebarDropPreviewHidden() { sidebarDropTrace?.previewHidden() }
+    func sidebarDropHandlerFinished(_ accepted: Bool) {
+        sidebarDropAccepting = false
+        sidebarDropTrace?.handlerFinished(accepted: accepted)
+    }
+    func sidebarDropRowReady(_ path: String) {
+        if sidebarDropTarget == path { sidebarDropTrace?.sidebarReady() }
+    }
 
     init(core: WorkspaceApplication = WorkspaceApplication(),
          operationQueue: DispatchQueue = DispatchQueue(label: "workspace.backend", qos: .userInitiated),
@@ -60,6 +78,16 @@ final class WorkspaceStore: ObservableObject {
         self.core = core
         self.diagnosticsEnabled = core.devtoolsAvailable()
         self.operationQueue = operationQueue
+        if diagnosticsEnabled {
+            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
+                MainActor.assumeIsolated {
+                    guard let self else { timer.invalidate(); return }
+                    self.core.diagnosticUiHeartbeat()
+                }
+            }
+            diagnosticHeartbeat = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
         do {
             apply(try persistence ? core.enablePersistence() : core.snapshot())
         } catch {
@@ -120,7 +148,7 @@ final class WorkspaceStore: ObservableObject {
 
     /// Serialize expensive FFI snapshots and filesystem work away from AppKit.
     /// Edits typed while a job runs stay in the editor and are flushed under the final path.
-    private func performInBackground(relocation: Relocation? = nil, clearError: Bool = true, _ operation: @escaping @Sendable (WorkspaceApplication) throws -> WorkspaceSnapshot?) {
+    private func performInBackground(relocation: Relocation? = nil, trace: WorkspaceDropTrace? = nil, clearError: Bool = true, _ operation: @escaping @Sendable (WorkspaceApplication) throws -> WorkspaceSnapshot?) {
         guard !backendBusy else { return }
         let document = activeDocument
         let submittedText = editorText
@@ -145,6 +173,7 @@ final class WorkspaceStore: ObservableObject {
                 let preserveEdits = self.editorText != submittedText
                 if let snapshot = finishedSnapshot { self.apply(snapshot, preserveEditorText: preserveEdits) }
                 if let relocation {
+                    trace?.confirmed(success: finishedFailure == nil)
                     if finishedFailure == nil { self.committedRelocation = relocation }
                     else { self.failedRelocation = relocation; self.relocationFailure = finishedFailure }
                     if self.pendingRelocation == relocation { self.pendingRelocation = nil }
@@ -216,6 +245,8 @@ final class WorkspaceStore: ObservableObject {
         let name = path.split(separator: "/").last.map(String.init) ?? path
         let target = directory.isEmpty ? name : directory + "/" + name
         let relocation = Relocation(source: path, target: target)
+        let trace = sidebarDropAccepting ? sidebarDropTrace : nil
+        if trace != nil { sidebarDropTarget = target }
         failedRelocation = nil
         relocationFailure = nil
         pendingRelocation = relocation
@@ -225,11 +256,15 @@ final class WorkspaceStore: ObservableObject {
         let action: () -> Void = { [weak self] in
             guard let self else { return }
             guard self.workspaceRoot == requestedRoot else {
+                trace?.confirmed(success: false)
                 if self.pendingRelocation == relocation { self.pendingRelocation = nil }
                 self.errorMessage = "Workspace changed before the move could be confirmed"
                 return
             }
-            self.performInBackground(relocation: relocation) { try $0.moveEntry(path: path, directory: directory) }
+            self.performInBackground(relocation: relocation, trace: trace) {
+                if let trace { return try $0.moveEntryTraced(path: path, directory: directory, trace: trace) }
+                return try $0.moveEntry(path: path, directory: directory)
+            }
         }
         if !deferUntilReady({ action() }) { action() }
         return true

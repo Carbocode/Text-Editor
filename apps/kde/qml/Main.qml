@@ -4,7 +4,7 @@ import QtQuick.Dialogs
 import org.nativeworkspace.Diagnostic
 
 ApplicationWindow {
-    visible: true
+    visible: !workspacePane.showingHome
     width: 900
     height: 600
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
@@ -23,9 +23,11 @@ ApplicationWindow {
         }
     }
     AppController { id: controller }
+    Timer { id: smokeLayoutDelay; interval: 250; repeat: false }
     Timer { id: benchmarkDelay; interval: 200; repeat: false }
     FolderDialog {
         id: folderDialog
+        parentWindow: workspacePane.homeWindow
         onAccepted: workspacePane.openWorkspace(selectedFolder.toString())
     }
     WorkspacePane {
@@ -103,9 +105,17 @@ ApplicationWindow {
                     throw new Error("Home was not shown at startup")
                 controller.open_workspace(argument.substring("--smoke-workspace=".length))
                 if (workspacePane.showingHome)
-                    throw new Error("Workspace did not replace Home")
+                    throw new Error("Home did not yield to the workspace window")
                 if (controller.document_ids.length === 0)
                     throw new Error("Workspace documents were not listed")
+                if (workspacePane.homeWindow === workspacePane.Window.window)
+                    throw new Error("Home and workspace must use different native windows")
+                workspacePane.showingHome = true
+                if (!workspacePane.homeWindow.visible || visible)
+                    throw new Error("Returning Home did not switch native windows")
+                workspacePane.showingHome = false
+                if (workspacePane.homeWindow.visible || !visible)
+                    throw new Error("Resuming did not restore the workspace window")
                 if (title !== controller.workspace_name)
                     throw new Error("Window title did not follow the workspace")
                 if (controller.directory_ids.indexOf("src") !== -1) {
@@ -152,6 +162,11 @@ ApplicationWindow {
                 workspacePane.editorText = "QML Phase 1 smoke content\n" + "filler\n".repeat(80) + "💡 Another Phase 1 match"
                 if (!controller.active_document_dirty)
                     throw new Error("Document did not become dirty")
+                var unsavedContent = workspacePane.editorText
+                workspacePane.showingHome = true
+                workspacePane.showingHome = false
+                if (workspacePane.editorText !== unsavedContent || !controller.active_document_dirty)
+                    throw new Error("Home navigation discarded unsaved editor state")
                 workspacePane.saveActive()
                 if (controller.active_document_dirty)
                     throw new Error("Document remained dirty after save")
@@ -164,16 +179,20 @@ ApplicationWindow {
                     throw new Error("Sidebar did not update its cached search entries")
                 if (workspacePane.matchIndicesForFile(controller.document_ids[0]).length !== 2)
                     throw new Error("Cached search matches did not include both occurrences")
-                workspacePane.openSearchResult(1, controller.document_ids[0])
-                Qt.callLater(function() {
-                    if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)
-                        throw new Error("Selecting a search occurrence did not select its text")
-                    workspacePane.createEntry("notes", true)
-                    workspacePane.createEntry("notes/todo.md", false)
-                    if (controller.document_ids.indexOf("notes/todo.md") === -1)
-                        throw new Error("New file did not appear in workspace")
-                    console.log("QML workspace edit/save smoke test passed")
+                smokeLayoutDelay.triggered.connect(function() {
+                    workspacePane.openSearchResult(1, controller.document_ids[0])
+                    Qt.callLater(function() {
+                        if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)
+                            throw new Error("Selecting a search occurrence did not select its text")
+                        workspacePane.createEntry("notes", true)
+                        workspacePane.createEntry("notes/todo.md", false)
+                        if (controller.document_ids.indexOf("notes/todo.md") === -1)
+                            throw new Error("New file did not appear in workspace")
+                        console.log("QML workspace edit/save smoke test passed")
+                        Qt.quit()
+                    })
                 })
+                smokeLayoutDelay.start()
             }
         }
     }

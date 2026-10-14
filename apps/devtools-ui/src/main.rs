@@ -81,7 +81,7 @@ fn main() -> eframe::Result<()> {
                 commands,
                 updates,
                 view: View::default(),
-                panel: if std::env::args().any(|arg| arg == "--timeline") {
+                panel: if std::env::args().any(|arg| arg == "--drag-drop" || arg == "--timeline") {
                     Panel::Timeline
                 } else {
                     Panel::Overview
@@ -716,15 +716,14 @@ impl Console {
                             ui.colored_label(color, outcome);
                         });
                         row.col(|ui| {
-                            let duration =
-                                if record.name == "snapshot.apply" && record.kind == Kind::Event {
-                                    Some(record.value.0)
-                                } else {
-                                    starts.get(&record.span.0).and_then(|start| {
-                                        ends.get(&record.span.0)
-                                            .map(|end| end.saturating_sub(*start))
-                                    })
-                                };
+                            let duration = if let Some(value) = widgets::duration_value(record) {
+                                Some(value)
+                            } else {
+                                starts.get(&record.span.0).and_then(|start| {
+                                    ends.get(&record.span.0)
+                                        .map(|end| end.saturating_sub(*start))
+                                })
+                            };
                             ui.label(
                                 duration
                                     .map_or("—".into(), |d| format!("{:.2} ms", d as f64 / 1e6)),
@@ -764,6 +763,128 @@ impl Console {
             self.show_internal,
         ) {
             self.detail = Some(record);
+        }
+        ui.collapsing("Drop measurements and phase definitions", |ui| {
+            self.timeline_drop_details(ui);
+        });
+    }
+    fn timeline_drop_details(&mut self, ui: &mut egui::Ui) {
+        if self
+            .session()
+            .is_some_and(|s| !s.session.capabilities.iter().any(|c| c == "sidebar_drop"))
+        {
+            ui.colored_label(theme::AMBER, "This editor session has no drop timing hooks. Launch the updated editor and select its new session.");
+        }
+        ui.label(theme::muted(
+            "Measurements are recorded in the editor, independently of delivery to this console.",
+        ));
+        ui.label(theme::muted("Start: AppKit prepare hook on macOS, accepted GTK drop callback, or Qt pointer release handler. These hooks do not measure earlier input delivery delays."));
+        ui.label(theme::muted("Destination ready means the native row/model layout is ready. Display presentation is not measured. Confirmation includes backend queueing and result delivery; filesystem duration measures the worker operation itself."));
+        ui.label(theme::muted("UI loop delay: lateness of a 50 ms heartbeat near the drop, including a preceding stall. This is sampled event-loop delay, not a physical mouse timestamp."));
+        ui.add_space(16.0);
+        theme::card().show(ui, |ui| {
+            ui.label(RichText::new("Completed measurements · entire recording").strong());
+            let stats: Vec<_> = self.view.analysis.operations.iter().filter(|s| s.name.starts_with("drop.")).collect();
+            if stats.is_empty() { ui.label("No completed drop measurements yet. Start collection in the editor, then move a file."); }
+            else {
+                egui::Grid::new("drop-statistics").striped(true).spacing([18.0, 10.0]).show(ui, |ui| {
+                    for title in ["Phase", "Count", "Median", "p95", "Maximum", "Errors"] { ui.label(theme::muted(title)); }
+                    ui.end_row();
+                    for stat in stats {
+                        ui.label(widgets::name(&stat.name));
+                        for value in [stat.count.0.to_string(), format!("{:.2} ms", stat.p50_ms),
+                            format!("{:.2} ms", stat.p95_ms), format!("{:.2} ms", stat.max_ms), stat.errors.0.to_string()] { ui.label(value); }
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+        ui.add_space(16.0);
+        ui.label(RichText::new("Recent drops · loaded event page").strong());
+        let mut ids = Vec::new();
+        for record in self
+            .records()
+            .iter()
+            .rev()
+            .filter(|r| r.name.starts_with("drop."))
+        {
+            if !ids.contains(&record.operation.0) {
+                ids.push(record.operation.0);
+            }
+            if ids.len() == 8 {
+                break;
+            }
+        }
+        for id in ids {
+            let records: Vec<_> = self
+                .records()
+                .iter()
+                .filter(|r| r.operation.0 == id && r.name.starts_with("drop."))
+                .cloned()
+                .collect();
+            theme::card().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Drop {id}")).strong());
+                    if ui
+                        .add_enabled(
+                            self.supports(native_workspace_devtools_protocol::OPERATION_QUERY),
+                            egui::Button::new("Show full operation"),
+                        )
+                        .clicked()
+                    {
+                        self.send(Command::Operation(Some(id)));
+                        self.panel = Panel::Timeline;
+                        self.filter.clear();
+                        self.errors_only = false;
+                    }
+                });
+                if let Some(start) = records.iter().find(|r| r.name.starts_with("drop.begin.")) {
+                    ui.label(theme::muted(widgets::name(&start.name)));
+                } else {
+                    ui.label(theme::muted(
+                        "Start hook is outside the loaded page. Open the full operation.",
+                    ));
+                }
+                egui::Grid::new(("drop-phases", id))
+                    .num_columns(2)
+                    .spacing([28.0, 8.0])
+                    .show(ui, |ui| {
+                        for name in [
+                            "drop.ui_delay",
+                            "drop.preview_hidden",
+                            "drop.handler",
+                            "drop.sidebar_ready",
+                            "drop.dispatch_wait",
+                            "drop.filesystem",
+                            "drop.confirmation",
+                        ] {
+                            ui.label(widgets::name(name));
+                            if let Some(record) = records
+                                .iter()
+                                .find(|r| r.name == name && widgets::duration_value(r).is_some())
+                            {
+                                let (outcome, color) = widgets::outcome(record.outcome);
+                                if ui
+                                    .selectable_label(
+                                        false,
+                                        RichText::new(format!(
+                                            "{:.2} ms · {outcome}",
+                                            record.value.0 as f64 / 1e6
+                                        ))
+                                        .color(color),
+                                    )
+                                    .clicked()
+                                {
+                                    self.detail = Some(record.clone());
+                                }
+                            } else {
+                                ui.label(theme::muted("Pending / not recorded in this page"));
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+            ui.add_space(8.0);
         }
     }
     fn operations(&mut self, ui: &mut egui::Ui) {
@@ -948,11 +1069,11 @@ impl Console {
                 ui.label(format!("{:.3} seconds", record.monotonic_ns.0 as f64 / 1e9));
                 ui.label(theme::muted("Revision"));
                 ui.label(record.revision.0.to_string());
-                if record.value.0 > 0 {
+                if record.value.0 > 0 || widgets::duration_value(&record).is_some() {
                     ui.label(theme::muted("Recorded value"));
                     ui.label(if record.name.contains("bytes") {
                         widgets::bytes(record.value.0)
-                    } else if record.name == "snapshot.apply" {
+                    } else if widgets::duration_value(&record).is_some() {
                         format!("{:.3} ms", record.value.0 as f64 / 1e6)
                     } else {
                         record.value.0.to_string()

@@ -6,16 +6,18 @@ struct NativeWorkspaceApp: App {
     @StateObject private var store = WorkspaceStore()
 
     var body: some Scene {
-        WindowGroup {
-            ContentView(store: store)
-                .onAppear {
-                    DispatchQueue.main.async {
-                        NSApp.activate()
-                        NSApp.windows.first(where: { $0.canBecomeMain })?.makeKeyAndOrderFront(nil)
-                    }
-                }
+        Window("Native Workspace", id: "home") {
+            HomeView(store: store)
         }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 640, height: 560)
         .defaultLaunchBehavior(.presented)
+        Window("Workspace", id: "workspace") {
+            ContentView(store: store)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1000, height: 700)
+        .defaultLaunchBehavior(.suppressed)
         .commands {
             if store.diagnosticsEnabled {
                 CommandMenu("Developer") {

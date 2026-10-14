@@ -66,6 +66,17 @@ pub fn name(value: &str) -> String {
         "command.document_reload" => "Reloaded from disk",
         "command.document_overwrite" => "File overwritten",
         "snapshot.apply" => "Interface updated",
+        "drop.begin.prepare" => "Drop: AppKit preparation",
+        "drop.begin.callback" => "Drop: GTK callback",
+        "drop.begin.release" => "Drop: pointer release handler",
+        "drop.preview_hidden" => "Drag preview removed",
+        "drop.handler" => "Drop handler finished",
+        "drop.sidebar_ready" => "Destination row ready",
+        "drop.dispatch_wait" => "Wait before filesystem work",
+        "drop.filesystem" => "Filesystem move duration",
+        "drop.confirmation" => "Move confirmation / rollback",
+        "drop.ui_delay" => "UI loop delay near drop",
+        "ui.event_loop_delay" => "UI event loop delayed",
         "session.start" => "Session started",
         "session.end" => "Session ended",
         "collection.started" => "Collection resumed",
@@ -101,7 +112,8 @@ pub fn component(record: &Record) -> &str {
         "Interface"
     } else if record.name.starts_with("search.") {
         "Search"
-    } else if record.name.starts_with("watcher.")
+    } else if record.name == "drop.filesystem"
+        || record.name.starts_with("watcher.")
         || record.name.starts_with("reconcile.")
         || record.name.starts_with("filesystem.")
     {
@@ -111,6 +123,20 @@ pub fn component(record: &Record) -> &str {
     } else {
         "Application"
     }
+}
+pub fn duration_value(record: &Record) -> Option<u64> {
+    (record.name == "snapshot.apply" && record.kind == Kind::Event
+        || matches!(
+            record.name.as_str(),
+            "drop.ui_delay" | "ui.event_loop_delay"
+        ) && record.kind == Kind::Event
+        || record.kind == Kind::Event
+            && matches!(
+                record.name.as_str(),
+                "drop.preview_hidden" | "drop.dispatch_wait"
+            )
+        || record.name.starts_with("drop.") && record.kind == Kind::SpanEnd)
+        .then_some(record.value.0)
 }
 pub fn meaningful(record: &Record) -> bool {
     record.kind != Kind::SpanStart
@@ -254,4 +280,29 @@ pub fn chart(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn zero_duration_and_failed_drop_endpoints_keep_time_units() {
+        let mut record = native_workspace_devtools_protocol::synthetic()
+            .records
+            .remove(0);
+        record.name = "drop.preview_hidden".into();
+        record.kind = Kind::SpanStart;
+        assert_eq!(duration_value(&record), None);
+        record.kind = Kind::SpanEnd;
+        record.value.0 = 0;
+        record.outcome = Outcome::Error;
+        assert_eq!(duration_value(&record), Some(0));
+        record.name = "drop.filesystem".into();
+        record.component = "core".into();
+        assert_eq!(component(&record), "Filesystem");
+        record.name = "drop.ui_delay".into();
+        record.kind = Kind::Event;
+        record.value.0 = 1_000_000_000;
+        assert_eq!(duration_value(&record), Some(1_000_000_000));
+    }
 }

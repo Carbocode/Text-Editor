@@ -5,7 +5,7 @@ import org.kde.kirigami as Kirigami
 import org.nativeworkspace.Diagnostic
 
 Kirigami.ApplicationWindow {
-    visible: true
+    visible: !workspacePane.showingHome
     width: 900
     height: 600
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
@@ -24,8 +24,10 @@ Kirigami.ApplicationWindow {
         }
     }
     AppController { id: controller }
+    Timer { id: smokeLayoutDelay; interval: 250; repeat: false }
     FolderDialog {
         id: folderDialog
+        parentWindow: workspacePane.homeWindow
         onAccepted: workspacePane.openWorkspace(selectedFolder.toString())
     }
     pageStack.initialPage: Kirigami.Page {
@@ -76,12 +78,16 @@ Kirigami.ApplicationWindow {
                     throw new Error("Content search did not return a matching preview")
                 if (workspacePane.searchFileCount !== 1)
                     throw new Error("Search matches were not grouped by file")
-                workspacePane.openSearchResult(1, controller.document_ids[0])
-                Qt.callLater(function() {
-                    if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)
-                        throw new Error("Selecting a search occurrence did not select its text")
-                    console.log("Kirigami workspace edit/save smoke test passed")
+                smokeLayoutDelay.triggered.connect(function() {
+                    workspacePane.openSearchResult(1, controller.document_ids[0])
+                    Qt.callLater(function() {
+                        if (workspacePane.editorSelectedText !== "Phase 1" || workspacePane.editorScrollY <= 0)
+                            throw new Error("Selecting a search occurrence did not select its text")
+                        console.log("Kirigami workspace edit/save smoke test passed")
+                        Qt.quit()
+                    })
                 })
+                smokeLayoutDelay.start()
             }
         }
     }

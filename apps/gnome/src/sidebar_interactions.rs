@@ -11,6 +11,7 @@ type MoveValidator = Rc<dyn Fn(&str, &str) -> bool>;
 
 #[derive(Clone)]
 pub struct Callbacks {
+    pub begin_drop: Rc<dyn Fn() -> native_workspace_application::SidebarDropTrace>,
     pub rename: Rc<dyn Fn(String, String) -> bool>,
     pub move_entry: Rc<dyn Fn(String, String) -> bool>,
     pub can_move: MoveValidator,
@@ -27,6 +28,7 @@ pub struct Interactions {
     folders: RefCell<HashSet<String>>,
     drop_widgets: RefCell<Vec<glib::WeakRef<gtk::Box>>>,
     dragged: RefCell<Option<String>>,
+    active_drag: RefCell<Option<gdk::Drag>>,
     hovered: RefCell<Option<String>>,
     hover_widget: RefCell<Option<glib::WeakRef<gtk::Box>>>,
     expand_timer: RefCell<Option<glib::SourceId>>,
@@ -134,7 +136,27 @@ impl Interactions {
         self.finish_drag_to(None);
     }
 
+    fn owns_drop(&self, drop: &gdk::Drop) -> bool {
+        self.dragged.borrow().is_some()
+            && self
+                .active_drag
+                .borrow()
+                .as_ref()
+                .is_some_and(|drag| drop.drag().as_ref() == Some(drag))
+    }
+
+    fn hide_drag_preview(&self) {
+        if let Some(drag) = self.active_drag.borrow().as_ref() {
+            gtk::DragIcon::for_drag(drag).set_child(None::<&gtk::Widget>);
+            if let Some(surface) = drag.drag_surface() {
+                surface.hide();
+            }
+        }
+    }
+
     fn finish_drag_to(&self, destination: Option<&str>) {
+        self.hide_drag_preview();
+        self.active_drag.take();
         self.dragged.take();
         self.cancel_hover();
         self.restore_temporary_folders(destination);
@@ -259,10 +281,32 @@ impl Interactions {
             return false;
         }
         let callbacks = self.callbacks.borrow().clone();
-        let succeeded = callbacks
+        let trace = callbacks
+            .as_ref()
+            .map(|callbacks| (callbacks.begin_drop)())
+            .unwrap_or_default();
+        // Clear native feedback before model changes remove the source row.
+        let mut temporary = self.temporary_folders.borrow().clone();
+        self.finish_drag_to(Some(directory));
+        trace.preview_hidden();
+        let callbacks = self.callbacks.borrow().clone();
+        // A quick release must reveal the pending row even before hover expansion.
+        if !directory.is_empty()
+            && let Some(callbacks) = &callbacks
+            && (callbacks.expand)(directory)
+        {
+            temporary.insert(directory.into());
+        }
+        let accepted = callbacks
+            .as_ref()
             .is_some_and(|callbacks| (callbacks.move_entry)(source.into(), directory.into()));
-        self.finish_drag_to(succeeded.then_some(directory));
-        succeeded
+        if !accepted && let Some(callbacks) = callbacks {
+            for folder in temporary {
+                (callbacks.collapse)(&folder);
+            }
+        }
+        trace.handler_finished(accepted);
+        accepted
     }
 
     pub fn attach(self: &Rc<Self>, widget: &gtk::Box, path: &str, folder: bool) {
@@ -419,8 +463,13 @@ impl Interactions {
         {
             let state = self.clone();
             let path = path.to_owned();
+            let weak_widget = widget.downgrade();
             source.connect_prepare(move |_, _, _| {
-                if state.editing.borrow().is_some() {
+                if state.editing.borrow().is_some()
+                    || weak_widget
+                        .upgrade()
+                        .is_some_and(|widget| widget.has_css_class("pending-move"))
+                {
                     return None;
                 }
                 state.start_drag(&path);
@@ -428,8 +477,12 @@ impl Interactions {
             });
         }
         {
+            let state = self.clone();
             let title = path.rsplit('/').next().unwrap_or(path).to_owned();
             source.connect_drag_begin(move |_, drag| {
+                state.active_drag.replace(Some(drag.clone()));
+                let release_state = state.clone();
+                drag.connect_drop_performed(move |_| release_state.hide_drag_preview());
                 let ghost = gtk::Box::new(gtk::Orientation::Horizontal, 8);
                 ghost.add_css_class("sidebar-drag-ghost");
                 ghost.append(&gtk::Image::from_icon_name(if folder {
@@ -449,7 +502,7 @@ impl Interactions {
             let state = self.clone();
             source.connect_drag_cancel(move |_, _, _| {
                 state.finish_drag();
-                false
+                true
             });
         }
         widget.add_controller(source);
@@ -478,13 +531,18 @@ impl Interactions {
             .borrow_mut()
             .retain(|widget| widget.upgrade().is_some());
         self.drop_widgets.borrow_mut().push(widget.downgrade());
-        let target = gtk::DropTarget::new(String::static_type(), gdk::DragAction::MOVE);
+        // The source path is already local. Handle the drop signal directly,
+        // without waiting for content-provider decoding before clearing feedback.
+        let target = gtk::DropTargetAsync::new(
+            Some(gdk::ContentFormats::for_type(String::static_type()).union_serialize_mime_types()),
+            gdk::DragAction::MOVE,
+        );
         let state = self.clone();
-        target.connect_accept(move |_, _| state.dragged.borrow().is_some());
+        target.connect_accept(move |_, drop| state.owns_drop(drop));
         let state = self.clone();
         let path = directory.to_owned();
         let weak_widget = widget.downgrade();
-        target.connect_enter(move |_, _, _| {
+        target.connect_drag_enter(move |_, _, _, _| {
             let valid = state.hover(&path, folder);
             state.hover_widget.replace(Some(weak_widget.clone()));
             if let Some(widget) = weak_widget.upgrade() {
@@ -503,7 +561,7 @@ impl Interactions {
         let state = self.clone();
         let path = directory.to_owned();
         let weak_widget = widget.downgrade();
-        target.connect_motion(move |_, _, _| {
+        target.connect_drag_motion(move |_, _, _, _| {
             let valid = state.hover(&path, folder);
             state.hover_widget.replace(Some(weak_widget.clone()));
             if valid {
@@ -515,7 +573,7 @@ impl Interactions {
         let state = self.clone();
         let path = directory.to_owned();
         let weak_widget = widget.downgrade();
-        target.connect_leave(move |_| {
+        target.connect_drag_leave(move |_, _| {
             state.leave(&path);
             let state = state.clone();
             let path = path.clone();
@@ -538,10 +596,18 @@ impl Interactions {
         });
         let state = self.clone();
         let path = directory.to_owned();
-        target.connect_drop(move |_, value, _, _| {
-            value
-                .get::<String>()
-                .is_ok_and(|source| state.drop_entry(&source, &path))
+        target.connect_drop(move |_, drop, _, _| {
+            if !state.owns_drop(drop) {
+                return false;
+            }
+            let source = state.dragged.borrow().clone().unwrap();
+            let accepted = state.drop_entry(&source, &path);
+            drop.finish(if accepted {
+                gdk::DragAction::MOVE
+            } else {
+                gdk::DragAction::empty()
+            });
+            true
         });
         widget.add_controller(target);
     }
@@ -560,9 +626,17 @@ mod tests {
         let moves = Rc::new(RefCell::new(Vec::new()));
         let recorded_moves = moves.clone();
         let state = Rc::new(Interactions::default());
+        let release_state = Rc::downgrade(&state);
         state.callbacks.replace(Some(Callbacks {
+            begin_drop: Rc::new(native_workspace_application::SidebarDropTrace::default),
             rename: Rc::new(|_, _| true),
             move_entry: Rc::new(move |source, directory| {
+                let release_state = release_state.upgrade().unwrap();
+                assert!(
+                    release_state.dragged.borrow().is_none(),
+                    "Drop kept the drag active while moving the model"
+                );
+                assert!(release_state.hovered.borrow().is_none());
                 recorded_moves.borrow_mut().push((source, directory));
                 true
             }),
@@ -585,6 +659,7 @@ mod tests {
         let collapsed_open = open.clone();
         let branches = Rc::new(Interactions::default());
         branches.callbacks.replace(Some(Callbacks {
+            begin_drop: Rc::new(native_workspace_application::SidebarDropTrace::default),
             rename: Rc::new(|_, _| true),
             move_entry: Rc::new(|_, _| true),
             can_move: Rc::new(|_, _| true),
@@ -614,6 +689,9 @@ mod tests {
         assert!(branches.drop_entry("source", "b"));
         assert!(open.borrow().contains("b"));
         branches.start_drag("source");
+        assert!(branches.drop_entry("source", "quick-release"));
+        assert!(open.borrow().contains("quick-release"));
+        branches.start_drag("source");
         branches.hover("cancelled", true);
         pump(500);
         branches.finish_drag();
@@ -622,6 +700,18 @@ mod tests {
                 && open.borrow().contains("b")
                 && open.borrow().contains("already-open")
         );
+
+        branches.callbacks.borrow_mut().as_mut().unwrap().move_entry = Rc::new(|_, _| false);
+        branches.start_drag("source");
+        branches.hover("rejected", true);
+        pump(500);
+        assert!(open.borrow().contains("rejected"));
+        assert!(!branches.drop_entry("source", "rejected"));
+        assert!(!open.borrow().contains("rejected"));
+        assert!(branches.dragged.borrow().is_none());
+        branches.start_drag("source");
+        assert!(!branches.drop_entry("source", "quick-rejected"));
+        assert!(!open.borrow().contains("quick-rejected"));
 
         state.start_drag("source");
         assert!(state.hover("cancelled", true));

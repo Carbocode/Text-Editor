@@ -1,7 +1,7 @@
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList, QUrl};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, Application, file_icon_name, folder_icon_name,
+    AppCommand, AppSnapshot, NativeApplication as Application, file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{path::PathBuf, pin::Pin};
@@ -41,11 +41,22 @@ pub mod qobject {
         #[qproperty(QString, active_document_text)]
         #[qproperty(bool, active_document_dirty)]
         #[qproperty(bool, active_document_external_change)]
+        #[qproperty(QString, pending_move_target)]
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
 
         #[qinvokable]
         fn open_devtools(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn begin_sidebar_drop(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn diagnostic_ui_heartbeat(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn drop_preview_hidden(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn drop_handler_finished(self: Pin<&mut Self>, accepted: bool);
+        #[qinvokable]
+        fn drop_sidebar_ready(self: Pin<&mut Self>);
         #[qinvokable]
         fn increment(self: Pin<&mut Self>);
         #[qinvokable]
@@ -59,7 +70,7 @@ pub mod qobject {
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
-        fn move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString);
+        fn move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString, text: &QString);
         #[qinvokable]
         fn rename_entry(self: Pin<&mut Self>, path: &QString, new_name: &QString);
         #[qinvokable]
@@ -111,13 +122,40 @@ pub struct AppControllerRust {
     active_document_text: QString,
     active_document_dirty: bool,
     active_document_external_change: bool,
+    pending_move_target: QString,
     error_message: QString,
     devtools_available: bool,
     application: Application,
     background_move_error: Option<String>,
+    drop_trace: Option<native_workspace_application::SidebarDropTrace>,
 }
 
 impl qobject::AppController {
+    pub fn diagnostic_ui_heartbeat(self: Pin<&mut Self>) {
+        self.rust().application.diagnostic_observer().ui_heartbeat();
+    }
+    pub fn begin_sidebar_drop(mut self: Pin<&mut Self>) {
+        let trace = native_workspace_application::SidebarDropTrace::begin(
+            self.rust().application.diagnostic_observer(),
+            2,
+        );
+        self.as_mut().rust_mut().drop_trace = Some(trace);
+    }
+    pub fn drop_preview_hidden(self: Pin<&mut Self>) {
+        if let Some(trace) = &self.rust().drop_trace {
+            trace.preview_hidden();
+        }
+    }
+    pub fn drop_handler_finished(self: Pin<&mut Self>, accepted: bool) {
+        if let Some(trace) = &self.rust().drop_trace {
+            trace.handler_finished(accepted);
+        }
+    }
+    pub fn drop_sidebar_ready(self: Pin<&mut Self>) {
+        if let Some(trace) = &self.rust().drop_trace {
+            trace.sidebar_ready();
+        }
+    }
     pub fn minimap_glyphs(self: Pin<&mut Self>) -> QString {
         use std::fmt::Write;
         let mut encoded = String::with_capacity(384);
@@ -146,7 +184,19 @@ impl qobject::AppController {
     fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
         self.as_mut().rust_mut().application.enable_devtools("qt");
         self.as_mut().rust_mut().background_move_error = None;
-        let result = self.as_mut().rust_mut().application.dispatch(command);
+        let trace = self.rust().drop_trace.clone();
+        let result = if let (AppCommand::MoveEntryOptimistic { id, directory }, Some(trace)) =
+            (&command, trace)
+        {
+            self.as_mut().rust_mut().application.dispatch_sidebar_move(
+                id.clone(),
+                directory.clone(),
+                true,
+                trace,
+            )
+        } else {
+            self.as_mut().rust_mut().application.dispatch(command)
+        };
         match result {
             Ok(snapshot) => {
                 self.as_mut().set_error_message(QString::default());
@@ -156,6 +206,7 @@ impl qobject::AppController {
                 .as_mut()
                 .set_error_message(QString::from(error.to_string())),
         }
+        self.as_mut().sync_pending_move();
         self.as_mut().report_background_error();
     }
 
@@ -168,7 +219,18 @@ impl qobject::AppController {
         }
     }
 
+    fn sync_pending_move(mut self: Pin<&mut Self>) {
+        let target = self
+            .rust()
+            .application
+            .pending_move_target()
+            .map(|id| QString::from(id.as_str()))
+            .unwrap_or_default();
+        self.as_mut().set_pending_move_target(target);
+    }
+
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
+        self.as_mut().sync_pending_move();
         let diagnostic_started = self
             .rust()
             .application
@@ -376,23 +438,62 @@ impl qobject::AppController {
         }
     }
 
-    pub fn open_workspace(self: Pin<&mut Self>, input: &QString) {
+    pub fn open_workspace(mut self: Pin<&mut Self>, input: &QString) {
         let url = QUrl::from_user_input(input, &QString::default());
         let path = url
             .to_local_file()
             .map(|value| PathBuf::from(value.to_string()))
             .unwrap_or_else(|| PathBuf::from(input.to_string()));
-        self.dispatch(AppCommand::OpenWorkspace(path));
+        self.as_mut().dispatch(AppCommand::OpenWorkspace(path));
+        #[cfg(debug_assertions)]
+        if std::env::args().any(|arg| arg.starts_with("--smoke-drag="))
+            && let Some(delay) = std::env::args().find_map(|arg| {
+                arg.strip_prefix("--smoke-drag-delay-ms=")
+                    .and_then(|ms| ms.parse::<u64>().ok())
+            })
+        {
+            self.as_mut()
+                .rust_mut()
+                .application
+                .delay_next_drop_for_smoke(std::time::Duration::from_millis(delay));
+        }
     }
 
-    pub fn move_entry(mut self: Pin<&mut Self>, path: &QString, directory: &QString) {
-        match DocumentId::parse(path.to_string()) {
-            Ok(id) => self.as_mut().dispatch(AppCommand::MoveEntryOptimistic {
-                id,
-                directory: directory.to_string(),
-            }),
-            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
+    pub fn move_entry(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        directory: &QString,
+        text: &QString,
+    ) {
+        let id = match DocumentId::parse(path.to_string()) {
+            Ok(id) => id,
+            Err(_) => {
+                self.set_error_message(QString::from("Invalid relative path"));
+                return;
+            }
+        };
+        let edit = DocumentId::parse(self.rust().active_document_id.to_string())
+            .ok()
+            .filter(|_| text != &self.rust().active_document_text)
+            .map(|id| (id, text.to_string()));
+        let trace = self.rust().drop_trace.clone().unwrap_or_default();
+        self.as_mut().rust_mut().background_move_error = None;
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .dispatch_sidebar_move_with_edit(id, directory.to_string(), trace, edit);
+        match result {
+            Ok(snapshot) => {
+                self.as_mut().set_error_message(QString::default());
+                self.as_mut().update_snapshot(snapshot);
+            }
+            Err(error) => self
+                .as_mut()
+                .set_error_message(QString::from(error.to_string())),
         }
+        self.as_mut().sync_pending_move();
+        self.as_mut().report_background_error();
     }
 
     pub fn rename_entry(mut self: Pin<&mut Self>, path: &QString, new_name: &QString) {
@@ -448,6 +549,7 @@ impl qobject::AppController {
                 .as_mut()
                 .set_error_message(QString::from(error.to_string())),
         }
+        self.as_mut().sync_pending_move();
         self.as_mut().report_background_error();
     }
 
@@ -464,6 +566,7 @@ impl qobject::AppController {
                 .as_mut()
                 .set_error_message(QString::from(error.to_string())),
         }
+        self.as_mut().sync_pending_move();
         self.as_mut().report_background_error();
     }
 
@@ -502,6 +605,7 @@ impl qobject::AppController {
                 .as_mut()
                 .set_error_message(QString::from("Invalid document name")),
         }
+        self.as_mut().sync_pending_move();
         self.as_mut().report_background_error();
     }
 

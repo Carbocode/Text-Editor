@@ -13,7 +13,7 @@ ApplicationWindow {
     TestCase { id: input; when: false }
 
     function findItem(item, name) {
-        if (item.objectName === name) return item
+        if (item.objectName === name && (name !== "pendingMoveIndicator" || item.visible)) return item
         for (var child of item.children || []) {
             var found = findItem(child, name)
             if (found) return found
@@ -26,7 +26,24 @@ ApplicationWindow {
         controller.open_workspace(argument.substring("--smoke-drag=".length))
         pane.showingHome = false
     }
-    property int step: 0
+    property int heartbeatCount: 0
+    property double lastHeartbeat: 0
+    property double maxHeartbeatGap: 0
+    property double releaseTime: 0
+    property bool delayed: Qt.application.arguments.some(value => value === "--smoke-drag-delay-ms=1000")
+    Timer {
+        interval: 16
+        repeat: true
+        running: releaseTime > 0 && step <= 8
+        onTriggered: {
+            var now = Date.now()
+            if (lastHeartbeat > 0) maxHeartbeatGap = Math.max(maxHeartbeatGap, now - lastHeartbeat)
+            lastHeartbeat = now
+            ++heartbeatCount
+        }
+    }
+    property int step: -2
+    property string originalText: ""
     property var sourcePoint
     property var targetPoint
     Timer {
@@ -36,6 +53,12 @@ ApplicationWindow {
         onTriggered: {
             try {
                 switch (step++) {
+                case -2:
+                    controller.open_document("README.md")
+                    originalText = controller.active_document_text
+                    break
+                case -1:
+                    break
                 case 0:
                     check(!findItem(pane, "workspaceDropTarget").visible, "Idle workspace shows drop box")
                     pane.sidebarEntries()
@@ -61,9 +84,36 @@ ApplicationWindow {
                     break
                 case 6:
                     check(pane.collapsedDirectories.src === false, "Pointer hover did not expand folder")
+                    // Exercise a widget change not yet synchronized to the controller.
+                    var editor = findItem(pane, "documentEditor")
+                    pane.syncingEditor = true
+                    editor.text = originalText + "\nedit immediately before drop"
+                    pane.syncingEditor = false
+                    check(controller.active_document_text === originalText, "Local edit unexpectedly flushed before drop")
+                    var releasedAt = Date.now()
+                    releaseTime = releasedAt
+                    lastHeartbeat = releasedAt
                     input.mouseRelease(pane, targetPoint.x + step, targetPoint.y)
+                    console.log("Drop handler duration=" + (Date.now() - releasedAt) + "ms documents=" + controller.document_ids.length)
+                    check(Date.now() - releasedAt < 250, "Release blocked the GUI thread")
+                    check(controller.active_document_text === editor.text, "Drop lost a local editor change")
+                    check(controller.active_document_dirty, "Drop failed to retain the pending edit")
+                    check(controller.pending_move_target === "src/README.md", "Drop did not publish pending confirmation")
+                    check(!findItem(pane, "sidebarDragGhost").visible, "Release retained the drag image until another frame")
+                    check(controller.document_ids.indexOf("src/README.md") >= 0, "Release did not relocate the row immediately")
+                    check(pane.treeRowForPath("src/README.md") >= 0, "Drop waited for a timer to update the native tree")
                     break
                 case 7:
+                    if (controller.pending_move_target.length > 0) {
+                        check(findItem(pane, "pendingMoveIndicator"), "Pending row has no progress indicator after painting")
+                        --step
+                        return
+                    }
+                    if (delayed) {
+                        check(Date.now() - releaseTime >= 950, "Slow backend hook did not delay confirmation")
+                        check(heartbeatCount >= 30 && maxHeartbeatGap < 250, "GUI timers froze during pending move: ticks=" + heartbeatCount + " gap=" + maxHeartbeatGap)
+                        console.log("Slow backend GUI heartbeat ticks=" + heartbeatCount + " maximum gap=" + maxHeartbeatGap + "ms")
+                    }
                     check(pane.draggingPath === "", "Release did not end drag")
                     check(controller.document_ids.indexOf("src/README.md") >= 0, "Native drop did not move file: " + controller.error_message)
                     check(pane.collapsedDirectories.src === false, "Successful drop closed destination")
@@ -91,6 +141,7 @@ ApplicationWindow {
                     input.mouseRelease(pane, targetPoint.x, targetPoint.y)
                     break
                 case 9:
+                    if (controller.pending_move_target.length > 0) { --step; return }
                     check(pane.draggingPath === "" && !pane.hoveringDrop && !pane.validDrop,
                         "Workspace root drop retained feedback")
                     check(!findItem(pane, "workspaceDropTarget").visible, "Root drop box remained visible")
@@ -110,6 +161,32 @@ ApplicationWindow {
                     pane.finishEntryDrag(true)
                     check(!pane.hoveringDrop && !findItem(pane, "workspaceDropTarget").visible,
                         "Cancelled drag retained drop feedback")
+                    pane.toggleDirectory("src")
+                    check(pane.collapsedDirectories.src !== false, "Quick-drop destination must start closed")
+                    var quickTree = findItem(pane, "fileTree")
+                    quickTree.forceLayout()
+                    var quickSource = quickTree.itemAtCell(Qt.point(0, pane.treeRowForPath("README.md")))
+                    var quickTarget = quickTree.itemAtCell(Qt.point(0, pane.treeRowForPath("src")))
+                    sourcePoint = quickSource.mapToItem(pane, 100, quickSource.height / 2)
+                    targetPoint = quickTarget.mapToItem(pane, 100, quickTarget.height / 2)
+                    input.mousePress(pane, sourcePoint.x, sourcePoint.y)
+                    input.mouseMove(pane, sourcePoint.x + 20, sourcePoint.y, 1, Qt.LeftButton)
+                    input.mouseMove(pane, targetPoint.x, targetPoint.y, 1, Qt.LeftButton)
+                    input.mouseRelease(pane, targetPoint.x, targetPoint.y)
+                    check(pane.collapsedDirectories.src === false && pane.treeRowForPath("src/README.md") >= 0,
+                        "Quick drop did not reveal the pending row immediately")
+                    break
+                case 10:
+                    if (controller.pending_move_target.length > 0) { --step; return }
+                    pane.startEntryDrag("src/README.md", Qt.point(30, 30))
+                    check(pane.dropEntry(""), "Quick-drop fixture could not be restored")
+                    break
+                case 11:
+                    if (controller.pending_move_target.length > 0) { --step; return }
+                    check(controller.document_ids.indexOf("README.md") >= 0, "Quick-drop fixture restoration failed")
+                    check(controller.active_document_text === originalText + "\nedit immediately before drop", "Confirmation lost the local edit")
+                    controller.change_document(originalText)
+                    controller.save_document()
                     console.log("KDE native pointer drag smoke passed")
                     Qt.exit(0)
                 }

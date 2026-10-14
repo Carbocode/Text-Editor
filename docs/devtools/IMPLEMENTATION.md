@@ -57,6 +57,46 @@ on HTTP and WebSocket requests.
 
 ## Implemented contracts and limits
 
+### Verify drag and drop
+
+Open **Developer Tools** in the editor, select its current session, then open
+**Timeline** and move a file. Use the Input, Rendering and Filesystem type
+filters to isolate drop phases and UI stalls. Click a bar to inspect its duration
+and operation ID. Expand **Drop measurements and phase definitions** in the
+same timeline for the phase breakdown. Each operation shows milliseconds for preview
+removal, handler completion, destination row readiness, waiting for filesystem
+work, the filesystem operation, and confirmation or rollback. The operation ID
+links those phases to the core command, worker and timeline. Median, p95, maximum
+and error counts query completed spans across the full recording; recent cards
+show the loaded event page. **Show full operation** retrieves all related records.
+
+For reproducible slow-backend checks in debug builds, run the Qt pointer smoke
+with `--smoke-drag-delay-ms=1000` in addition to `--smoke-drag=/path/to/fixture`.
+It asserts immediate ghost removal and row relocation, checks timers throughout
+the pending operation, and preserves an editor change made immediately before
+release. The GTK workspace smoke accepts `NATIVE_WORKSPACE_SMOKE_DROP_DELAY=1`
+alongside `NATIVE_WORKSPACE_SMOKE_WORKSPACE` and verifies timer progress during
+the same one-second worker delay. Both require disposable fixtures; the GTK
+smoke exercises drop callbacks, while Qt sends pointer events through QtTest.
+These hooks run exclusively on the worker and are absent from release builds.
+
+The starting hook is explicit: AppKit preparation on macOS, the accepted GTK drop
+callback, or the Qt release handler. Earlier mouse delivery is not measured by
+these hooks. A 50 ms heartbeat records `ui.event_loop_delay` when its lateness is
+at least 50 ms; `drop.ui_delay` samples lateness near the drop, including a stall
+before callback entry. These are sampled main-loop delays, not physical release
+timestamps. Native row/model readiness is not proof of display presentation.
+Durations are captured in the editor, so transport batching and console refresh
+do not inflate them. No paths or document contents are emitted. Disabled collection
+skips diagnostic timestamps and queue writes; the observer never waits on the
+application's FFI mutex.
+
+Restart an older console to see the updated timeline, and launch the freshly built editor
+to get the native hooks. The development launchers preserve older editor sessions
+while starting a separate instance of the new executable.
+
+### Collection and storage
+
 - Protocol/database/archive version 1. UUID session, producer and batch identities;
   decimal-string 64-bit counters and nanoseconds; monotonic duration clocks.
 - Fixed-size numeric/static-name records: dispatch start/end with ok/error/no-op,
@@ -121,7 +161,10 @@ on HTTP and WebSocket requests.
 - Timeline: five stable logical actor lanes (application, search worker,
   filesystem, frontend, collection), shared time axis, internal overlap tracks,
   fit, zoom, pan, interval measurement and click/hover details. Missing span ends
-  remain visibly incomplete; a lane is never added for a new operation.
+  remain visibly incomplete; a lane is never added for a new operation. Event
+  type filters and colors separate input, rendering, commands, filesystem,
+  search and collection without adding separate panels. Sampled UI stalls
+  occupy their measured intervals on the same time axis.
 - Resource sampling uses OS process counters at 1 Hz on a separate service thread:
   CPU (100% = one core), resident/virtual memory and process read/write counters.
   Editor, collector and console costs are distinguishable. CPU first sample is

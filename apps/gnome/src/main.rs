@@ -6,8 +6,8 @@ mod syntax;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, Application, SearchLocation, SearchResult, file_icon_name,
-    folder_icon_name,
+    AppCommand, AppSnapshot, NativeApplication as Application, SearchLocation, SearchResult,
+    file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{
@@ -39,11 +39,15 @@ struct Ui {
     heading: gtk::Label,
     status: gtk::Label,
     counter: gtk::Label,
-    pages: gtk::Stack,
+    home_window: adw::ApplicationWindow,
+    home_error: gtk::Label,
+    resume: gtk::Button,
     recent_list: gtk::Box,
     recent_empty: gtk::Label,
     updating: Rc<Cell<bool>>,
     background_move_error: Rc<RefCell<Option<String>>>,
+    pending_move_target: Rc<RefCell<Option<String>>>,
+    drop_trace: Rc<RefCell<Option<native_workspace_application::SidebarDropTrace>>>,
     collapsed_directories: Rc<RefCell<std::collections::HashSet<String>>>,
 }
 
@@ -60,6 +64,27 @@ struct SidebarView {
     overlay: gtk::Overlay,
     scroll: gtk::ScrolledWindow,
     dirty: Rc<Cell<bool>>,
+    pending_rows: Rc<RefCell<Vec<PendingRow>>>,
+}
+
+struct PendingRow {
+    path: String,
+    row: glib::WeakRef<gtk::Box>,
+    spinner: glib::WeakRef<gtk::Spinner>,
+}
+
+fn update_pending_row(row: &gtk::Box, spinner: &gtk::Spinner, path: &str, target: Option<&str>) {
+    let pending =
+        target.is_some_and(|target| path == target || path.starts_with(&format!("{target}/")));
+    row.set_opacity(if pending { 0.55 } else { 1.0 });
+    if pending {
+        row.add_css_class("pending-move");
+    } else {
+        row.remove_css_class("pending-move");
+    }
+    spinner.set_visible(pending);
+    spinner.set_spinning(pending);
+    row.set_tooltip_text(pending.then_some("Moving… Waiting for confirmation"));
 }
 
 #[derive(Clone)]
@@ -115,22 +140,32 @@ impl Ui {
                     self.dispatch(AppCommand::OpenDocument(id));
                 }
             }
-            Err(error) => self.status.set_label(&error.to_string()),
+            Err(error) => {
+                self.status.set_label(&error.to_string());
+                self.home_error.set_label(&error.to_string());
+            }
         }
     }
 
     fn dispatch(&self, command: AppCommand) {
         self.background_move_error.replace(None);
         let opening_workspace = matches!(command, AppCommand::OpenWorkspace(_));
+        if opening_workspace {
+            self.home_error.set_label("");
+        }
         let result = self.core.borrow_mut().dispatch(command);
         match result {
             Ok(snapshot) => {
                 self.render(snapshot);
                 if opening_workspace {
-                    self.pages.set_visible_child_name("workspace");
+                    self.window.present();
+                    self.home_window.set_visible(false);
                 }
             }
-            Err(error) => self.status.set_label(&error.to_string()),
+            Err(error) => {
+                self.status.set_label(&error.to_string());
+                self.home_error.set_label(&error.to_string());
+            }
         }
         let background_error = self.core.borrow_mut().take_background_error();
         if let Some(error) = background_error {
@@ -141,7 +176,31 @@ impl Ui {
         }
     }
 
+    fn sync_pending_move(&self) {
+        let target = self
+            .core
+            .borrow()
+            .pending_move_target()
+            .map(|id| id.as_str().to_owned());
+        if *self.pending_move_target.borrow() == target {
+            return;
+        }
+        self.pending_move_target.replace(target.clone());
+        for sidebar in &self.sidebars {
+            sidebar.pending_rows.borrow_mut().retain(|entry| {
+                let Some(row) = entry.row.upgrade() else {
+                    return false;
+                };
+                if let Some(spinner) = entry.spinner.upgrade() {
+                    update_pending_row(&row, &spinner, &entry.path, target.as_deref());
+                }
+                true
+            });
+        }
+    }
+
     fn render(&self, snapshot: AppSnapshot) {
+        self.sync_pending_move();
         let diagnostic_started = self
             .core
             .borrow()
@@ -185,7 +244,8 @@ impl Ui {
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         let workspace_changed = self.snapshot.borrow().workspace_root != snapshot.workspace_root;
         if workspace_changed && snapshot.workspace_root.is_some() {
-            self.pages.set_visible_child_name("workspace");
+            self.window.present();
+            self.home_window.set_visible(false);
         }
         self.window.set_title(Some(
             snapshot
@@ -239,8 +299,14 @@ impl Ui {
                 path_label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
                 labels.append(&name);
                 labels.append(&path_label);
-                button.set_child(Some(&labels));
-                button.add_css_class("flat");
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+                row.append(&gtk::Image::from_icon_name("folder-symbolic"));
+                labels.set_hexpand(true);
+                row.append(&labels);
+                row.append(&gtk::Image::from_icon_name("go-next-symbolic"));
+                button.set_child(Some(&row));
+                button.set_tooltip_text(Some(&workspace.root.to_string_lossy()));
+                button.add_css_class("card");
                 button.set_halign(gtk::Align::Fill);
                 let ui = self.clone();
                 let path = workspace.root.clone();
@@ -249,6 +315,7 @@ impl Ui {
                 self.recent_list.append(&button);
             }
         }
+        self.resume.set_visible(snapshot.workspace_root.is_some());
         self.recent_empty
             .set_visible(snapshot.recent_workspaces.is_empty());
         self.render_sidebar(&snapshot);
@@ -259,17 +326,20 @@ impl Ui {
             .unwrap_or("");
         let (start, end) = self.buffer.bounds();
         let content_changed = self.buffer.text(&start, &end, false).as_str() != content;
-        let document_changed = self
+        let language_changed = self
             .snapshot
             .borrow()
             .active_document
             .as_ref()
-            .map(|doc| &doc.id)
-            != snapshot.active_document.as_ref().map(|doc| &doc.id);
+            .map(|doc| doc.id.as_str().rsplit('/').next().unwrap())
+            != snapshot
+                .active_document
+                .as_ref()
+                .map(|doc| doc.id.as_str().rsplit('/').next().unwrap());
         if content_changed {
             self.buffer.set_text(content);
         }
-        if content_changed || document_changed {
+        if content_changed || language_changed {
             syntax::apply(
                 &self.buffer,
                 snapshot
@@ -717,42 +787,6 @@ fn compare_sidebar_paths(
     }
 }
 
-#[cfg(test)]
-mod sidebar_order_tests {
-    use super::compare_sidebar_paths;
-    use std::collections::HashSet;
-
-    #[test]
-    fn directories_precede_files_at_each_level() {
-        let mut entries = vec![
-            ("a.txt".to_owned(), false),
-            ("z/child.txt".to_owned(), false),
-            ("z/x".to_owned(), true),
-            ("z".to_owned(), true),
-            ("z/x/nested.txt".to_owned(), false),
-            ("z/b.txt".to_owned(), false),
-        ];
-        let directories: HashSet<_> = entries
-            .iter()
-            .filter(|(_, is_directory)| *is_directory)
-            .map(|(path, _)| path.clone())
-            .collect();
-        entries.sort_by(|left, right| compare_sidebar_paths(left, right, &directories));
-        let paths: Vec<_> = entries.iter().map(|(path, _)| path.as_str()).collect();
-        assert_eq!(
-            paths,
-            [
-                "z",
-                "z/x",
-                "z/x/nested.txt",
-                "z/b.txt",
-                "z/child.txt",
-                "a.txt"
-            ]
-        );
-    }
-}
-
 fn sidebar_row(
     title: &str,
     depth: usize,
@@ -837,7 +871,9 @@ fn build_sidebar(
     collapsed_directories: &Rc<RefCell<std::collections::HashSet<String>>>,
     file_query: &Rc<RefCell<String>>,
     text_mode: bool,
+    pending_move_target: &Rc<RefCell<Option<String>>>,
 ) -> SidebarView {
+    let pending_rows = Rc::new(RefCell::new(Vec::<PendingRow>::new()));
     let visible_entries: Rc<RefCell<Vec<SidebarEntry>>> = Rc::new(RefCell::new(Vec::new()));
     let file_model = gtk::StringList::new(&[]);
     let file_selection = gtk::SingleSelection::new(Some(file_model.clone()));
@@ -850,6 +886,8 @@ fn build_sidebar(
         let collapsed_directories = collapsed_directories.clone();
         let file_query = file_query.clone();
         let interactions = interactions.clone();
+        let pending_move_target = pending_move_target.clone();
+        let pending_rows = pending_rows.clone();
         factory.connect_bind(move |_, item| {
             let item = item
                 .downcast_ref::<gtk::ListItem>()
@@ -859,6 +897,23 @@ fn build_sidebar(
                     if !text_mode && file_query.borrow().trim().is_empty()
                         && collapsed_directories.borrow().contains(path));
                 let widget = sidebar_entry_widget(entry, collapsed);
+                let spinner = gtk::Spinner::new();
+                spinner.set_size_request(14, 14);
+                widget.append(&spinner);
+                update_pending_row(
+                    &widget,
+                    &spinner,
+                    &entry.path,
+                    pending_move_target.borrow().as_deref(),
+                );
+                pending_rows
+                    .borrow_mut()
+                    .retain(|entry| entry.row.upgrade().is_some());
+                pending_rows.borrow_mut().push(PendingRow {
+                    path: entry.path.clone(),
+                    row: widget.downgrade(),
+                    spinner: spinner.downgrade(),
+                });
                 let row_area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 widget.set_hexpand(true);
                 row_area.set_hexpand(true);
@@ -912,6 +967,7 @@ fn build_sidebar(
         sidebar_rows: Rc::new(RefCell::new(Vec::new())),
         all_entries: Rc::new(RefCell::new(Vec::new())),
         dirty: Rc::new(Cell::new(true)),
+        pending_rows,
     }
 }
 
@@ -924,13 +980,23 @@ fn main() {
     gio::resources_register(&resource);
     let app = adw::Application::builder()
         .application_id("org.nativeworkspace.App")
-        .flags(gio::ApplicationFlags::FLAGS_NONE)
+        .flags(
+            if std::env::var("NATIVE_WORKSPACE_NEW_INSTANCE").as_deref() == Ok("1") {
+                gio::ApplicationFlags::NON_UNIQUE
+            } else {
+                gio::ApplicationFlags::FLAGS_NONE
+            },
+        )
         .build();
     app.connect_activate(build_window);
     app.run();
 }
 
 fn build_window(app: &adw::Application) {
+    if let Some(window) = app.active_window() {
+        window.present();
+        return;
+    }
     let mut core = Application::new();
     core.enable_devtools("gtk");
     let persistence_error = if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_none()
@@ -977,7 +1043,7 @@ fn build_window(app: &adw::Application) {
     let home_button = gtk::Button::from_icon_name("user-home-symbolic");
     home_button.set_tooltip_text(Some("Home"));
     content_header.pack_end(&home_button);
-    let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 8);
     recent_list.set_margin_top(6);
     recent_list.set_margin_bottom(6);
     recent_list.set_margin_start(6);
@@ -989,9 +1055,20 @@ fn build_window(app: &adw::Application) {
     let sidebar_tab = Rc::new(Cell::new(0));
     let file_query = Rc::new(RefCell::new(String::new()));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
+    let pending_move_target = Rc::new(RefCell::new(None));
     let sidebars = [
-        build_sidebar(&collapsed_directories, &file_query, false),
-        build_sidebar(&collapsed_directories, &file_query, true),
+        build_sidebar(
+            &collapsed_directories,
+            &file_query,
+            false,
+            &pending_move_target,
+        ),
+        build_sidebar(
+            &collapsed_directories,
+            &file_query,
+            true,
+            &pending_move_target,
+        ),
     ];
     let files_scroll = sidebars[0].scroll.clone();
     let search = gtk::SearchEntry::new();
@@ -1152,25 +1229,60 @@ fn build_window(app: &adw::Application) {
         footer.append(&diagnostic);
     }
     content_view.add_bottom_bar(&footer);
+    let home_window = adw::ApplicationWindow::builder()
+        .application(app)
+        .title("Native Workspace")
+        .default_width(640)
+        .default_height(560)
+        .build();
+    let home_header = adw::HeaderBar::new();
+    home_header.set_decoration_layout(Some("menu:minimize,maximize,close"));
+    let home_view = adw::ToolbarView::new();
+    home_view.add_top_bar(&home_header);
     let home = gtk::Box::new(gtk::Orientation::Vertical, 20);
-    home.set_margin_top(48);
-    home.set_margin_bottom(32);
-    home.set_margin_start(48);
-    home.set_margin_end(48);
-    home.append(&gtk::Label::new(Some("Native Workspace")));
-    home.append(&open);
-    home.append(&gtk::Label::new(Some("Recent Workspaces")));
-    let recent_empty = gtk::Label::new(Some("No recent workspaces"));
+    home.set_margin_top(24);
+    home.set_margin_bottom(24);
+    home.set_margin_start(28);
+    home.set_margin_end(28);
+    let title = gtk::Label::new(Some("Native Workspace"));
+    title.add_css_class("title-1");
+    title.set_xalign(0.0);
+    home.append(&title);
+    let subtitle = gtk::Label::new(Some("A place for your files and ideas."));
+    subtitle.add_css_class("dim-label");
+    subtitle.set_xalign(0.0);
+    home.append(&subtitle);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    open.add_css_class("suggested-action");
+    actions.append(&open);
+    let resume = gtk::Button::with_label("Resume Workspace");
+    actions.append(&resume);
+    home.append(&actions);
+    let recent_title = gtk::Label::new(Some("Recent Workspaces"));
+    recent_title.add_css_class("heading");
+    recent_title.set_xalign(0.0);
+    home.append(&recent_title);
+    let recent_empty =
+        gtk::Label::new(Some("Open a folder. It will appear here for quick access."));
+    recent_empty.set_wrap(true);
+    recent_empty.add_css_class("dim-label");
     home.append(&recent_empty);
     let recent_scroll = gtk::ScrolledWindow::new();
     recent_scroll.set_vexpand(true);
+    recent_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    recent_list.add_css_class("boxed-list");
     recent_scroll.set_child(Some(&recent_list));
     home.append(&recent_scroll);
-    let pages = gtk::Stack::new();
-    pages.add_named(&home, Some("home"));
-    pages.add_named(&split, Some("workspace"));
-    pages.set_visible_child_name("home");
-    window.set_content(Some(&pages));
+    let home_error = gtk::Label::new(None);
+    home_error.set_wrap(true);
+    home_error.add_css_class("error");
+    home.append(&home_error);
+    let clamp = adw::Clamp::new();
+    clamp.set_maximum_size(640);
+    clamp.set_child(Some(&home));
+    home_view.set_content(Some(&clamp));
+    home_window.set_content(Some(&home_view));
+    window.set_content(Some(&split));
 
     let ui = Ui {
         window: window.clone(),
@@ -1193,11 +1305,15 @@ fn build_window(app: &adw::Application) {
         heading,
         status,
         counter,
-        pages,
+        home_window: home_window.clone(),
+        home_error,
+        resume: resume.clone(),
         recent_list,
         recent_empty,
         updating: Rc::new(Cell::new(false)),
         background_move_error: Rc::new(RefCell::new(None)),
+        pending_move_target,
+        drop_trace: Rc::new(RefCell::new(None)),
         collapsed_directories,
     };
     ui.render(snapshot);
@@ -1256,6 +1372,7 @@ fn build_window(app: &adw::Application) {
     for sidebar in &ui.sidebars {
         let rename_ui = ui.clone();
         let move_ui = ui.clone();
+        let trace_ui = ui.clone();
         let validate_ui = ui.clone();
         let expand_ui = ui.clone();
         let collapse_ui = ui.clone();
@@ -1263,6 +1380,14 @@ fn build_window(app: &adw::Application) {
             .interactions
             .callbacks
             .replace(Some(sidebar_interactions::Callbacks {
+                begin_drop: Rc::new(move || {
+                    let trace = native_workspace_application::SidebarDropTrace::begin(
+                        trace_ui.core.borrow().diagnostic_observer(),
+                        0,
+                    );
+                    trace_ui.drop_trace.replace(Some(trace.clone()));
+                    trace
+                }),
                 rename: Rc::new(move |path, name| {
                     let Ok(id) = DocumentId::parse(path) else {
                         return false;
@@ -1284,16 +1409,43 @@ fn build_window(app: &adw::Application) {
                 }),
                 move_entry: Rc::new(move |path, directory| {
                     move_ui.background_move_error.replace(None);
-                    let Ok(id) = DocumentId::parse(path) else {
+                    let Ok(id) = DocumentId::parse(path.clone()) else {
                         return false;
                     };
-                    let result = move_ui
-                        .core
-                        .borrow_mut()
-                        .dispatch(AppCommand::MoveEntryOptimistic { id, directory });
+                    let trace = move_ui.drop_trace.borrow().clone().unwrap_or_default();
+                    let name = path.rsplit('/').next().unwrap_or(&path);
+                    let target = if directory.is_empty() {
+                        name.to_owned()
+                    } else {
+                        format!("{directory}/{name}")
+                    };
+                    let result = move_ui.core.borrow_mut().dispatch_sidebar_move(
+                        id,
+                        directory,
+                        true,
+                        trace.clone(),
+                    );
                     match result {
                         Ok(snapshot) => {
                             move_ui.render(snapshot);
+                            if trace.is_active() {
+                                let sidebar = move_ui.sidebar().interactions.clone();
+                                let deadline =
+                                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                                move_ui.window.add_tick_callback(move |_, _| {
+                                    if sidebar
+                                        .row_widget(&target)
+                                        .is_some_and(|row| row.is_mapped())
+                                    {
+                                        trace.sidebar_ready();
+                                        glib::ControlFlow::Break
+                                    } else if std::time::Instant::now() >= deadline {
+                                        glib::ControlFlow::Break
+                                    } else {
+                                        glib::ControlFlow::Continue
+                                    }
+                                });
+                            }
                             true
                         }
                         Err(error) => {
@@ -1303,6 +1455,9 @@ fn build_window(app: &adw::Application) {
                     }
                 }),
                 can_move: Rc::new(move |source, directory| {
+                    if validate_ui.core.borrow().has_pending_move() {
+                        return false;
+                    }
                     let name = source.rsplit('/').next().unwrap_or(source);
                     let target = if directory.is_empty() {
                         name.to_owned()
@@ -1404,10 +1559,34 @@ fn build_window(app: &adw::Application) {
             dialog.present();
         });
     }
-    assert_eq!(ui.pages.visible_child_name().as_deref(), Some("home"));
     {
-        let pages = ui.pages.clone();
-        home_button.connect_clicked(move |_| pages.set_visible_child_name("home"));
+        let ui = ui.clone();
+        home_button.connect_clicked(move |_| {
+            ui.home_window.present();
+            ui.window.set_visible(false);
+        });
+    }
+    {
+        let ui = ui.clone();
+        resume.connect_clicked(move |_| {
+            ui.window.present();
+            ui.home_window.set_visible(false);
+        });
+    }
+    {
+        let home_window = home_window.clone();
+        window.connect_close_request(move |window| {
+            window.set_visible(false);
+            home_window.present();
+            glib::Propagation::Stop
+        });
+    }
+    {
+        let app = app.clone();
+        home_window.connect_close_request(move |_| {
+            app.quit();
+            glib::Propagation::Proceed
+        });
     }
     {
         let ui = ui.clone();
@@ -1431,7 +1610,7 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
-        let window = window.clone();
+        let window = home_window.clone();
         open.connect_clicked(move |_| {
             let dialog = gtk::FileChooserNative::new(
                 Some("Open Workspace"),
@@ -1608,6 +1787,7 @@ fn build_window(app: &adw::Application) {
                     Err(error) => ui.status.set_label(&error.to_string()),
                 }
             }
+            ui.sync_pending_move();
             let background_error = ui.core.borrow_mut().take_background_error();
             if let Some(error) = background_error {
                 ui.background_move_error.replace(Some(error.clone()));
@@ -1622,7 +1802,18 @@ fn build_window(app: &adw::Application) {
         let ui = ui.clone();
         diagnostic.connect_clicked(move |_| ui.dispatch(AppCommand::IncrementDiagnostic));
     }
-    window.present();
+    home_window.present();
+    #[cfg(feature = "devtools")]
+    {
+        let core = Rc::downgrade(&ui.core);
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            let Some(core) = core.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            core.borrow().diagnostic_observer().ui_heartbeat();
+            glib::ControlFlow::Continue
+        });
+    }
     if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_some() {
         assert!(icons.has_icon("document-open-symbolic"));
         assert!(icons.has_icon("document-save-symbolic"));
@@ -1648,12 +1839,33 @@ fn build_window(app: &adw::Application) {
         diagnostic.emit_clicked();
         assert_eq!(ui.counter.text(), "Counter: 1");
         println!("GTK → Rust smoke test passed");
-        app.quit();
+        if std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE").is_none() {
+            app.quit();
+        }
     }
     if let Some(path) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE") {
         let workspace_path = PathBuf::from(path);
         ui.dispatch(AppCommand::OpenWorkspace(workspace_path.clone()));
-        assert_eq!(ui.pages.visible_child_name().as_deref(), Some("workspace"));
+        assert!(ui.window.is_visible());
+        assert!(!ui.home_window.is_visible());
+        let pending_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let pending_spinner = gtk::Spinner::new();
+        pending_row.append(&pending_spinner);
+        update_pending_row(&pending_row, &pending_spinner, "dest/a.txt", Some("dest"));
+        assert!(pending_spinner.is_visible() && pending_spinner.is_spinning());
+        assert!(pending_row.opacity() < 1.0);
+        update_pending_row(&pending_row, &pending_spinner, "dest/a.txt", None);
+        assert!(!pending_spinner.is_visible() && !pending_spinner.is_spinning());
+        assert_eq!(pending_row.opacity(), 1.0);
+        assert!(ui.window != ui.home_window);
+        assert_eq!(ui.home_window.default_width(), 640);
+        assert_eq!(ui.window.default_width(), 900);
+        home_button.emit_clicked();
+        assert!(ui.home_window.is_visible());
+        assert!(!ui.window.is_visible());
+        resume.emit_clicked();
+        assert!(ui.window.is_visible());
+        assert!(!ui.home_window.is_visible());
         assert_eq!(files_scroll.hscrollbar_policy(), gtk::PolicyType::Never);
         if ui
             .snapshot
@@ -1892,6 +2104,14 @@ fn build_window(app: &adw::Application) {
             );
             assert!(!ui.conflict_banner.is_visible());
             ui.buffer.set_text("local edit");
+            home_button.emit_clicked();
+            resume.emit_clicked();
+            assert_eq!(
+                ui.buffer
+                    .text(&ui.buffer.start_iter(), &ui.buffer.end_iter(), false),
+                "local edit"
+            );
+            assert!(ui.snapshot.borrow().active_document.as_ref().unwrap().dirty);
             std::fs::write(&document_path, "external conflict").unwrap();
             ui.dispatch(AppCommand::RefreshWorkspace);
             assert!(ui.conflict_banner.is_visible());
@@ -2087,6 +2307,21 @@ fn build_window(app: &adw::Application) {
             println!("GTK rename/buffer smoke test passed");
             ui.create_entry("destination", true);
             ui.buffer.set_text("unsaved move");
+            let delayed = std::env::var_os("NATIVE_WORKSPACE_SMOKE_DROP_DELAY").is_some();
+            #[cfg(debug_assertions)]
+            if delayed {
+                ui.core
+                    .borrow_mut()
+                    .delay_next_drop_for_smoke(std::time::Duration::from_secs(1));
+            }
+            let heartbeats = Rc::new(Cell::new(0));
+            let heartbeat_counter = heartbeats.clone();
+            let heartbeat =
+                glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+                    heartbeat_counter.set(heartbeat_counter.get() + 1);
+                    glib::ControlFlow::Continue
+                });
+            let released_at = std::time::Instant::now();
             ui.sidebars[0].interactions.start_drag("renamed");
             assert!(ui.sidebars[0].interactions.hover("destination", true));
             assert!(
@@ -2095,6 +2330,10 @@ fn build_window(app: &adw::Application) {
                     .drop_entry("renamed", "destination")
             );
             let active = ui.snapshot.borrow().active_document.clone().unwrap();
+            assert!(
+                released_at.elapsed() < std::time::Duration::from_millis(250),
+                "GTK release blocked the UI thread"
+            );
             assert_eq!(active.id.as_str(), "destination/renamed/todo.md");
             assert_eq!(active.content, "unsaved move");
             assert!(active.dirty);
@@ -2115,7 +2354,20 @@ fn build_window(app: &adw::Application) {
                 if let Some(snapshot) = result {
                     ui.render(snapshot);
                 }
+                let context = glib::MainContext::default();
+                while context.pending() {
+                    context.iteration(false);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            heartbeat.remove();
+            if delayed {
+                assert!(released_at.elapsed() >= std::time::Duration::from_millis(950));
+                assert!(
+                    heartbeats.get() >= 30,
+                    "GTK timers froze during pending move"
+                );
+                println!("GTK slow backend UI heartbeat ticks={}", heartbeats.get());
             }
             assert!(!ui.core.borrow().has_pending_move());
             assert_eq!(
@@ -2125,6 +2377,47 @@ fn build_window(app: &adw::Application) {
             println!("GTK drag-and-drop/buffer smoke test passed");
             println!("GTK workspace edit/save smoke test passed");
         }
-        app.quit();
+        if std::env::var_os("NATIVE_WORKSPACE_SMOKE_RECORD_DROP").is_some() {
+            let app = app.clone();
+            glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || app.quit());
+        } else {
+            app.quit();
+        }
+    }
+}
+
+#[cfg(test)]
+mod sidebar_order_tests {
+    use super::compare_sidebar_paths;
+    use std::collections::HashSet;
+
+    #[test]
+    fn directories_precede_files_at_each_level() {
+        let mut entries = [
+            ("a.txt".to_owned(), false),
+            ("z/child.txt".to_owned(), false),
+            ("z/x".to_owned(), true),
+            ("z".to_owned(), true),
+            ("z/x/nested.txt".to_owned(), false),
+            ("z/b.txt".to_owned(), false),
+        ];
+        let directories: HashSet<_> = entries
+            .iter()
+            .filter(|(_, is_directory)| *is_directory)
+            .map(|(path, _)| path.clone())
+            .collect();
+        entries.sort_by(|left, right| compare_sidebar_paths(left, right, &directories));
+        let paths: Vec<_> = entries.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "z",
+                "z/x",
+                "z/x/nested.txt",
+                "z/b.txt",
+                "z/child.txt",
+                "a.txt"
+            ]
+        );
     }
 }

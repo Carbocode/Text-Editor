@@ -69,6 +69,10 @@ struct SidebarInteractionSmoke {
         for destination in ["", "folder"] {
             drag.begin("source.rs")
             drag.enter(destination, valid: true, expand: { false })
+            var dismissed = false
+            drag.setPreviewDismissal { dismissed = true }
+            drag.hidePreview()
+            precondition(dismissed && drag.source != nil, "Release must hide the native image without losing the drop payload")
             drag.finish(committing: destination)
             // AppKit can deliver hover callbacks after performDrop has finished.
             drag.enter(destination, valid: false, expand: { false })
