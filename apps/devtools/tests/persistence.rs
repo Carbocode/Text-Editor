@@ -372,3 +372,46 @@ fn pins_persist_and_stay_visible_beyond_the_session_header_limit() {
             .pinned
     );
 }
+
+#[test]
+fn drop_measurements_survive_persistence_and_operation_filtering() {
+    use native_workspace_devtools_protocol::{Kind, Outcome};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("drop.duckdb")).unwrap();
+    let mut batch = synthetic();
+    let mut start = batch.records[0].clone();
+    start.name = "drop.confirmation".into();
+    start.kind = Kind::SpanStart;
+    start.operation = Counter(73);
+    start.span = Counter(74);
+    start.monotonic_ns = Counter(10);
+    let mut end = start.clone();
+    end.kind = Kind::SpanEnd;
+    end.outcome = Outcome::Error;
+    end.monotonic_ns = Counter(1_000_000_010);
+    end.value = Counter(1_000_000_000);
+    end.sequence = Counter(2);
+    let mut unrelated = end.clone();
+    unrelated.operation = Counter(99);
+    unrelated.span = Counter(0);
+    unrelated.kind = Kind::Event;
+    unrelated.name = "snapshot.apply".into();
+    unrelated.sequence = Counter(3);
+    batch.records = vec![start, end, unrelated];
+    store.ingest(&batch).unwrap();
+    let stats = store.analysis(batch.session.id).unwrap();
+    let confirmation = stats
+        .operations
+        .iter()
+        .find(|s| s.name == "drop.confirmation")
+        .unwrap();
+    assert_eq!(confirmation.errors.0, 1);
+    assert_eq!(confirmation.max_ms, 1000.0);
+    let records = store
+        .query_tail(batch.session.id, 500, false, Some(73))
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|r| r.operation.0 == 73));
+    assert_eq!(records[1].value.0, 1_000_000_000);
+}

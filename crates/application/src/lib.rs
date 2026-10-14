@@ -1,6 +1,10 @@
 //! Shared application commands, events, state, and owned snapshots.
 
 mod diagnostics;
+mod drop_diagnostics;
+mod native_application;
+pub use drop_diagnostics::SidebarDropTrace;
+pub use native_application::NativeApplication;
 mod icons;
 pub use diagnostics::DiagnosticObserver;
 use diagnostics::{Context, Diagnostics};
@@ -583,14 +587,85 @@ pub struct Application {
     search_results_rx: Receiver<SearchFinished>,
     search_generation: Arc<AtomicU64>,
     pending_move: Option<PendingMove>,
+    pending_reconcile: Option<PendingReconcile>,
+    sidebar_drop_trace: Option<SidebarDropTrace>,
     deferred_commands: Vec<AppCommand>,
     background_error: Option<String>,
+}
+
+struct PendingReconcile {
+    revision: u64,
+    result: Receiver<Result<Vec<AppEvent>, AppError>>,
 }
 
 struct PendingMove {
     id: DocumentId,
     target: DocumentId,
     result: Receiver<Result<(), FilesystemError>>,
+    trace: Option<SidebarDropTrace>,
+}
+
+fn reconcile_workspace(
+    filesystem: &dyn WorkspaceFilesystem,
+    root: &Path,
+    previous_documents: &[DocumentEntry],
+    previous_directories: &[String],
+    query: &str,
+) -> Result<Vec<AppEvent>, AppError> {
+    let (_, ids, directories) = filesystem.open_workspace(root)?;
+    let listed: HashSet<_> = ids.iter().collect();
+    let previous: HashMap<_, _> = previous_documents
+        .iter()
+        .map(|entry| (&entry.id, entry))
+        .collect();
+    let mut documents = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let mut entry = previous
+            .get(&id)
+            .map(|entry| (*entry).clone())
+            .unwrap_or(DocumentEntry {
+                id: id.clone(),
+                content: None,
+                saved_content: None,
+                external_change: false,
+            });
+        if entry.content.is_some() {
+            match filesystem.read_document(root, &entry.id) {
+                Ok(disk_content) if entry.saved_content.as_ref() == Some(&disk_content) => {
+                    entry.external_change = false;
+                }
+                Ok(disk_content) if !entry.dirty() => {
+                    entry.content = Some(disk_content.clone());
+                    entry.saved_content = Some(disk_content);
+                    entry.external_change = false;
+                }
+                _ => entry.external_change = true,
+            }
+        }
+        documents.push(entry);
+    }
+    for entry in previous_documents {
+        if !listed.contains(&entry.id) && entry.content.is_some() {
+            let mut missing = entry.clone();
+            missing.external_change = true;
+            documents.push(missing);
+        }
+    }
+    documents.sort_by(|left, right| left.id.cmp(&right.id));
+    if documents == previous_documents && directories == previous_directories {
+        Ok(Vec::new())
+    } else {
+        let needle = query.trim().to_lowercase();
+        let search_results = documents
+            .iter()
+            .flat_map(|entry| search_results_for(entry, &needle, entry.content.as_deref()))
+            .collect();
+        Ok(vec![AppEvent::WorkspaceRefreshed {
+            documents,
+            directories,
+            search_results,
+        }])
+    }
 }
 
 fn move_target(id: &DocumentId, directory: &str) -> Result<DocumentId, AppError> {
@@ -802,6 +877,8 @@ impl Application {
             search_results_rx,
             search_generation,
             pending_move: None,
+            pending_reconcile: None,
+            sidebar_drop_trace: None,
             deferred_commands: Vec::new(),
             background_error: None,
         }
@@ -889,6 +966,10 @@ impl Application {
         self.background_error.take()
     }
 
+    pub fn pending_move_target(&self) -> Option<&DocumentId> {
+        self.pending_move.as_ref().map(|pending| &pending.target)
+    }
+
     pub fn has_pending_move(&self) -> bool {
         self.pending_move.is_some()
     }
@@ -934,6 +1015,23 @@ impl Application {
             .map(|outcome| outcome.snapshot)
     }
 
+    pub fn dispatch_sidebar_move(
+        &mut self,
+        id: DocumentId,
+        directory: String,
+        optimistic: bool,
+        trace: SidebarDropTrace,
+    ) -> Result<AppSnapshot, AppError> {
+        self.sidebar_drop_trace = Some(trace);
+        let result = self.dispatch(if optimistic {
+            AppCommand::MoveEntryOptimistic { id, directory }
+        } else {
+            AppCommand::MoveEntry { id, directory }
+        });
+        self.sidebar_drop_trace = None;
+        result
+    }
+
     /// Synchronous commands perform I/O before publishing events. Optimistic moves
     /// publish first; subsequent dispatches confirm or roll back their paths.
     pub fn dispatch_with_events(&mut self, command: AppCommand) -> Result<AppOutcome, AppError> {
@@ -964,6 +1062,9 @@ impl Application {
             }
         };
         let pending = self.pending_move.take().unwrap();
+        if let Some(trace) = &pending.trace {
+            trace.confirmed(result.is_ok());
+        }
         let rollback = if let Err(error) = result {
             self.state.apply(&AppEvent::EntryMoved {
                 id: pending.target.clone(),
@@ -990,7 +1091,11 @@ impl Application {
     }
 
     fn execute(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
-        let context = self.diagnostics.context();
+        let context = self
+            .sidebar_drop_trace
+            .as_ref()
+            .and_then(SidebarDropTrace::context)
+            .unwrap_or_else(|| self.diagnostics.context());
         self.command_context = context.clone();
         let name = command.diagnostic_name();
         let span = context.begin(name, "dispatch");
@@ -1167,7 +1272,14 @@ impl Application {
             return Ok(false);
         }
         let root = &self.state.workspace.as_ref().unwrap().root;
-        self.filesystem.rename_entry(root, id, target)?;
+        if let Some(trace) = &self.sidebar_drop_trace {
+            trace.filesystem_started();
+        }
+        let result = self.filesystem.rename_entry(root, id, target);
+        if let Some(trace) = &self.sidebar_drop_trace {
+            trace.filesystem_finished(result.is_ok());
+        }
+        result?;
         Ok(true)
     }
 
@@ -1296,6 +1408,7 @@ impl Application {
                     .unwrap_or_default()
             }
             AppCommand::OpenWorkspace(path) => {
+                self.pending_reconcile = None;
                 if self.state.documents.iter().any(DocumentEntry::dirty) {
                     return Err(AppError::UnsavedChanges);
                 }
@@ -1313,6 +1426,30 @@ impl Application {
             AppCommand::PollWorkspaceChanges => {
                 if self.state.workspace.is_none() {
                     return Ok(Vec::new());
+                }
+                if let Some(pending) = &self.pending_reconcile {
+                    match pending.result.try_recv() {
+                        Ok(result) => {
+                            let pending = self.pending_reconcile.take().unwrap();
+                            // A scan cannot replace edits or paths changed since it started.
+                            if pending.revision != self.state.revision {
+                                self.last_reconcile = Instant::now() - Duration::from_secs(30);
+                                return Ok(Vec::new());
+                            }
+                            if result.as_ref().is_ok_and(Vec::is_empty) {
+                                self.queue_current_search();
+                            }
+                            return result;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => return Ok(Vec::new()),
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            self.pending_reconcile = None;
+                            return Err(AppError::Filesystem(FilesystemError::Io {
+                                path: self.state.workspace.as_ref().unwrap().root.clone(),
+                                source: std::io::Error::other("Workspace scan worker stopped"),
+                            }));
+                        }
+                    }
                 }
                 let interval = if self.watcher.is_some() {
                     Duration::from_secs(30)
@@ -1338,100 +1475,57 @@ impl Application {
                 }
                 if changed || self.last_reconcile.elapsed() >= interval {
                     self.last_reconcile = Instant::now();
-                    let reason = if changed {
-                        "reconcile.watcher"
-                    } else if self.watcher.is_some() {
-                        "reconcile.periodic"
-                    } else {
-                        "reconcile.fallback"
-                    };
+                    let root = self.state.workspace.as_ref().unwrap().root.clone();
+                    let documents = self.state.documents.clone();
+                    let directories = self.state.directories.clone();
+                    let query = self.state.search_query.0.clone();
+                    let filesystem = Arc::clone(&self.filesystem);
+                    let (sender, result) = mpsc::channel();
+                    self.pending_reconcile = Some(PendingReconcile {
+                        revision: self.state.revision,
+                        result,
+                    });
                     let context = self.command_context.clone();
-                    let span = context.begin(reason, "main");
-                    let result = self.resolve(AppCommand::RefreshWorkspace);
-                    context.end(
-                        reason,
-                        "main",
-                        span,
-                        if result.is_ok() { "ok" } else { "error" },
-                        self.state.revision,
-                        0,
-                    );
-                    let events = result?;
-                    if events.is_empty() {
-                        self.queue_current_search();
-                    }
-                    return Ok(events);
+                    let revision = self.state.revision;
+                    thread::spawn(move || {
+                        let span = context.begin("reconcile.background", "filesystem-worker");
+                        let outcome = reconcile_workspace(
+                            filesystem.as_ref(),
+                            &root,
+                            &documents,
+                            &directories,
+                            &query,
+                        );
+                        context.end(
+                            "reconcile.background",
+                            "filesystem-worker",
+                            span,
+                            if outcome.is_ok() { "ok" } else { "error" },
+                            revision,
+                            0,
+                        );
+                        let _ = sender.send(outcome);
+                    });
                 }
                 Vec::new()
             }
             AppCommand::RefreshWorkspace => {
-                let workspace = self
+                self.pending_reconcile = None;
+                let root = &self
                     .state
                     .workspace
                     .as_ref()
-                    .ok_or(AppError::WorkspaceNotOpen)?;
-                let (_, ids, directories) = self.filesystem.open_workspace(&workspace.root)?;
-                let listed: HashSet<_> = ids.iter().collect();
-                let previous: HashMap<_, _> = self
-                    .state
-                    .documents
-                    .iter()
-                    .map(|entry| (&entry.id, entry))
-                    .collect();
-                let mut documents = Vec::with_capacity(ids.len());
-                for id in &ids {
-                    let mut entry =
-                        previous
-                            .get(&id)
-                            .map(|entry| (*entry).clone())
-                            .unwrap_or(DocumentEntry {
-                                id: id.clone(),
-                                content: None,
-                                saved_content: None,
-                                external_change: false,
-                            });
-                    if entry.content.is_some() {
-                        match self.filesystem.read_document(&workspace.root, &entry.id) {
-                            Ok(disk_content)
-                                if entry.saved_content.as_ref() == Some(&disk_content) =>
-                            {
-                                entry.external_change = false;
-                            }
-                            Ok(disk_content) if !entry.dirty() => {
-                                entry.content = Some(disk_content.clone());
-                                entry.saved_content = Some(disk_content);
-                                entry.external_change = false;
-                            }
-                            _ => entry.external_change = true,
-                        }
-                    }
-                    documents.push(entry);
-                }
-                for entry in &self.state.documents {
-                    if !listed.contains(&entry.id) && entry.content.is_some() {
-                        let mut missing = entry.clone();
-                        missing.external_change = true;
-                        documents.push(missing);
-                    }
-                }
-                documents.sort_by(|left, right| left.id.cmp(&right.id));
-                if documents == self.state.documents && directories == self.state.directories {
-                    Vec::new()
-                } else {
-                    let needle = self.state.search_query.0.trim().to_lowercase();
-                    let search_results = documents
-                        .iter()
-                        .flat_map(|entry| {
-                            search_results_for(entry, &needle, entry.content.as_deref())
-                        })
-                        .collect();
-                    vec![AppEvent::WorkspaceRefreshed {
-                        documents,
-                        directories,
-                        search_results,
-                    }]
-                }
+                    .ok_or(AppError::WorkspaceNotOpen)?
+                    .root;
+                reconcile_workspace(
+                    self.filesystem.as_ref(),
+                    root,
+                    &self.state.documents,
+                    &self.state.directories,
+                    &self.state.search_query.0,
+                )?
             }
+
             AppCommand::RenameEntry { id, new_name } => {
                 let name =
                     DocumentId::parse(new_name.clone()).map_err(|_| AppError::InvalidEntryName)?;
@@ -1460,13 +1554,22 @@ impl Application {
                 let destination = target.clone();
                 let (sender, result) = mpsc::channel();
                 self.search_generation.fetch_add(1, Ordering::Relaxed);
+                let trace = self.sidebar_drop_trace.clone();
                 self.pending_move = Some(PendingMove {
                     id: id.clone(),
                     target: target.clone(),
                     result,
+                    trace: trace.clone(),
                 });
                 thread::spawn(move || {
-                    let _ = sender.send(filesystem.rename_entry(&root, &source, &destination));
+                    if let Some(trace) = &trace {
+                        trace.filesystem_started();
+                    }
+                    let result = filesystem.rename_entry(&root, &source, &destination);
+                    if let Some(trace) = &trace {
+                        trace.filesystem_finished(result.is_ok());
+                    }
+                    let _ = sender.send(result);
                 });
                 vec![AppEvent::EntryMoved { id, target }]
             }

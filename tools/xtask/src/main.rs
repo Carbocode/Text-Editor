@@ -129,7 +129,15 @@ fn run_frontend(package: &str, kde: bool) -> ExitCode {
         .unwrap_or_else(|| "target".into())
         .join("debug")
         .join(format!("{package}{}", env::consts::EXE_SUFFIX));
-    run(executable.to_str().expect("frontend executable path"), &[])
+    let mut command = Command::new(executable);
+    if !kde {
+        // A registered GApplication otherwise activates the previously built process.
+        command.env("NATIVE_WORKSPACE_NEW_INSTANCE", "1");
+    }
+    match command.status() {
+        Ok(status) if status.success() => ExitCode::SUCCESS,
+        Ok(_) | Err(_) => ExitCode::FAILURE,
+    }
 }
 
 fn devtools(demo: bool) -> ExitCode {

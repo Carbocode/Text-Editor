@@ -201,6 +201,27 @@ impl From<AppError> for WorkspaceError {
 }
 
 #[derive(uniffi::Object)]
+pub struct WorkspaceDropTrace {
+    inner: native_workspace_application::SidebarDropTrace,
+}
+
+#[uniffi::export]
+impl WorkspaceDropTrace {
+    pub fn preview_hidden(&self) {
+        self.inner.preview_hidden();
+    }
+    pub fn handler_finished(&self, accepted: bool) {
+        self.inner.handler_finished(accepted);
+    }
+    pub fn sidebar_ready(&self) {
+        self.inner.sidebar_ready();
+    }
+    pub fn confirmed(&self, success: bool) {
+        self.inner.confirmed(success);
+    }
+}
+
+#[derive(uniffi::Object)]
 pub struct WorkspaceApplication {
     inner: Mutex<Application>,
     diagnostic_observer: std::sync::OnceLock<native_workspace_application::DiagnosticObserver>,
@@ -208,6 +229,33 @@ pub struct WorkspaceApplication {
 
 #[uniffi::export]
 impl WorkspaceApplication {
+    pub fn diagnostic_ui_heartbeat(&self) {
+        if let Some(observer) = self.diagnostic_observer.get() {
+            observer.ui_heartbeat();
+        }
+    }
+    pub fn begin_sidebar_drop(&self, origin: u8) -> std::sync::Arc<WorkspaceDropTrace> {
+        std::sync::Arc::new(WorkspaceDropTrace {
+            inner: native_workspace_application::SidebarDropTrace::begin(
+                self.diagnostic_observer.get().cloned().unwrap_or_default(),
+                origin,
+            ),
+        })
+    }
+
+    pub fn move_entry_traced(
+        &self,
+        path: String,
+        directory: String,
+        trace: std::sync::Arc<WorkspaceDropTrace>,
+    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.inner
+            .lock()
+            .map_err(|_| WorkspaceError::LockPoisoned)?
+            .dispatch_sidebar_move(Self::parse_id(path)?, directory, false, trace.inner.clone())
+            .map(Into::into)
+            .map_err(Into::into)
+    }
     #[uniffi::constructor]
     pub fn new() -> Self {
         let mut app = Application::new();

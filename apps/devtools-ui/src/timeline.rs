@@ -27,9 +27,10 @@ fn actor(record: &Record) -> usize {
         3
     } else if record.thread == "search-worker" {
         1
-    } else if ["filesystem.", "watcher.", "reconcile."]
-        .iter()
-        .any(|prefix| record.name.starts_with(prefix))
+    } else if record.name == "drop.filesystem"
+        || ["filesystem.", "watcher.", "reconcile."]
+            .iter()
+            .any(|prefix| record.name.starts_with(prefix))
     {
         2
     } else if record.component == "producer" || record.thread.starts_with("devtools") {
@@ -39,12 +40,77 @@ fn actor(record: &Record) -> usize {
     }
 }
 
+const TYPES: [&str; 6] = [
+    "Input",
+    "Rendering",
+    "Commands",
+    "Filesystem",
+    "Search",
+    "Collection",
+];
+const TYPE_COLORS: [Color32; 6] = [
+    theme::ACCENT,
+    Color32::from_rgb(183, 151, 244),
+    theme::GREEN,
+    theme::AMBER,
+    Color32::from_rgb(98, 195, 225),
+    theme::MUTED,
+];
+
+fn event_type(record: &Record) -> usize {
+    let name = record.name.as_str();
+    if name == "drop.filesystem"
+        || name == "drop.dispatch_wait"
+        || name == "drop.confirmation"
+        || actor(record) == 2
+    {
+        3
+    } else if name == "drop.sidebar_ready"
+        || name == "drop.ui_delay"
+        || name.starts_with("ui.")
+        || name.starts_with("snapshot.")
+    {
+        1
+    } else if name.starts_with("drop.") {
+        0
+    } else if actor(record) == 1 || name.starts_with("search.") {
+        4
+    } else if actor(record) == 4 {
+        5
+    } else {
+        2
+    }
+}
+// A heartbeat reports an interval ending at the sampling timestamp, rather
+// than an instantaneous marker. Snapshot application also records elapsed
+// work ending at emission. The drop-local sample is only contextual.
+fn activity_start(record: &Record) -> u64 {
+    if matches!(
+        record.name.as_str(),
+        "ui.event_loop_delay" | "snapshot.apply"
+    ) {
+        record.monotonic_ns.0.saturating_sub(record.value.0)
+    } else {
+        record.monotonic_ns.0
+    }
+}
+
 struct Activity<'a> {
     record: &'a Record,
     end: Option<&'a Record>,
     track: usize,
 }
 impl Activity<'_> {
+    fn start(&self) -> u64 {
+        activity_start(self.record)
+    }
+    fn is_interval(&self) -> bool {
+        self.record.kind == Kind::SpanStart
+            || matches!(
+                self.record.name.as_str(),
+                "ui.event_loop_delay" | "snapshot.apply"
+            )
+    }
     fn finish(&self, latest: u64) -> u64 {
         if self.record.kind == Kind::SpanStart {
             self.end
@@ -101,13 +167,13 @@ fn lanes(records: &[Record]) -> [Vec<Activity<'_>>; 5] {
         });
     }
     for lane in &mut lanes {
-        lane.sort_by_key(|activity| (activity.record.monotonic_ns.0, activity.record.sequence.0));
+        lane.sort_by_key(|activity| (activity.start(), activity.record.sequence.0));
         let mut occupied = Vec::new();
         for activity in lane {
-            if activity.record.kind != Kind::SpanStart {
+            if !activity.is_interval() {
                 continue;
             }
-            let start = activity.record.monotonic_ns.0;
+            let start = activity.start();
             let track = occupied
                 .iter()
                 .position(|&end| end <= start)
@@ -132,6 +198,7 @@ pub struct Timeline {
     drag_start: Option<f64>,
     drag_window: Option<(f64, f64)>,
     follow: bool,
+    hidden_types: [bool; 6],
 }
 
 impl Timeline {
@@ -150,10 +217,11 @@ impl Timeline {
             *self = Self {
                 session,
                 follow: true,
+                hidden_types: self.hidden_types,
                 ..Self::default()
             };
         }
-        let min = records.iter().map(|r| r.monotonic_ns.0).min().unwrap_or(0) as f64;
+        let min = records.iter().map(activity_start).min().unwrap_or(0) as f64;
         let max = records.iter().map(|r| r.monotonic_ns.0).max().unwrap_or(0) as f64;
         let extent = (max - min).max(1_000_000.0);
         let bounds = (min - extent * 0.03, max.max(min + extent) + extent * 0.03);
@@ -196,12 +264,30 @@ impl Timeline {
             )
             .size(11.0),
         );
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Event types:");
+            for (index, label) in TYPES.iter().enumerate() {
+                if ui
+                    .selectable_label(
+                        !self.hidden_types[index],
+                        egui::RichText::new(*label).color(TYPE_COLORS[index]),
+                    )
+                    .clicked()
+                {
+                    self.hidden_types[index] = !self.hidden_types[index];
+                }
+            }
+            if ui.small_button("All").clicked() {
+                self.hidden_types.fill(false);
+            }
+        });
         ui.add_space(8.0);
         let lanes = lanes(records);
         let filter = filter.to_lowercase();
         let matches = |activity: &Activity<'_>| {
             let record = activity.record;
-            operation.is_none_or(|id| id == record.operation.0)
+            !self.hidden_types[event_type(record)]
+                && operation.is_none_or(|id| id == record.operation.0)
                 && (internal
                     || (activity.outcome() != Outcome::Noop
                         && !matches!(
@@ -332,7 +418,7 @@ impl Timeline {
                         );
                         let ink = painter.with_clip_rect(lane_plot.intersect(ui.clip_rect()));
                         for activity in lane.iter().filter(|a| matches(a)) {
-                            let start = activity.record.monotonic_ns.0 as f64;
+                            let start = activity.start() as f64;
                             let finish = activity.finish(max as u64) as f64;
                             if finish < left || start > right {
                                 continue;
@@ -341,10 +427,10 @@ impl Timeline {
                                 Outcome::Error => theme::RED,
                                 Outcome::Cancelled | Outcome::Discarded => theme::AMBER,
                                 Outcome::Incomplete => theme::MUTED,
-                                _ => COLORS[index],
+                                _ => TYPE_COLORS[event_type(activity.record)],
                             };
                             let y = top + 12.0 + activity.track as f32 * TRACK;
-                            let is_span = activity.record.kind == Kind::SpanStart;
+                            let is_span = activity.is_interval();
                             let shape = if is_span {
                                 Rect::from_min_max(
                                     egui::pos2(x_at(start).max(plot.left()), y),
@@ -371,7 +457,7 @@ impl Timeline {
                                     Stroke::new(1.0_f32, color),
                                     StrokeKind::Inside,
                                 );
-                                if activity.end.is_none() {
+                                if activity.record.kind == Kind::SpanStart && activity.end.is_none() {
                                     let mut x = shape.left();
                                     while x < shape.right() {
                                         ink.line_segment(
@@ -421,17 +507,21 @@ impl Timeline {
                             }
                             item.on_hover_ui(|ui| {
                                 ui.strong(widgets::name(&activity.record.name));
-                                ui.label(ACTORS[index]);
+                                ui.label(format!("{} · {}", ACTORS[index], TYPES[event_type(activity.record)]));
+                                ui.label(format!("Operation: {}", activity.record.operation.0));
                                 let (label, color) = widgets::outcome(activity.outcome());
                                 ui.colored_label(color, label);
                                 ui.label(format!("Start: {:.6} s", start / 1e9));
                                 if is_span {
-                                    ui.label(if activity.end.is_some() {
+                                    ui.label(if activity.end.is_some() || activity.record.kind != Kind::SpanStart {
                                         format!("Duration: {}", duration(finish - start))
                                     } else {
                                         "End is not present in the current page".into()
                                     });
+                                } else if let Some(value) = widgets::duration_value(activity.record) {
+                                    ui.label(format!("Measured duration: {}", duration(value as f64)));
                                 }
+                                if activity.record.name == "ui.event_loop_delay" { ui.label("Sampled event-loop lateness; not a physical input timestamp."); }
                             });
                         }
                         top = bottom;
@@ -580,5 +670,41 @@ mod tests {
         assert_eq!(lanes[0][0].outcome(), Outcome::Incomplete);
         assert!(lanes[0][0].end.is_none());
         assert_eq!(lanes[0][1].record.kind, Kind::SpanEnd);
+    }
+    #[test]
+    fn sampled_stall_occupies_its_actual_interval_and_rendering_type() {
+        for (name, elapsed) in [
+            ("ui.event_loop_delay", 1_000_000_000),
+            ("snapshot.apply", 40_000_000),
+        ] {
+            let mut sample = record(1, 2_000_000_000, 0, Kind::Event);
+            sample.name = name.into();
+            sample.thread = "ui".into();
+            sample.value = Counter(elapsed);
+            let records = [sample];
+            let lanes = lanes(&records);
+            let activity = &lanes[3][0];
+            assert!(activity.is_interval());
+            assert_eq!(activity.start(), 2_000_000_000 - elapsed);
+            assert_eq!(activity.finish(2_000_000_000), 2_000_000_000);
+            assert_eq!(event_type(activity.record), 1);
+        }
+    }
+
+    #[test]
+    fn drop_phases_share_operation_but_have_independent_event_types() {
+        let mut phase = record(1, 0, 42, Kind::SpanStart);
+        for (name, category) in [
+            ("drop.handler", 0),
+            ("drop.preview_hidden", 0),
+            ("drop.sidebar_ready", 1),
+            ("drop.dispatch_wait", 3),
+            ("drop.filesystem", 3),
+            ("drop.confirmation", 3),
+        ] {
+            phase.name = name.into();
+            assert_eq!(event_type(&phase), category);
+            assert_eq!(phase.operation.0, 42);
+        }
     }
 }

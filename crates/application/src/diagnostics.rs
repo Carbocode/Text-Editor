@@ -204,6 +204,77 @@ pub struct DiagnosticObserver {
     producer: Option<Producer>,
 }
 impl DiagnosticObserver {
+    pub fn ui_heartbeat(&self) {
+        #[cfg(feature = "devtools")]
+        if let Some(p) = &self.producer {
+            p.ui_heartbeat(50_000_000);
+        }
+    }
+    pub(crate) fn ui_delay(&self) -> u64 {
+        #[cfg(feature = "devtools")]
+        if let Some(p) = &self.producer {
+            return p.recent_ui_delay(50_000_000);
+        }
+        0
+    }
+    pub(crate) fn context(&self, operation: u64) -> Context {
+        Context {
+            operation,
+            generation: 0,
+            #[cfg(feature = "devtools")]
+            producer: self.producer.clone(),
+        }
+    }
+
+    pub(crate) fn id(&self) -> u64 {
+        #[cfg(feature = "devtools")]
+        if let Some(p) = &self.producer {
+            return p.id();
+        }
+        0
+    }
+
+    pub(crate) fn drop_record(
+        &self,
+        operation: u64,
+        span: u64,
+        name: &'static str,
+        end: bool,
+        success: bool,
+        duration: u64,
+    ) {
+        #[cfg(feature = "devtools")]
+        if let Some(p) = &self.producer {
+            p.emit(
+                if name == "drop.filesystem" {
+                    "core"
+                } else {
+                    "frontend"
+                },
+                if name == "drop.filesystem" {
+                    "filesystem-worker"
+                } else {
+                    "ui"
+                },
+                name,
+                if span == 0 {
+                    Kind::Event
+                } else if end {
+                    Kind::SpanEnd
+                } else {
+                    Kind::SpanStart
+                },
+                if success { Outcome::Ok } else { Outcome::Error },
+                operation,
+                span,
+                0,
+                duration,
+                0,
+            );
+        }
+        #[cfg(not(feature = "devtools"))]
+        let _ = (operation, span, name, end, success, duration);
+    }
     pub fn available(&self) -> bool {
         #[cfg(feature = "devtools")]
         {

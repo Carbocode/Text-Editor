@@ -12,6 +12,7 @@ Item {
     property var controller
     property bool enableBrowse: false
     property bool showingHome: true
+    property alias homeWindow: homeWindow
     property bool creatingDirectory: false
     property int sidebarTab: 0 // 0: files, 1: text search, 2-5: empty tabs
     property string fileNameQuery: ""
@@ -56,6 +57,7 @@ Item {
     property bool dropCommitted: false
     property string committedDropDirectory: ""
     property bool finishingEntryDrag: false
+    property bool dragPreviewVisible: false
 
     signal browseRequested()
 
@@ -119,10 +121,14 @@ Item {
         updateHighlight()
     }
 
+    property string highlightedFileName: ""
     function updateHighlight() {
         if (updatingHighlight || !root.controller) return
-        updatingHighlight = true
         var source = editor.text
+        var fileName = root.controller.active_document_id.split("/").pop()
+        if (source === minimapSource && fileName === highlightedFileName) return
+        updatingHighlight = true
+        highlightedFileName = fileName
         var spans = root.controller.highlight_document(source)
         syntaxHighlighter.spans = spans
         minimapSource = source
@@ -258,7 +264,13 @@ Item {
 
     function parentDirectory(path) { return path.split("/").slice(0, -1).join("/") }
 
+    function isPendingMove(path) {
+        var target = controller.pending_move_target
+        return target && (path === target || path.startsWith(target + "/"))
+    }
+
     function canDrop(source, directory) {
+        if (controller.pending_move_target.length > 0) return false
         if (source.length === 0) return false
         var target = (directory.length > 0 ? directory + "/" : "") + source.split("/").pop()
         return target !== source && !target.startsWith(source + "/")
@@ -311,31 +323,83 @@ Item {
     }
 
     function dropEntry(directory) {
-        if (!canDrop(draggingPath, directory) || !flushEditor()) {
+        beginDropTrace()
+        if (!canDrop(draggingPath, directory)) {
             finishEntryDrag(true)
+            controller.drop_handler_finished(false)
             return false
         }
-        controller.move_entry(draggingPath, directory)
+        var source = draggingPath
+        var temporaryFolders = temporaryDragDirectories.slice()
+        dragPreviewVisible = false
+        controller.drop_preview_hidden()
+        hoveringDrop = false
+        validDrop = false
+        // End hit testing and hover feedback before replacing tree rows.
+        dropCommitted = true
+        committedDropDirectory = directory
+        finishEntryDrag(true)
+        var dispatchStarted = Date.now()
+        controller.move_entry(source, directory, editor.text)
+        var dispatchMs = Date.now() - dispatchStarted
         selectedResultIndex = -1
         var succeeded = controller.error_message.length === 0
-        if (succeeded) { dropCommitted = true; committedDropDirectory = directory }
-        finishEntryDrag(true)
+        if (succeeded && directory.length > 0) {
+            var opened = Object.assign({}, collapsedDirectories)
+            opened[directory] = false
+            collapsedDirectories = opened
+        }
+        if (!succeeded) {
+            temporaryDragDirectories = temporaryFolders
+            restoreDragDirectories(null)
+        }
+        sidebarEntriesDirty = true
+        sidebarUpdate.stop()
+        var rebuildStarted = Date.now()
+        rebuildOrderedEntries()
+        if (sidebarTab === 0) {
+            fileTree.forceLayout()
+            restoreFileTreeExpansion()
+        }
+        if (Qt.application.arguments.indexOf("--trace-drop") !== -1)
+            console.log("Drop dispatch=" + dispatchMs + "ms tree=" + (Date.now() - rebuildStarted) + "ms")
+        if (succeeded) controller.drop_sidebar_ready()
+        controller.drop_handler_finished(succeeded)
         return succeeded
+    }
+
+    property bool dropTraceStarted: false
+    Timer {
+        interval: 50
+        repeat: true
+        running: root.controller.devtools_available
+        onTriggered: root.controller.diagnostic_ui_heartbeat()
+    }
+    function beginDropTrace() {
+        if (!dropTraceStarted) { controller.begin_sidebar_drop(); dropTraceStarted = true }
     }
 
     function startEntryDrag(path, point) {
         finishEntryDrag(true)
+        dropTraceStarted = false
         dropCommitted = false
         renamePath = ""
         dragGhost.x = point.x + 12
         dragGhost.y = point.y + 12
         draggingPath = path
+        dragPreviewVisible = true
     }
 
     function finishEntryDrag(cancelled) {
         if (finishingEntryDrag) return
         finishingEntryDrag = true
-        if (!cancelled && draggingPath.length > 0 && !dropCommitted) dragGhost.Drag.drop()
+        var releasing = !cancelled && draggingPath.length > 0 && !dropCommitted
+        if (releasing) beginDropTrace()
+        dragPreviewVisible = false
+        if (releasing) {
+            controller.drop_preview_hidden()
+            if (dragGhost.Drag.drop() === Qt.IgnoreAction) controller.drop_handler_finished(false)
+        }
         draggingPath = ""
         hoveringDrop = false
         hoverDirectory = ""
@@ -382,7 +446,7 @@ Item {
         id: dragGhost
         objectName: "sidebarDragGhost"
         z: 1000
-        visible: root.draggingPath.length > 0
+        visible: root.dragPreviewVisible
         width: ghostLabel.implicitWidth + 36
         height: 34
         radius: 5
@@ -544,18 +608,19 @@ Item {
         }
         if (sidebarTab === 1) matchIndicesByFile = matches
         var directories = []
+        var workspaceDirectories = root.controller.directory_ids
         var seenDirectories = ({})
         if (sidebarTab === 0 && fileNameQuery.trim().length === 0) {
-            for (var k = 0; k < root.controller.directory_ids.length; ++k) {
-                var directory = root.controller.directory_ids[k]
+            for (var k = 0; k < workspaceDirectories.length; ++k) {
+                var directory = workspaceDirectories[k]
                 directories.push(directory)
                 seenDirectories["#" + directory] = true
             }
         }
         if (sidebarTab === 0 && fileNameQuery.trim().length > 0) {
             var folderNeedle = fileNameQuery.trim().toLowerCase()
-            for (var k = 0; k < root.controller.directory_ids.length; ++k) {
-                var namedFolder = root.controller.directory_ids[k]
+            for (var k = 0; k < workspaceDirectories.length; ++k) {
+                var namedFolder = workspaceDirectories[k]
                 if (namedFolder.split("/").pop().toLowerCase().includes(folderNeedle)) {
                     directories.push(namedFolder)
                     seenDirectories["#" + namedFolder] = true
@@ -794,75 +859,113 @@ Item {
         }
     }
 
-    ColumnLayout {
-        anchors.fill: parent
-        spacing: 20
-        visible: root.showingHome || root.controller.workspace_name.length === 0
-        Item { Layout.fillHeight: true }
-        Label {
-            text: "Native Workspace"
-            font.pixelSize: 30
-            font.bold: true
-            Layout.alignment: Qt.AlignHCenter
-        }
-        Button {
-            text: "Open Folder…"
-            visible: root.enableBrowse
-            Layout.alignment: Qt.AlignHCenter
-            onClicked: root.browseRequested()
-        }
-        Label {
-            text: "Recent Workspaces"
-            font.pixelSize: 20
-            Layout.alignment: Qt.AlignHCenter
-        }
-        Label {
-            text: "No recent workspaces"
-            visible: root.controller.recent_workspace_paths.length === 0
-            Layout.alignment: Qt.AlignHCenter
-        }
-        ListView {
-            Layout.preferredWidth: Math.min(520, parent.width - 40)
-            Layout.preferredHeight: Math.min(260, contentHeight)
-            Layout.alignment: Qt.AlignHCenter
-            clip: true
-            model: root.controller.recent_workspace_paths
-            delegate: Basic.ItemDelegate {
-                required property int index
-                required property string modelData
-                width: ListView.view.width
-                height: 54
-                contentItem: ColumnLayout {
-                    spacing: 2
-                    Label {
-                        text: root.controller.recent_workspace_names[index]
-                        font.bold: true
-                        Layout.fillWidth: true
-                        elide: Text.ElideMiddle
-                    }
-                    Label {
-                        text: modelData
-                        opacity: 0.65
-                        font.pixelSize: 11
-                        Layout.fillWidth: true
-                        elide: Text.ElideMiddle
-                    }
+    ApplicationWindow {
+        id: homeWindow
+        transientParent: null
+        title: "Native Workspace"
+        width: 640
+        height: 560
+        minimumWidth: 480
+        minimumHeight: 400
+        visible: root.enableBrowse && root.showingHome
+        // Keep native window-manager decorations, including on KDE.
+        onClosing: Qt.quit()
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 28
+            spacing: 18
+            Label {
+                text: "Native Workspace"
+                font.pixelSize: 30
+                font.bold: true
+            }
+            Label {
+                text: "A place for your files and ideas."
+                opacity: 0.7
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+            }
+            RowLayout {
+                Button {
+                    text: "Open Folder…"
+                    highlighted: true
+                    onClicked: root.browseRequested()
                 }
-                onClicked: root.openWorkspace(modelData)
+                Button {
+                    text: "Resume Workspace"
+                    visible: root.controller.workspace_root.length > 0
+                    onClicked: root.showingHome = false
+                }
+            }
+            Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid }
+            Label { text: "Recent Workspaces"; font.pixelSize: 18; font.bold: true }
+            Label {
+                text: "Open a folder. It will appear here for quick access."
+                visible: root.controller.recent_workspace_paths.length === 0
+                opacity: 0.7
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+            }
+            ListView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 6
+                model: root.controller.recent_workspace_paths
+                ScrollBar.vertical: ScrollBar { }
+                delegate: Basic.ItemDelegate {
+                    required property int index
+                    required property string modelData
+                    width: ListView.view.width
+                    height: 68
+                    background: Rectangle {
+                        radius: 8
+                        color: parent.hovered ? palette.alternateBase : palette.base
+                        border.color: palette.mid
+                    }
+                    ToolTip.visible: hovered
+                    ToolTip.text: modelData
+                    contentItem: RowLayout {
+                        spacing: 12
+                        Label { text: "▸"; opacity: 0.6 }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Label {
+                                text: root.controller.recent_workspace_names[index]
+                                font.bold: true
+                                Layout.fillWidth: true
+                                elide: Text.ElideMiddle
+                            }
+                            Label {
+                                text: modelData
+                                opacity: 0.65
+                                Layout.fillWidth: true
+                                elide: Text.ElideMiddle
+                            }
+                        }
+                    }
+                    onClicked: root.openWorkspace(modelData)
+                }
+            }
+            Label {
+                text: root.controller.error_message
+                visible: text.length > 0
+                Layout.fillWidth: true
+                wrapMode: Text.WordWrap
+            }
+            Button {
+                text: "Developer Tools"
+                visible: root.controller.devtools_available
+                onClicked: root.controller.open_devtools()
             }
         }
-        Label {
-            text: root.controller.error_message
-            visible: text.length > 0
-            Layout.alignment: Qt.AlignHCenter
-        }
-        Item { Layout.fillHeight: true }
     }
 
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
-        visible: !root.showingHome && root.controller.workspace_name.length > 0
+        visible: root.controller.workspace_name.length > 0
         ToolBar {
             Layout.fillWidth: true
             contentItem: RowLayout {
@@ -1030,13 +1133,17 @@ Item {
                             property var entry: row < fileTree.rows && model.display !== undefined
                                 ? fileTreeModel.getRow(fileTree.index(row, 0)) : null
                             onEntryChanged: if (root.renamePath.length > 0) Qt.callLater(root.focusInlineRename)
+                            property bool pendingMove: entry && root.isPendingMove(entry.path)
                             text: entry ? entry.name : ""
+                            ToolTip.visible: hovered && pendingMove
+                            ToolTip.text: "Moving… Waiting for confirmation"
                             // TreeViewDelegate styles can provide a text-only
                             // contentItem, so draw the bundled icon explicitly.
                             contentItem: RowLayout {
                                 spacing: 4
                                 Image {
                                     objectName: "fileTreeIcon"
+                                    opacity: treeRow.pendingMove ? 0.5 : 1
                                     source: treeRow.entry ? (treeRow.entry.directory
                                         ? root.controller.folder_icon(treeRow.entry.path, treeRow.expanded)
                                         : root.controller.file_icon(treeRow.entry.path)) : ""
@@ -1053,6 +1160,7 @@ Item {
                                 }
                                 Label {
                                     objectName: "sidebarEntryLabel"
+                                    opacity: treeRow.pendingMove ? 0.5 : 1
                                     verticalAlignment: Text.AlignVCenter
                                     Layout.fillHeight: true
                                     visible: !renameField.visible
@@ -1063,6 +1171,14 @@ Item {
                                     Layout.fillWidth: true
                                     Layout.minimumWidth: 0
                                     Layout.alignment: Qt.AlignVCenter
+                                }
+                                BusyIndicator {
+                                    objectName: "pendingMoveIndicator"
+                                    visible: treeRow.pendingMove
+                                    running: visible && !treeRow.pooled
+                                    Layout.preferredWidth: 16
+                                    Layout.preferredHeight: 16
+                                    Accessible.name: "Moving… Waiting for confirmation"
                                 }
                                 Basic.TextField {
                                     id: renameField
@@ -1113,7 +1229,7 @@ Item {
                             DragHandler {
                                 id: rowDrag
                                 target: null
-                                enabled: treeRow.entry && root.renamePath.length === 0
+                                enabled: treeRow.entry && !treeRow.pendingMove && root.renamePath.length === 0
                                 acceptedButtons: Qt.LeftButton
                                 cursorShape: root.hoveringDrop && !root.validDrop ? Qt.ForbiddenCursor : Qt.ClosedHandCursor
                                 onActiveChanged: {

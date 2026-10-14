@@ -24,6 +24,9 @@ struct Inner {
     ids: AtomicU64,
     clock: Instant,
     session: Session,
+    ui_tick: AtomicU64,
+    ui_gap: AtomicU64,
+    ui_gap_time: AtomicU64,
 }
 #[derive(Clone, Copy)]
 struct Pending {
@@ -85,6 +88,9 @@ impl Producer {
             ids: AtomicU64::new(1),
             clock: Instant::now(),
             session,
+            ui_tick: AtomicU64::new(0),
+            ui_gap: AtomicU64::new(0),
+            ui_gap_time: AtomicU64::new(0),
         }))
     }
     pub fn enabled(&self) -> bool {
@@ -95,6 +101,50 @@ impl Producer {
     }
     pub fn now(&self) -> u64 {
         self.0.clock.elapsed().as_nanos().min(u64::MAX as u128) as u64
+    }
+    pub fn ui_heartbeat(&self, interval_ns: u64) {
+        if !self.enabled() {
+            return;
+        }
+        let now = self.now();
+        let previous = self.0.ui_tick.swap(now, Ordering::Relaxed);
+        if previous == 0 {
+            return;
+        }
+        let delay = now.saturating_sub(previous).saturating_sub(interval_ns);
+        if delay >= 50_000_000 {
+            // Keep the recent stall across normal catch-up ticks, until the
+            // drop hook has had a chance to associate it with its operation.
+            self.0.ui_gap.store(delay, Ordering::Relaxed);
+            self.0.ui_gap_time.store(now, Ordering::Relaxed);
+            self.emit(
+                "frontend",
+                "ui",
+                "ui.event_loop_delay",
+                Kind::Event,
+                Outcome::Ok,
+                0,
+                0,
+                0,
+                delay,
+                0,
+            );
+        }
+    }
+    pub fn recent_ui_delay(&self, interval_ns: u64) -> u64 {
+        let now = self.now();
+        let previous = self.0.ui_tick.load(Ordering::Relaxed);
+        if previous == 0 {
+            return 0;
+        }
+        let current = now.saturating_sub(previous).saturating_sub(interval_ns);
+        let recent =
+            if now.saturating_sub(self.0.ui_gap_time.load(Ordering::Relaxed)) <= interval_ns * 2 {
+                self.0.ui_gap.load(Ordering::Relaxed)
+            } else {
+                0
+            };
+        current.max(recent)
     }
     #[allow(clippy::too_many_arguments)]
     pub fn emit(
@@ -138,6 +188,10 @@ impl Producer {
         if self.0.enabled.swap(recording, Ordering::Relaxed) == recording {
             return;
         }
+        // A pause in collection must not become a UI stall after resuming.
+        self.0.ui_tick.store(0, Ordering::Relaxed);
+        self.0.ui_gap.store(0, Ordering::Relaxed);
+        self.0.ui_gap_time.store(0, Ordering::Relaxed);
         // Collection transitions bypass the event filter so stopped intervals
         // remain observable. They run on diagnostic threads, never the editor.
         let event = Pending {
@@ -369,72 +423,6 @@ impl Producer {
     }
 }
 pub use native_workspace_devtools_protocol::{Kind as EventKind, Outcome as EventOutcome};
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn saturation_is_bounded_and_never_waits() {
-        let p = Producer::buffered(Session::new("test"), 2);
-        for _ in 0..10_000 {
-            p.emit(
-                "core",
-                "main",
-                "test",
-                Kind::Event,
-                Outcome::Ok,
-                0,
-                0,
-                0,
-                0,
-                0,
-            );
-        }
-        assert_eq!(p.0.queue.len(), 2);
-        assert_eq!(p.0.dropped.load(Ordering::Relaxed), 9998);
-    }
-    #[test]
-    fn paused_intervals_have_control_records_but_no_editor_events() {
-        let p = Producer::buffered(Session::new("test"), 4);
-        p.set_recording(false);
-        p.emit(
-            "core",
-            "main",
-            "test",
-            Kind::Event,
-            Outcome::Ok,
-            0,
-            0,
-            0,
-            0,
-            0,
-        );
-        p.set_recording(false);
-        p.set_recording(true);
-        assert_eq!(p.0.queue.len(), 2);
-        assert_eq!(p.0.queue.pop().unwrap().name, "collection.stopped");
-        assert_eq!(p.0.queue.pop().unwrap().name, "collection.started");
-    }
-
-    #[test]
-    fn disabled_does_not_timestamp_or_enqueue() {
-        let p = Producer::buffered(Session::new("test"), 2);
-        p.0.enabled.store(false, Ordering::Relaxed);
-        p.emit(
-            "core",
-            "main",
-            "test",
-            Kind::Event,
-            Outcome::Ok,
-            0,
-            0,
-            0,
-            0,
-            0,
-        );
-        assert!(p.0.queue.is_empty());
-        assert_eq!(p.0.dropped.load(Ordering::Relaxed), 0);
-    }
-}
 
 /// Launch a separately packaged console without running a build on the UI thread.
 /// The developer launcher starts the service independently.
@@ -536,4 +524,92 @@ pub fn open_tools() {
                 *running = std::process::Command::new(path).spawn().ok();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ui_stall_is_observable_and_collection_pause_is_not_a_stall() {
+        let mut p = Producer::buffered(Session::new("test"), 8);
+        Arc::get_mut(&mut p.0).unwrap().clock = Instant::now() - Duration::from_secs(2);
+        p.0.ui_tick
+            .store(p.now() - 1_000_000_000, Ordering::Relaxed);
+        p.ui_heartbeat(50_000_000);
+        let stall = p.0.queue.pop().unwrap();
+        assert_eq!(stall.name, "ui.event_loop_delay");
+        assert!(stall.value >= 950_000_000);
+        assert!(p.recent_ui_delay(50_000_000) >= 950_000_000);
+        p.ui_heartbeat(50_000_000);
+        assert!(p.recent_ui_delay(50_000_000) >= 950_000_000);
+        p.set_recording(false);
+        p.ui_heartbeat(50_000_000);
+        assert_eq!(p.0.ui_tick.load(Ordering::Relaxed), 0);
+        p.set_recording(true);
+        p.ui_heartbeat(50_000_000);
+        assert!(p.recent_ui_delay(50_000_000) < 50_000_000);
+        assert!(!std::iter::from_fn(|| p.0.queue.pop()).any(|r| r.name == "ui.event_loop_delay"));
+    }
+    #[test]
+    fn saturation_is_bounded_and_never_waits() {
+        let p = Producer::buffered(Session::new("test"), 2);
+        for _ in 0..10_000 {
+            p.emit(
+                "core",
+                "main",
+                "test",
+                Kind::Event,
+                Outcome::Ok,
+                0,
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+        assert_eq!(p.0.queue.len(), 2);
+        assert_eq!(p.0.dropped.load(Ordering::Relaxed), 9998);
+    }
+    #[test]
+    fn paused_intervals_have_control_records_but_no_editor_events() {
+        let p = Producer::buffered(Session::new("test"), 4);
+        p.set_recording(false);
+        p.emit(
+            "core",
+            "main",
+            "test",
+            Kind::Event,
+            Outcome::Ok,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        p.set_recording(false);
+        p.set_recording(true);
+        assert_eq!(p.0.queue.len(), 2);
+        assert_eq!(p.0.queue.pop().unwrap().name, "collection.stopped");
+        assert_eq!(p.0.queue.pop().unwrap().name, "collection.started");
+    }
+
+    #[test]
+    fn disabled_does_not_timestamp_or_enqueue() {
+        let p = Producer::buffered(Session::new("test"), 2);
+        p.0.enabled.store(false, Ordering::Relaxed);
+        p.emit(
+            "core",
+            "main",
+            "test",
+            Kind::Event,
+            Outcome::Ok,
+            0,
+            0,
+            0,
+            0,
+            0,
+        );
+        assert!(p.0.queue.is_empty());
+        assert_eq!(p.0.dropped.load(Ordering::Relaxed), 0);
+    }
 }

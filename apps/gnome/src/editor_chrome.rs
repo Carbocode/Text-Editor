@@ -91,7 +91,10 @@ impl EditorChrome {
         if self.file_name.borrow().as_str() == name {
             return;
         }
-        self.file_name.replace(name.to_owned());
+        let previous = self.file_name.replace(name.to_owned());
+        if previous.rsplit('/').next() == name.rsplit('/').next() {
+            return;
+        }
         let (start, end) = self.buffer.bounds();
         self.model
             .borrow_mut()

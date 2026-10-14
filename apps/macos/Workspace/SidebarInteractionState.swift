@@ -13,6 +13,7 @@ final class SidebarDragState: ObservableObject {
     private var temporaryFolders: [String: () -> Void] = [:]
     private var dragWatchdog: Timer?
     private var releasedAt: Date?
+    private var dismissPreview: (() -> Void)?
     private let isDragging: () -> Bool
     private let expansionDelay: TimeInterval
 
@@ -84,7 +85,15 @@ final class SidebarDragState: ObservableObject {
         }
     }
 
+    func setPreviewDismissal(_ dismiss: @escaping () -> Void) { dismissPreview = dismiss }
+
+    func hidePreview() {
+        dismissPreview?()
+        dismissPreview = nil
+    }
+
     func finish(committing destination: String? = nil) {
+        hidePreview()
         dragWatchdog?.invalidate()
         dragWatchdog = nil
         releasedAt = nil
