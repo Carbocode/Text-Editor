@@ -302,6 +302,12 @@ ApplicationWindow {
                     pane.finishEntryDrag(true)
                     break
                 case 16:
+                    // The drop commits on the next turn; wait for its confirmation.
+                    if (controller.move_pending) {
+                        controller.poll_workspace_changes()
+                        --step
+                        break
+                    }
                     check(controller.active_document_id === "destination/renamed/new.rs", "Move lost active document")
                     check(controller.active_document_text === "unsaved move" && controller.active_document_dirty,
                         "Move lost unsaved edits")

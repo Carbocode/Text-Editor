@@ -1,10 +1,11 @@
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList, QUrl};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, NativeApplication as Application, file_icon_name, folder_icon_name,
+    AppCommand, AppSnapshot, DocumentSummary, NativeApplication as Application, SearchResult,
+    file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
-use std::{path::PathBuf, pin::Pin};
+use std::{path::PathBuf, pin::Pin, sync::Arc};
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -42,6 +43,7 @@ pub mod qobject {
         #[qproperty(bool, active_document_dirty)]
         #[qproperty(bool, active_document_external_change)]
         #[qproperty(QString, pending_move_target)]
+        #[qproperty(bool, move_pending)]
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
 
@@ -69,6 +71,10 @@ pub mod qobject {
         fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString;
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
+        #[qinvokable]
+        fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QStringList;
+        #[qinvokable]
+        fn sidebar_has_children(self: Pin<&mut Self>, parent: &QString) -> bool;
         #[qinvokable]
         fn move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString, text: &QString);
         #[qinvokable]
@@ -123,11 +129,21 @@ pub struct AppControllerRust {
     active_document_dirty: bool,
     active_document_external_change: bool,
     pending_move_target: QString,
+    move_pending: bool,
     error_message: QString,
     devtools_available: bool,
     application: Application,
     background_move_error: Option<String>,
     drop_trace: Option<native_workspace_application::SidebarDropTrace>,
+    published: Option<PublishedLists>,
+}
+
+/// The shared lists behind the last published properties.
+struct PublishedLists {
+    search_results: Arc<Vec<SearchResult>>,
+    query_empty: bool,
+    documents: Arc<Vec<DocumentSummary>>,
+    directories: Arc<Vec<String>>,
 }
 
 impl qobject::AppController {
@@ -227,6 +243,8 @@ impl qobject::AppController {
             .map(|id| QString::from(id.as_str()))
             .unwrap_or_default();
         self.as_mut().set_pending_move_target(target);
+        let pending = self.rust().application.has_pending_move();
+        self.as_mut().set_move_pending(pending);
     }
 
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
@@ -238,86 +256,107 @@ impl qobject::AppController {
             .then(std::time::Instant::now);
         let diagnostic_operation = snapshot.diagnostic_operation;
         let diagnostic_revision = snapshot.revision;
+        // Snapshots share unchanged lists. Converting tens of thousands of
+        // paths to Qt strings on every update stalled the UI after each move.
+        let query_empty = snapshot.search_query.0.trim().is_empty();
+        let (search_changed, documents_changed, directories_changed) = match &self.rust().published
+        {
+            Some(last) => (
+                !Arc::ptr_eq(&last.search_results, &snapshot.search_results)
+                    || last.query_empty != query_empty,
+                !Arc::ptr_eq(&last.documents, &snapshot.documents),
+                !Arc::ptr_eq(&last.directories, &snapshot.directories),
+            ),
+            None => (true, true, true),
+        };
+        self.as_mut().rust_mut().published = Some(PublishedLists {
+            search_results: snapshot.search_results.clone(),
+            query_empty,
+            documents: snapshot.documents.clone(),
+            directories: snapshot.directories.clone(),
+        });
         self.as_mut().set_revision(snapshot.revision);
         self.as_mut().set_counter(snapshot.diagnostic_counter);
         self.as_mut()
             .set_search_query(QString::from(snapshot.search_query.0));
         self.as_mut()
             .set_search_in_progress(snapshot.search_in_progress);
-        self.as_mut().set_search_result_ids(
-            snapshot
-                .search_results
-                .iter()
-                .map(|result| QString::from(result.id.as_str()))
-                .collect(),
-        );
-        self.as_mut().set_search_result_snippets(
-            snapshot
-                .search_results
-                .iter()
-                .map(|result| QString::from(result.snippet.as_deref().unwrap_or("")))
-                .collect(),
-        );
-        self.as_mut().set_search_result_lines(
-            snapshot
-                .search_results
-                .iter()
-                .map(|result| {
-                    QString::from(
-                        result
-                            .location
-                            .as_ref()
-                            .map(|location| location.line.to_string())
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect(),
-        );
-        self.as_mut().set_search_result_columns(
-            snapshot
-                .search_results
-                .iter()
-                .map(|result| {
-                    QString::from(
-                        result
-                            .location
-                            .as_ref()
-                            .map(|location| location.column.to_string())
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect(),
-        );
-        self.as_mut().set_search_result_starts(
-            snapshot
-                .search_results
-                .iter()
-                .map(|result| {
-                    QString::from(
-                        result
-                            .location
-                            .as_ref()
-                            .map(|location| location.start_utf16.to_string())
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect(),
-        );
-        self.as_mut().set_search_result_ends(
-            snapshot
-                .search_results
-                .iter()
-                .map(|result| {
-                    QString::from(
-                        result
-                            .location
-                            .as_ref()
-                            .map(|location| location.end_utf16.to_string())
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect(),
-        );
+        if search_changed {
+            // An empty query lists every document without a match to show.
+            let results: &[SearchResult] = if query_empty {
+                &[]
+            } else {
+                &snapshot.search_results
+            };
+            self.as_mut().set_search_result_ids(
+                results
+                    .iter()
+                    .map(|result| QString::from(result.id.as_str()))
+                    .collect(),
+            );
+            self.as_mut().set_search_result_snippets(
+                results
+                    .iter()
+                    .map(|result| QString::from(result.snippet.as_deref().unwrap_or("")))
+                    .collect(),
+            );
+            self.as_mut().set_search_result_lines(
+                results
+                    .iter()
+                    .map(|result| {
+                        QString::from(
+                            result
+                                .location
+                                .as_ref()
+                                .map(|location| location.line.to_string())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            );
+            self.as_mut().set_search_result_columns(
+                results
+                    .iter()
+                    .map(|result| {
+                        QString::from(
+                            result
+                                .location
+                                .as_ref()
+                                .map(|location| location.column.to_string())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            );
+            self.as_mut().set_search_result_starts(
+                results
+                    .iter()
+                    .map(|result| {
+                        QString::from(
+                            result
+                                .location
+                                .as_ref()
+                                .map(|location| location.start_utf16.to_string())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            );
+            self.as_mut().set_search_result_ends(
+                results
+                    .iter()
+                    .map(|result| {
+                        QString::from(
+                            result
+                                .location
+                                .as_ref()
+                                .map(|location| location.end_utf16.to_string())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+            );
+        }
         self.as_mut().set_recent_workspace_paths(
             snapshot
                 .recent_workspaces
@@ -340,36 +379,40 @@ impl qobject::AppController {
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         ));
-        self.as_mut().set_document_ids(
-            snapshot
-                .documents
-                .iter()
-                .map(|doc| QString::from(doc.id.as_str()))
-                .collect(),
-        );
-        self.as_mut().set_directory_ids(
-            snapshot
-                .directories
-                .iter()
-                .map(|path| QString::from(path.as_str()))
-                .collect(),
-        );
-        self.as_mut().set_dirty_document_ids(
-            snapshot
-                .documents
-                .iter()
-                .filter(|doc| doc.dirty)
-                .map(|doc| QString::from(doc.id.as_str()))
-                .collect(),
-        );
-        self.as_mut().set_conflicted_document_ids(
-            snapshot
-                .documents
-                .iter()
-                .filter(|doc| doc.external_change)
-                .map(|doc| QString::from(doc.id.as_str()))
-                .collect(),
-        );
+        if documents_changed {
+            self.as_mut().set_document_ids(
+                snapshot
+                    .documents
+                    .iter()
+                    .map(|doc| QString::from(doc.id.as_str()))
+                    .collect(),
+            );
+            self.as_mut().set_dirty_document_ids(
+                snapshot
+                    .documents
+                    .iter()
+                    .filter(|doc| doc.dirty)
+                    .map(|doc| QString::from(doc.id.as_str()))
+                    .collect(),
+            );
+            self.as_mut().set_conflicted_document_ids(
+                snapshot
+                    .documents
+                    .iter()
+                    .filter(|doc| doc.external_change)
+                    .map(|doc| QString::from(doc.id.as_str()))
+                    .collect(),
+            );
+        }
+        if directories_changed {
+            self.as_mut().set_directory_ids(
+                snapshot
+                    .directories
+                    .iter()
+                    .map(|path| QString::from(path.as_str()))
+                    .collect(),
+            );
+        }
         match snapshot.active_document {
             Some(doc) => {
                 self.as_mut()
@@ -457,6 +500,24 @@ impl qobject::AppController {
                 .application
                 .delay_next_drop_for_smoke(std::time::Duration::from_millis(delay));
         }
+    }
+
+    pub fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QStringList {
+        self.rust()
+            .application
+            .sidebar_children(&parent.to_string())
+            .into_iter()
+            .map(|child| {
+                let kind = if child.directory { 'd' } else { 'f' };
+                QString::from(format!("{kind}{}", child.path))
+            })
+            .collect()
+    }
+
+    pub fn sidebar_has_children(self: Pin<&mut Self>, parent: &QString) -> bool {
+        self.rust()
+            .application
+            .sidebar_has_children(&parent.to_string())
     }
 
     pub fn move_entry(

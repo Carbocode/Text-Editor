@@ -113,8 +113,7 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                 })
                 .collect(),
             search_query: snapshot.search_query.0,
-            search_results: snapshot
-                .search_results
+            search_results: std::sync::Arc::unwrap_or_clone(snapshot.search_results)
                 .into_iter()
                 .map(|result| SearchResult {
                     id: result.id.as_str().to_owned(),
@@ -132,9 +131,8 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                 })
                 .collect(),
             search_in_progress: snapshot.search_in_progress,
-            directories: snapshot.directories,
-            documents: snapshot
-                .documents
+            directories: std::sync::Arc::unwrap_or_clone(snapshot.directories),
+            documents: std::sync::Arc::unwrap_or_clone(snapshot.documents)
                 .into_iter()
                 .map(|doc| DocumentSummary {
                     id: doc.id.as_str().to_owned(),

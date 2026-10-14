@@ -43,6 +43,10 @@ ApplicationWindow {
         }
     }
     property int step: -2
+    property bool releaseChecked: false
+    property bool quickDropChecked: false
+    property bool sawPendingIndicator: false
+    property string localText: ""
     property string originalText: ""
     property var sourcePoint
     property var targetPoint
@@ -86,8 +90,9 @@ ApplicationWindow {
                     check(pane.collapsedDirectories.src === false, "Pointer hover did not expand folder")
                     // Exercise a widget change not yet synchronized to the controller.
                     var editor = findItem(pane, "documentEditor")
+                    localText = originalText + "\nedit immediately before drop"
                     pane.syncingEditor = true
-                    editor.text = originalText + "\nedit immediately before drop"
+                    editor.text = localText
                     pane.syncingEditor = false
                     check(controller.active_document_text === originalText, "Local edit unexpectedly flushed before drop")
                     var releasedAt = Date.now()
@@ -96,20 +101,31 @@ ApplicationWindow {
                     input.mouseRelease(pane, targetPoint.x + step, targetPoint.y)
                     console.log("Drop handler duration=" + (Date.now() - releasedAt) + "ms documents=" + controller.document_ids.length)
                     check(Date.now() - releasedAt < 250, "Release blocked the GUI thread")
-                    check(controller.active_document_text === editor.text, "Drop lost a local editor change")
-                    check(controller.active_document_dirty, "Drop failed to retain the pending edit")
-                    check(controller.pending_move_target === "src/README.md", "Drop did not publish pending confirmation")
                     check(!findItem(pane, "sidebarDragGhost").visible, "Release retained the drag image until another frame")
-                    check(controller.document_ids.indexOf("src/README.md") >= 0, "Release did not relocate the row immediately")
-                    check(pane.treeRowForPath("src/README.md") >= 0, "Drop waited for a timer to update the native tree")
+                    check(controller.document_ids.indexOf("README.md") >= 0, "Release replaced tree rows during pointer delivery")
                     break
                 case 7:
-                    if (controller.pending_move_target.length > 0) {
-                        check(findItem(pane, "pendingMoveIndicator"), "Pending row has no progress indicator after painting")
+                    if (!releaseChecked) {
+                        releaseChecked = true
+                        check(controller.document_ids.indexOf("src/README.md") >= 0, "Release did not relocate the row on the next turn")
+                        check(pane.treeRowForPath("src/README.md") >= 0, "Drop did not update the native tree on the next turn")
+                        check(controller.active_document_text === localText, "Drop lost a local editor change")
+                        check(controller.active_document_dirty, "Drop failed to retain the pending edit")
+                        if (delayed) {
+                            check(controller.move_pending, "Drop did not publish pending confirmation")
+                            check(controller.pending_move_target === "", "A fresh move flashed a progress indicator")
+                        }
+                    }
+                    if (controller.move_pending) {
+                        if (controller.pending_move_target === "src/README.md") {
+                            check(findItem(pane, "pendingMoveIndicator"), "Pending row has no progress indicator after painting")
+                            sawPendingIndicator = true
+                        }
                         --step
                         return
                     }
                     if (delayed) {
+                        check(sawPendingIndicator, "A slow move never showed its progress indicator")
                         check(Date.now() - releaseTime >= 950, "Slow backend hook did not delay confirmation")
                         check(heartbeatCount >= 30 && maxHeartbeatGap < 250, "GUI timers froze during pending move: ticks=" + heartbeatCount + " gap=" + maxHeartbeatGap)
                         console.log("Slow backend GUI heartbeat ticks=" + heartbeatCount + " maximum gap=" + maxHeartbeatGap + "ms")
@@ -141,7 +157,7 @@ ApplicationWindow {
                     input.mouseRelease(pane, targetPoint.x, targetPoint.y)
                     break
                 case 9:
-                    if (controller.pending_move_target.length > 0) { --step; return }
+                    if (controller.move_pending) { --step; return }
                     check(pane.draggingPath === "" && !pane.hoveringDrop && !pane.validDrop,
                         "Workspace root drop retained feedback")
                     check(!findItem(pane, "workspaceDropTarget").visible, "Root drop box remained visible")
@@ -173,16 +189,19 @@ ApplicationWindow {
                     input.mouseMove(pane, sourcePoint.x + 20, sourcePoint.y, 1, Qt.LeftButton)
                     input.mouseMove(pane, targetPoint.x, targetPoint.y, 1, Qt.LeftButton)
                     input.mouseRelease(pane, targetPoint.x, targetPoint.y)
-                    check(pane.collapsedDirectories.src === false && pane.treeRowForPath("src/README.md") >= 0,
-                        "Quick drop did not reveal the pending row immediately")
                     break
                 case 10:
-                    if (controller.pending_move_target.length > 0) { --step; return }
+                    if (!quickDropChecked) {
+                        quickDropChecked = true
+                        check(pane.collapsedDirectories.src === false && pane.treeRowForPath("src/README.md") >= 0,
+                            "Quick drop did not reveal the pending row on the next turn")
+                    }
+                    if (controller.move_pending) { --step; return }
                     pane.startEntryDrag("src/README.md", Qt.point(30, 30))
                     check(pane.dropEntry(""), "Quick-drop fixture could not be restored")
                     break
                 case 11:
-                    if (controller.pending_move_target.length > 0) { --step; return }
+                    if (controller.move_pending) { --step; return }
                     check(controller.document_ids.indexOf("README.md") >= 0, "Quick-drop fixture restoration failed")
                     check(controller.active_document_text === originalText + "\nedit immediately before drop", "Confirmation lost the local edit")
                     controller.change_document(originalText)

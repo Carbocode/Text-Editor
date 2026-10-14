@@ -270,11 +270,15 @@ Item {
     }
 
     function canDrop(source, directory) {
-        if (controller.pending_move_target.length > 0) return false
+        if (controller.move_pending) return false
         if (source.length === 0) return false
         var target = (directory.length > 0 ? directory + "/" : "") + source.split("/").pop()
-        return target !== source && !target.startsWith(source + "/")
-            && controller.directory_ids.indexOf(target) === -1
+        if (target === source || target.startsWith(source + "/")) return false
+        // The Files tree indexes every entry by parent. Reading the full id
+        // lists copies the whole workspace into JS on each pointer move.
+        if (lazyTree() && !sidebarEntriesDirty)
+            return !childEntries(directory).some(entry => entry.path === target)
+        return controller.directory_ids.indexOf(target) === -1
             && !controller.document_ids.some(path => path === target || path.startsWith(target + "/"))
     }
 
@@ -331,6 +335,7 @@ Item {
         }
         var source = draggingPath
         var temporaryFolders = temporaryDragDirectories.slice()
+        temporaryDragDirectories = []
         dragPreviewVisible = false
         controller.drop_preview_hidden()
         hoveringDrop = false
@@ -339,6 +344,18 @@ Item {
         dropCommitted = true
         committedDropDirectory = directory
         finishEntryDrag(true)
+        // This runs inside the DragHandler release and DropArea signal of
+        // tree delegates. Replacing rows here pools or destroys them while Qt
+        // is still delivering the release, so the model changes next turn.
+        Qt.callLater(root.commitDrop, source, directory, temporaryFolders)
+        return true
+    }
+
+    function commitDrop(source, directory, temporaryFolders) {
+        temporaryDragDirectories = temporaryFolders
+        restoreDragDirectories(directory)
+        temporaryFolders = temporaryDragDirectories
+        temporaryDragDirectories = []
         var dispatchStarted = Date.now()
         controller.move_entry(source, directory, editor.text)
         var dispatchMs = Date.now() - dispatchStarted
@@ -551,11 +568,13 @@ Item {
         if (sidebarTab >= 2) return []
         if (sidebarTab === 1) return textSearchFileIds()
         var ids = controller.document_ids
+        var needle = fileNameQuery.trim().toLowerCase()
+        // Workspace document ids are unique; only filtering needs a pass.
+        if (needle.length === 0) return Array.from(ids)
         var files = []
         var seen = ({})
-        var needle = fileNameQuery.trim().toLowerCase()
         for (var i = 0; i < ids.length; ++i) {
-            if (sidebarTab === 0 && needle.length > 0 && !ids[i].split("/").pop().toLowerCase().includes(needle)) continue
+            if (!ids[i].split("/").pop().toLowerCase().includes(needle)) continue
             if (!seen["#" + ids[i]]) {
                 files.push(ids[i])
                 seen["#" + ids[i]] = true
@@ -577,6 +596,59 @@ Item {
         return "text-x-generic"
     }
 
+    // The plain Files tree asks the core for one folder at a time, so
+    // collapsed dependency folders cost nothing. Searches and name filters
+    // still list every path.
+    function lazyTree() { return sidebarTab === 0 && fileNameQuery.trim().length === 0 }
+
+    function childEntries(parent) {
+        var key = "#" + parent
+        var listed = childEntriesByParent[key]
+        if (listed || !lazyTree()) return listed || []
+        listed = controller.sidebar_children(parent).map(item => ({ path: item.substring(1), directory: item[0] === "d" }))
+        childEntriesByParent[key] = listed
+        return listed
+    }
+
+    // Collapsed folders hold one placeholder row instead of their subtree, so
+    // dependency trees such as node_modules do not enter the native model
+    // until opened. Converting every row took seconds after each move.
+    function buildTreeRows(parent, parentIndex, indexPaths, complete) {
+        return childEntries(parent).map(function(entry, row) {
+            var indexPath = parentIndex.concat([row])
+            indexPaths["#" + entry.path] = indexPath
+            var node = {
+                name: entry.path.split("/").pop(),
+                path: entry.path,
+                directory: entry.directory
+            }
+            if (entry.directory) {
+                var open = complete || collapsedDirectories[entry.path] === false
+                if (open) node.rows = buildTreeRows(entry.path, indexPath, indexPaths, complete)
+                else if (lazyTree() ? controller.sidebar_has_children(entry.path)
+                         : (childEntriesByParent["#" + entry.path] || []).length > 0)
+                    node.rows = [{ name: "", path: entry.path, directory: false, placeholder: true }]
+            }
+            return node
+        })
+    }
+
+    function materializeTreeFolder(path) {
+        var indexPath = treeIndexPaths["#" + path]
+        if (!indexPath || childEntries(path).length === 0) return
+        var first = fileTreeModel.getRow(fileTreeModel.index(indexPath.concat([0]), 0))
+        if (!first || !first.placeholder) return
+        var parentIndex = fileTreeModel.index(indexPath, 0)
+        var rows = buildTreeRows(path, indexPath, treeIndexPaths, false)
+        fileTreeModel.removeRow(fileTreeModel.index(indexPath.concat([0]), 0))
+        for (var row of rows) fileTreeModel.appendRow(parentIndex, row)
+    }
+
+    function treeEntry(modelIndex) {
+        var entry = fileTreeModel.getRow(modelIndex)
+        return entry && !entry.placeholder ? entry : null
+    }
+
     function rebuildOrderedEntries() {
         sidebarEntriesDirty = false
         sidebarUpdate.stop()
@@ -592,6 +664,33 @@ Item {
             if (sidebarTab === 1) matchIndicesByFile = cached.matches
             if (sidebarTab === 0 && fileTreeNeedsRestore)
                 Qt.callLater(root.restoreFileTreeExpansion)
+            return
+        }
+        if (lazyTree()) {
+            childEntriesByParent = ({})
+            var lazyIndexPaths = ({})
+            restoringFileTree = true
+            fileTreeNeedsRestore = true
+            var lazyRows = buildTreeRows("", [], lazyIndexPaths, false)
+            treeIndexPaths = lazyIndexPaths
+            fileTreeModel.rows = lazyRows
+            Qt.callLater(root.restoreFileTreeExpansion)
+            var openEntries = []
+            var pending = [""]
+            // Depth-first over open folders, preserving each folder's order.
+            while (pending.length > 0) {
+                var next = pending.pop()
+                if (typeof next !== "string") { openEntries.push(next); continue }
+                var listed = root.childEntries(next)
+                for (var i = listed.length - 1; i >= 0; --i) {
+                    if (listed[i].directory && root.collapsedDirectories[listed[i].path] === false)
+                        pending.push(listed[i].path)
+                    pending.push(listed[i])
+                }
+            }
+            orderedSidebarEntries = openEntries
+            updateVisibleEntries()
+            cacheCurrentSidebar()
             return
         }
         var files = fileIds()
@@ -678,24 +777,10 @@ Item {
         }
         childEntriesByParent = childEntries
         if (sidebarTab === 0) {
-            var indexPaths = ({})
-            function treeRows(parent, parentIndex) {
-                var entries = childEntries["#" + parent] || []
-                return entries.map(function(entry, row) {
-                    var indexPath = parentIndex.concat([row])
-                    indexPaths["#" + entry.path] = indexPath
-                    var node = {
-                        name: entry.path.split("/").pop(),
-                        path: entry.path,
-                        directory: entry.directory
-                    }
-                    if (entry.directory) node.rows = treeRows(entry.path, indexPath)
-                    return node
-                })
-            }
             restoringFileTree = true
             fileTreeNeedsRestore = true
-            var rootRows = treeRows("", [])
+            var indexPaths = ({})
+            var rootRows = buildTreeRows("", [], indexPaths, fileNameQuery.trim().length > 0)
             treeIndexPaths = indexPaths
             fileTreeModel.rows = rootRows
             Qt.callLater(root.restoreFileTreeExpansion)
@@ -784,7 +869,7 @@ Item {
                 fileTree.expandRecursively(-1)
             } else {
                 function expandChildren(parent) {
-                    for (var entry of childEntriesByParent["#" + parent] || []) {
+                    for (var entry of root.childEntries(parent)) {
                         if (!entry.directory || collapsedDirectories[entry.path] !== false) continue
                         var modelIndex = fileTreeModel.index(treeIndexPaths["#" + entry.path], 0)
                         var row = fileTree.rowAtIndex(modelIndex)
@@ -816,7 +901,7 @@ Item {
         collapsedDirectories = next
         var children = []
         function appendVisibleChildren(parent) {
-            for (var entry of childEntriesByParent["#" + parent] || []) {
+            for (var entry of root.childEntries(parent)) {
                 children.push(entry)
                 if (entry.directory && collapsedDirectories[entry.path] === false)
                     appendVisibleChildren(entry.path)
@@ -836,6 +921,7 @@ Item {
         }
         cacheCurrentSidebar()
         if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeIndexPaths["#" + path]) {
+            if (expanding) materializeTreeFolder(path)
             var treeRow = fileTree.rowAtIndex(fileTreeModel.index(treeIndexPaths["#" + path], 0))
             if (treeRow >= 0 && fileTree.isExpanded(treeRow) !== expanding) {
                 if (expanding) fileTree.expand(treeRow)
@@ -847,6 +933,18 @@ Item {
 
     function matchIndicesForFile(id) {
         return matchIndicesByFile["#" + id] || []
+    }
+
+    // Confirm a move as soon as its worker finishes, so a completed move
+    // never looks like it is still loading.
+    Timer {
+        interval: 16
+        repeat: true
+        running: root.controller && root.controller.move_pending
+        onTriggered: if (root.flushEditor()) {
+            root.controller.poll_workspace_changes()
+            root.controller.poll_search_results()
+        }
     }
 
     Timer {
@@ -1131,7 +1229,7 @@ Item {
                             // Expanding changes the mapping of view rows even
                             // when a reused delegate keeps the same row number.
                             property var entry: row < fileTree.rows && model.display !== undefined
-                                ? fileTreeModel.getRow(fileTree.index(row, 0)) : null
+                                ? root.treeEntry(fileTree.index(row, 0)) : null
                             onEntryChanged: if (root.renamePath.length > 0) Qt.callLater(root.focusInlineRename)
                             property bool pendingMove: entry && root.isPendingMove(entry.path)
                             text: entry ? entry.name : ""

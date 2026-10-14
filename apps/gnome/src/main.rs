@@ -176,6 +176,53 @@ impl Ui {
         }
     }
 
+    /// Collects watcher, search and move-worker results.
+    fn poll_core(&self) {
+        let has_workspace = self.snapshot.borrow().workspace_root.is_some();
+        if has_workspace {
+            let result = self
+                .core
+                .borrow_mut()
+                .dispatch_if_changed(AppCommand::PollWorkspaceChanges);
+            match result {
+                Ok(Some(snapshot)) => self.render(snapshot),
+                Ok(None) => {}
+                Err(error) => self.status.set_label(&error.to_string()),
+            }
+            let result = self
+                .core
+                .borrow_mut()
+                .dispatch_if_changed(AppCommand::PollSearchResults);
+            match result {
+                Ok(Some(snapshot)) => self.render(snapshot),
+                Ok(None) => {}
+                Err(error) => self.status.set_label(&error.to_string()),
+            }
+        }
+        self.sync_pending_move();
+        let background_error = self.core.borrow_mut().take_background_error();
+        if let Some(error) = background_error {
+            self.background_move_error.replace(Some(error.clone()));
+            let snapshot = self.core.borrow().snapshot();
+            self.render(snapshot);
+            self.status.set_label(&error);
+        }
+    }
+
+    /// Confirms a sidebar move as soon as its worker finishes, instead of on
+    /// the next slow poll, so a completed move never looks like it is loading.
+    fn watch_pending_move(&self) {
+        let ui = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            ui.poll_core();
+            if ui.core.borrow().has_pending_move() {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
     fn sync_pending_move(&self) {
         let target = self
             .core
@@ -243,6 +290,15 @@ impl Ui {
         }
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         let workspace_changed = self.snapshot.borrow().workspace_root != snapshot.workspace_root;
+        if workspace_changed {
+            // Every folder starts collapsed again; rebind all rows.
+            for sidebar in &self.sidebars {
+                sidebar.visible_entries.borrow_mut().clear();
+                sidebar
+                    .file_model
+                    .splice(0, sidebar.file_model.n_items(), &[]);
+            }
+        }
         if workspace_changed && snapshot.workspace_root.is_some() {
             self.window.present();
             self.home_window.set_visible(false);
@@ -354,7 +410,11 @@ impl Ui {
                 .as_ref()
                 .map_or("", |doc| doc.id.as_str()),
         );
-        self.snapshot.replace(snapshot);
+        let previous = self.snapshot.replace(snapshot);
+        // Freeing a large workspace listing takes milliseconds; do it off the UI thread.
+        if previous.documents.len() > 10_000 {
+            std::thread::spawn(move || drop(previous));
+        }
         self.updating.set(false);
         if let Some(started) = diagnostic_started {
             self.core.borrow().diagnostic_snapshot_applied(
@@ -410,7 +470,20 @@ impl Ui {
             } else {
                 "No files"
             });
-        if results_changed {
+        if results_changed && !self.search_mode.get() && self.file_query.borrow().trim().is_empty()
+        {
+            // The plain file tree lists open folders only. Searches and name
+            // filters still need every path and use the full ordering below.
+            let mut entries = Vec::new();
+            tree_entries(
+                snapshot,
+                "",
+                &self.collapsed_directories.borrow(),
+                &mut entries,
+            );
+            self.sidebar().all_entries.replace(entries);
+            self.rebuild_visible_sidebar();
+        } else if results_changed {
             let mut entries = Vec::new();
             let text_mode = self.search_mode.get();
             let needle = self.file_query.borrow().trim().to_lowercase();
@@ -487,8 +560,7 @@ impl Ui {
                 .filter(|(_, is_directory)| *is_directory)
                 .map(|(path, _)| path.clone())
                 .collect();
-            paths.sort_by(|left, right| compare_sidebar_paths(left, right, &directories));
-            paths.dedup();
+            let paths = order_sidebar_paths(paths, &directories);
             for (path, is_directory) in paths {
                 let depth = path.matches('/').count();
                 let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
@@ -612,16 +684,71 @@ impl Ui {
             }
             visible.push(entry.clone());
         }
+        // Rebinding a row rebuilds its widgets. Replace only the changed span,
+        // so a move updates a few rows instead of every visible one.
+        let (start, removed, added) = {
+            let old = self.sidebar().visible_entries.borrow();
+            let same = |left: &SidebarEntry, right: &SidebarEntry| {
+                left.path == right.path
+                    && left.title == right.title
+                    && left.depth == right.depth
+                    && left.suffix == right.suffix
+                    && std::mem::discriminant(&left.row) == std::mem::discriminant(&right.row)
+            };
+            let start = old
+                .iter()
+                .zip(&visible)
+                .take_while(|(left, right)| same(left, right))
+                .count();
+            let tail = old[start..]
+                .iter()
+                .rev()
+                .zip(visible[start..].iter().rev())
+                .take_while(|(left, right)| same(left, right))
+                .count();
+            (
+                start,
+                old.len() - start - tail,
+                visible.len() - start - tail,
+            )
+        };
+        if removed > 0 {
+            let old = self.sidebar().visible_entries.borrow();
+            self.release_focus_from_rows(&old[start..start + removed]);
+        }
         let rows = visible.iter().map(|entry| entry.row.clone()).collect();
-        let placeholders = vec![""; visible.len()];
+        let empty = visible.is_empty();
         self.sidebar().visible_entries.replace(visible);
         self.sidebar().sidebar_rows.replace(rows);
         self.sidebar()
             .file_model
-            .splice(0, self.sidebar().file_model.n_items(), &placeholders);
-        self.sidebar()
-            .files_placeholder
-            .set_visible(placeholders.is_empty());
+            .splice(start as u32, removed as u32, &vec![""; added]);
+        self.sidebar().files_placeholder.set_visible(empty);
+    }
+
+    /// Removing the row that holds keyboard focus makes GTK move focus to
+    /// another row and scroll to it, which jumped the sidebar to the top
+    /// after every drag. Release focus first; the scroll position stays.
+    fn release_focus_from_rows(&self, removed: &[SidebarEntry]) {
+        let files = &self.sidebar().files;
+        let Some(root) = files.root() else { return };
+        let Some(focus) = gtk::prelude::RootExt::focus(&root) else {
+            return;
+        };
+        if !focus.is_ancestor(files) {
+            return;
+        }
+        // Large spans come from collapsing big folders; skip the lookup.
+        let holds_focus = removed.len() > 64
+            || removed.iter().any(|entry| {
+                self.sidebar()
+                    .interactions
+                    .row_widget(&entry.path)
+                    .is_some_and(|row| row.is_ancestor(&focus) || focus.is_ancestor(&row))
+            });
+        if holds_focus {
+            gtk::prelude::RootExt::set_focus(&root, None::<&gtk::Widget>);
+        }
     }
 
     fn toggle_directory(&self, path: &str) {
@@ -658,24 +785,17 @@ impl Ui {
         }
         let mut replacement = Vec::new();
         if expanding {
-            let mut hidden_prefix: Option<String> = None;
-            for entry in self.sidebar().all_entries.borrow()[all_index + 1..].iter() {
-                if !entry.path.starts_with(&prefix) {
-                    break;
-                }
-                if let Some(hidden) = hidden_prefix.as_ref() {
-                    if entry.path.starts_with(hidden) {
-                        continue;
-                    }
-                    hidden_prefix = None;
-                }
-                if let SidebarRow::Directory(child) = &entry.row
-                    && collapsed.contains(child)
-                {
-                    hidden_prefix = Some(format!("{child}/"));
-                }
-                replacement.push(entry.clone());
-            }
+            // Collapsed folders were listed without contents; load them now.
+            tree_entries(&self.snapshot.borrow(), path, &collapsed, &mut replacement);
+            let mut all = self.sidebar().all_entries.borrow_mut();
+            let loaded = all[all_index + 1..]
+                .iter()
+                .take_while(|entry| entry.path.starts_with(&prefix))
+                .count();
+            all.splice(
+                all_index + 1..all_index + 1 + loaded,
+                replacement.iter().cloned(),
+            );
         }
         drop(collapsed);
         let selected = self
@@ -685,6 +805,12 @@ impl Ui {
             .get(self.sidebar().file_selection.selected() as usize)
             .cloned();
         self.updating.set(true);
+        if old_children > 0 {
+            let visible = self.sidebar().visible_entries.borrow();
+            self.release_focus_from_rows(
+                &visible[visible_index + 1..visible_index + 1 + old_children],
+            );
+        }
         let range = visible_index + 1..visible_index + old_children + 1;
         self.sidebar().sidebar_rows.borrow_mut().splice(
             range.clone(),
@@ -755,36 +881,108 @@ impl Ui {
     }
 }
 
-fn compare_sidebar_paths(
-    left: &(String, bool),
-    right: &(String, bool),
-    directories: &std::collections::HashSet<String>,
-) -> std::cmp::Ordering {
-    let mut left_prefix = String::new();
-    let mut right_prefix = String::new();
-    let mut left_parts = left.0.split('/');
-    let mut right_parts = right.0.split('/');
-    loop {
-        match (left_parts.next(), right_parts.next()) {
-            (Some(a), Some(b)) => {
-                if !left_prefix.is_empty() {
-                    left_prefix.push('/');
-                    right_prefix.push('/');
-                }
-                left_prefix.push_str(a);
-                right_prefix.push_str(b);
-                if a != b {
-                    return (!directories.contains(&left_prefix))
-                        .cmp(&(!directories.contains(&right_prefix)))
-                        .then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
-                        .then_with(|| a.cmp(b));
-                }
+/// Rows of `parent`'s open subtree. Collapsed folders appear without their
+/// contents, so an update costs the visible tree instead of the workspace.
+fn tree_entries(
+    snapshot: &AppSnapshot,
+    parent: &str,
+    collapsed: &std::collections::HashSet<String>,
+    entries: &mut Vec<SidebarEntry>,
+) {
+    for child in snapshot.sidebar_children(parent) {
+        let depth = child.path.matches('/').count();
+        let title = child
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&child.path)
+            .to_owned();
+        if child.directory {
+            entries.push(SidebarEntry {
+                row: SidebarRow::Directory(child.path.clone()),
+                path: child.path.clone(),
+                title,
+                depth,
+                suffix: None,
+            });
+            if !collapsed.contains(&child.path) {
+                tree_entries(snapshot, &child.path, collapsed, entries);
             }
-            (None, Some(_)) => return std::cmp::Ordering::Less,
-            (Some(_), None) => return std::cmp::Ordering::Greater,
-            (None, None) => return std::cmp::Ordering::Equal,
+        } else if let Some(document) = snapshot.document_summary(&child.path) {
+            entries.push(SidebarEntry {
+                row: SidebarRow::File(document.id.clone()),
+                path: child.path,
+                title,
+                depth,
+                suffix: if document.external_change {
+                    Some("⚠")
+                } else if document.dirty {
+                    Some("●")
+                } else {
+                    None
+                },
+            });
         }
     }
+}
+
+/// Orders rows depth-first, with directories before files inside each folder.
+/// Siblings are sorted once with precomputed keys: comparing whole paths
+/// rebuilt every prefix per comparison and took seconds on node_modules trees.
+fn order_sidebar_paths(
+    mut paths: Vec<(String, bool)>,
+    directories: &std::collections::HashSet<String>,
+) -> Vec<(String, bool)> {
+    use std::collections::{HashMap, HashSet};
+    paths.sort_unstable();
+    paths.dedup();
+    let order = {
+        // Parents are prefixes of their rows. Ancestors missing from the rows
+        // still order their descendants without being emitted.
+        let mut children: HashMap<&str, Vec<(&str, Option<usize>)>> = HashMap::new();
+        let mut known: HashSet<&str> = paths.iter().map(|(path, _)| path.as_str()).collect();
+        for (index, (path, _)) in paths.iter().enumerate() {
+            let mut child = path.as_str();
+            let mut row = Some(index);
+            loop {
+                let parent = child.rsplit_once('/').map_or("", |(parent, _)| parent);
+                children.entry(parent).or_default().push((child, row));
+                if parent.is_empty() || !known.insert(parent) {
+                    break;
+                }
+                child = parent;
+                row = None;
+            }
+        }
+        for siblings in children.values_mut() {
+            siblings.sort_by_cached_key(|&(path, _)| {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                (!directories.contains(path), name.to_lowercase(), name)
+            });
+        }
+        let mut order = Vec::with_capacity(paths.len());
+        let mut expanded = HashSet::new();
+        let mut stack = vec![("", 0)];
+        while let Some((parent, position)) = stack.pop() {
+            let Some(&(path, row)) = children
+                .get(parent)
+                .and_then(|siblings| siblings.get(position))
+            else {
+                continue;
+            };
+            order.extend(row);
+            stack.push((parent, position + 1));
+            if expanded.insert(path) {
+                stack.push((path, 0));
+            }
+        }
+        order
+    };
+    let mut rows: Vec<_> = paths.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .filter_map(|row| rows[row].take())
+        .collect()
 }
 
 fn sidebar_row(
@@ -1428,6 +1626,7 @@ fn build_window(app: &adw::Application) {
                     match result {
                         Ok(snapshot) => {
                             move_ui.render(snapshot);
+                            move_ui.watch_pending_move();
                             if trace.is_active() {
                                 let sidebar = move_ui.sidebar().interactions.clone();
                                 let deadline =
@@ -1465,13 +1664,14 @@ fn build_window(app: &adw::Application) {
                         format!("{directory}/{name}")
                     };
                     let snapshot = validate_ui.snapshot.borrow();
+                    // Runs on every pointer motion: look up only the
+                    // destination's children instead of every workspace path.
                     target != source
                         && !target.starts_with(&format!("{source}/"))
-                        && !snapshot.directories.contains(&target)
-                        && !snapshot.documents.iter().any(|doc| {
-                            doc.id.as_str() == target
-                                || doc.id.as_str().starts_with(&format!("{target}/"))
-                        })
+                        && !snapshot
+                            .sidebar_children(directory)
+                            .iter()
+                            .any(|child| child.path == target)
                 }),
                 expand: Rc::new(move |path| {
                     if !expand_ui.search_mode.get()
@@ -1766,35 +1966,7 @@ fn build_window(app: &adw::Application) {
     {
         let ui = ui.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
-            let has_workspace = ui.snapshot.borrow().workspace_root.is_some();
-            if has_workspace {
-                let result = ui
-                    .core
-                    .borrow_mut()
-                    .dispatch_if_changed(AppCommand::PollWorkspaceChanges);
-                match result {
-                    Ok(Some(snapshot)) => ui.render(snapshot),
-                    Ok(None) => {}
-                    Err(error) => ui.status.set_label(&error.to_string()),
-                }
-                let result = ui
-                    .core
-                    .borrow_mut()
-                    .dispatch_if_changed(AppCommand::PollSearchResults);
-                match result {
-                    Ok(Some(snapshot)) => ui.render(snapshot),
-                    Ok(None) => {}
-                    Err(error) => ui.status.set_label(&error.to_string()),
-                }
-            }
-            ui.sync_pending_move();
-            let background_error = ui.core.borrow_mut().take_background_error();
-            if let Some(error) = background_error {
-                ui.background_move_error.replace(Some(error.clone()));
-                let snapshot = ui.core.borrow().snapshot();
-                ui.render(snapshot);
-                ui.status.set_label(&error);
-            }
+            ui.poll_core();
             glib::ControlFlow::Continue
         });
     }
@@ -2329,6 +2501,7 @@ fn build_window(app: &adw::Application) {
                     .interactions
                     .drop_entry("renamed", "destination")
             );
+            assert!(ui.sidebars[0].interactions.commit_drop());
             let active = ui.snapshot.borrow().active_document.clone().unwrap();
             assert!(
                 released_at.elapsed() < std::time::Duration::from_millis(250),
@@ -2388,13 +2561,16 @@ fn build_window(app: &adw::Application) {
 
 #[cfg(test)]
 mod sidebar_order_tests {
-    use super::compare_sidebar_paths;
+    use super::order_sidebar_paths;
     use std::collections::HashSet;
 
     #[test]
     fn directories_precede_files_at_each_level() {
-        let mut entries = [
+        let entries = vec![
             ("a.txt".to_owned(), false),
+            ("z/b.txt".to_owned(), false),
+            ("B.txt".to_owned(), false),
+            ("lib/deep/only.txt".to_owned(), false),
             ("z/child.txt".to_owned(), false),
             ("z/x".to_owned(), true),
             ("z".to_owned(), true),
@@ -2406,8 +2582,8 @@ mod sidebar_order_tests {
             .filter(|(_, is_directory)| *is_directory)
             .map(|(path, _)| path.clone())
             .collect();
-        entries.sort_by(|left, right| compare_sidebar_paths(left, right, &directories));
-        let paths: Vec<_> = entries.iter().map(|(path, _)| path.as_str()).collect();
+        let ordered = order_sidebar_paths(entries, &directories);
+        let paths: Vec<_> = ordered.iter().map(|(path, _)| path.as_str()).collect();
         assert_eq!(
             paths,
             [
@@ -2416,7 +2592,9 @@ mod sidebar_order_tests {
                 "z/x/nested.txt",
                 "z/b.txt",
                 "z/child.txt",
-                "a.txt"
+                "a.txt",
+                "B.txt",
+                "lib/deep/only.txt"
             ]
         );
     }

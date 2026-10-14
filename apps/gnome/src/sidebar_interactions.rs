@@ -35,7 +35,21 @@ pub struct Interactions {
     leave_timer: RefCell<Option<glib::SourceId>>,
     temporary_folders: RefCell<HashSet<String>>,
     root_target: RefCell<Option<glib::WeakRef<gtk::Box>>>,
+    pending_drop: RefCell<Option<PendingDrop>>,
+    drop_sequence: std::cell::Cell<u64>,
 }
+
+/// A validated release whose model update waits for the native drag session to end.
+struct PendingDrop {
+    sequence: u64,
+    source: String,
+    directory: String,
+    temporary_folders: HashSet<String>,
+    trace: native_workspace_application::SidebarDropTrace,
+}
+
+/// Commits a drop even if the toolkit never reports the end of its drag session.
+const DROP_COMMIT_FALLBACK: Duration = Duration::from_secs(1);
 
 impl Interactions {
     pub fn cancel_rename(&self) {
@@ -120,6 +134,7 @@ impl Interactions {
     }
 
     pub fn start_drag(&self, path: &str) {
+        self.commit_drop();
         self.finish_drag();
         self.dragged.replace(Some(path.into()));
         if let Some(widget) = self
@@ -155,12 +170,17 @@ impl Interactions {
     }
 
     fn finish_drag_to(&self, destination: Option<&str>) {
+        self.reset_drag_feedback();
+        self.restore_temporary_folders(destination);
+        self.temporary_folders.borrow_mut().clear();
+    }
+
+    /// Ends hover and preview feedback without touching the list model.
+    fn reset_drag_feedback(&self) {
         self.hide_drag_preview();
         self.active_drag.take();
         self.dragged.take();
         self.cancel_hover();
-        self.restore_temporary_folders(destination);
-        self.temporary_folders.borrow_mut().clear();
         for widget in self
             .drop_widgets
             .borrow()
@@ -276,36 +296,71 @@ impl Interactions {
         valid
     }
 
-    pub fn drop_entry(&self, source: &str, directory: &str) -> bool {
+    /// Accepts a release inside the drop signal. The move, folder expansion and
+    /// list rebuild run in `commit_drop` once GTK reports the drag as ended:
+    /// replacing the list model here destroys the rows owning the active drag
+    /// source and drop target, which wedges the X11/Wayland drag session.
+    pub fn drop_entry(self: &Rc<Self>, source: &str, directory: &str) -> bool {
         if self.dragged.borrow().as_deref() != Some(source) || !self.can_drop(directory) {
             return false;
         }
-        let callbacks = self.callbacks.borrow().clone();
-        let trace = callbacks
+        let trace = self
+            .callbacks
+            .borrow()
             .as_ref()
             .map(|callbacks| (callbacks.begin_drop)())
             .unwrap_or_default();
-        // Clear native feedback before model changes remove the source row.
-        let mut temporary = self.temporary_folders.borrow().clone();
-        self.finish_drag_to(Some(directory));
+        let temporary_folders = self.temporary_folders.take();
+        self.reset_drag_feedback();
         trace.preview_hidden();
+        let sequence = self.drop_sequence.get() + 1;
+        self.drop_sequence.set(sequence);
+        self.pending_drop.replace(Some(PendingDrop {
+            sequence,
+            source: source.into(),
+            directory: directory.into(),
+            temporary_folders,
+            trace,
+        }));
+        let state = self.clone();
+        glib::timeout_add_local_once(DROP_COMMIT_FALLBACK, move || {
+            let current = state
+                .pending_drop
+                .borrow()
+                .as_ref()
+                .is_some_and(|drop| drop.sequence == sequence);
+            if current {
+                state.commit_drop();
+            }
+        });
+        true
+    }
+
+    /// Applies an accepted drop. Returns whether the move was dispatched.
+    pub fn commit_drop(&self) -> bool {
+        let Some(drop) = self.pending_drop.take() else {
+            return false;
+        };
         let callbacks = self.callbacks.borrow().clone();
+        self.temporary_folders.replace(drop.temporary_folders);
+        self.restore_temporary_folders(Some(&drop.directory));
+        let mut temporary = self.temporary_folders.take();
         // A quick release must reveal the pending row even before hover expansion.
-        if !directory.is_empty()
+        if !drop.directory.is_empty()
             && let Some(callbacks) = &callbacks
-            && (callbacks.expand)(directory)
+            && (callbacks.expand)(&drop.directory)
         {
-            temporary.insert(directory.into());
+            temporary.insert(drop.directory.clone());
         }
         let accepted = callbacks
             .as_ref()
-            .is_some_and(|callbacks| (callbacks.move_entry)(source.into(), directory.into()));
+            .is_some_and(|callbacks| (callbacks.move_entry)(drop.source, drop.directory));
         if !accepted && let Some(callbacks) = callbacks {
             for folder in temporary {
                 (callbacks.collapse)(&folder);
             }
         }
-        trace.handler_finished(accepted);
+        drop.trace.handler_finished(accepted);
         accepted
     }
 
@@ -496,7 +551,14 @@ impl Interactions {
         }
         {
             let state = self.clone();
-            source.connect_drag_end(move |_, _, _| state.finish_drag());
+            source.connect_drag_end(move |_, _, _| {
+                state.finish_drag();
+                // Leave the drag-end emission before the model replaces this row.
+                let state = state.clone();
+                glib::idle_add_local_once(move || {
+                    state.commit_drop();
+                });
+            });
         }
         {
             let state = self.clone();
@@ -687,9 +749,15 @@ mod tests {
         assert!(!open.borrow().contains("a") && !open.borrow().contains("a/child"));
         pump(500);
         assert!(branches.drop_entry("source", "b"));
+        assert!(branches.commit_drop());
         assert!(open.borrow().contains("b"));
         branches.start_drag("source");
         assert!(branches.drop_entry("source", "quick-release"));
+        assert!(
+            !open.borrow().contains("quick-release"),
+            "the drop signal must not change the list model"
+        );
+        assert!(branches.commit_drop());
         assert!(open.borrow().contains("quick-release"));
         branches.start_drag("source");
         branches.hover("cancelled", true);
@@ -706,11 +774,15 @@ mod tests {
         branches.hover("rejected", true);
         pump(500);
         assert!(open.borrow().contains("rejected"));
-        assert!(!branches.drop_entry("source", "rejected"));
-        assert!(!open.borrow().contains("rejected"));
+        assert!(branches.drop_entry("source", "rejected"));
         assert!(branches.dragged.borrow().is_none());
+        assert!(open.borrow().contains("rejected"));
+        assert!(!branches.commit_drop());
+        assert!(!open.borrow().contains("rejected"));
         branches.start_drag("source");
-        assert!(!branches.drop_entry("source", "quick-rejected"));
+        assert!(branches.drop_entry("source", "quick-rejected"));
+        // A drag-end that never arrives still commits through the fallback.
+        pump(1100);
         assert!(!open.borrow().contains("quick-rejected"));
 
         state.start_drag("source");
@@ -730,6 +802,9 @@ mod tests {
         assert!(moves.borrow().is_empty());
         state.start_drag("source");
         assert!(state.drop_entry("source", "destination"));
+        assert!(moves.borrow().is_empty());
+        assert!(state.commit_drop());
+        assert!(!state.commit_drop());
         assert_eq!(
             *moves.borrow(),
             [("source".to_owned(), "destination".to_owned())]
