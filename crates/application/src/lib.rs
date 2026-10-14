@@ -3,8 +3,10 @@
 mod diagnostics;
 mod drop_diagnostics;
 mod native_application;
+mod sidebar_tree;
 pub use drop_diagnostics::SidebarDropTrace;
 pub use native_application::NativeApplication;
+pub use sidebar_tree::SidebarChild;
 mod icons;
 pub use diagnostics::DiagnosticObserver;
 use diagnostics::{Context, Diagnostics};
@@ -288,10 +290,11 @@ pub struct AppSnapshot {
     pub workspace_root: Option<PathBuf>,
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub search_query: SearchQuery,
-    pub search_results: Vec<SearchResult>,
+    /// Shared, so publishing or keeping a snapshot never copies every row.
+    pub search_results: Arc<Vec<SearchResult>>,
     pub search_in_progress: bool,
-    pub directories: Vec<String>,
-    pub documents: Vec<DocumentSummary>,
+    pub directories: Arc<Vec<String>>,
+    pub documents: Arc<Vec<DocumentSummary>>,
     pub active_document: Option<DocumentSnapshot>,
 }
 
@@ -399,19 +402,20 @@ impl AppState {
                 .map(|workspace| workspace.root.clone()),
             recent_workspaces: self.recent_workspaces.clone(),
             search_query: self.search_query.clone(),
-            search_results: self.search_results.clone(),
+            search_results: Arc::new(self.search_results.clone()),
             search_in_progress: self.search_in_progress,
-            directories: self.directories.clone(),
-            documents: self
-                .documents
-                .iter()
-                .map(|entry| DocumentSummary {
-                    id: entry.id.clone(),
-                    title: entry.id.as_str().to_owned(),
-                    dirty: entry.dirty(),
-                    external_change: entry.external_change,
-                })
-                .collect(),
+            directories: Arc::new(self.directories.clone()),
+            documents: Arc::new(
+                self.documents
+                    .iter()
+                    .map(|entry| DocumentSummary {
+                        id: entry.id.clone(),
+                        title: entry.id.as_str().to_owned(),
+                        dirty: entry.dirty(),
+                        external_change: entry.external_change,
+                    })
+                    .collect(),
+            ),
             active_document,
         }
     }
@@ -1785,7 +1789,7 @@ mod tests {
                 directory: true,
             })
             .unwrap();
-        assert_eq!(snapshot.directories, ["notes"]);
+        assert_eq!(snapshot.directories[..], ["notes"]);
         let snapshot = app
             .dispatch(AppCommand::CreateEntry {
                 id: id("notes/todo.md"),
@@ -1927,7 +1931,7 @@ mod tests {
         let opened = app
             .dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
             .unwrap();
-        assert_eq!(opened.directories, ["empty", "nested"]);
+        assert_eq!(opened.directories[..], ["empty", "nested"]);
         assert_eq!(opened.documents[0].id, id("nested/note.rs"));
         app.dispatch(AppCommand::QueueSearchQuery("alpha".into()))
             .unwrap();
@@ -2417,7 +2421,7 @@ mod tests {
         assert_eq!(active.content, "local needle");
         assert!(active.dirty);
         assert_eq!(
-            moved.snapshot.directories,
+            moved.snapshot.directories[..],
             ["destination", "destination/src", "destination/src/nested"]
         );
         app.dispatch(AppCommand::RefreshWorkspace).unwrap();
@@ -2600,7 +2604,7 @@ mod tests {
         assert_eq!(active.id, id("lib/nested/a.rs"));
         assert_eq!(active.content, "local needle");
         assert!(active.dirty);
-        assert_eq!(snapshot.directories, ["lib", "lib/nested", "src-other"]);
+        assert_eq!(snapshot.directories[..], ["lib", "lib/nested", "src-other"]);
         assert!(
             snapshot
                 .search_results

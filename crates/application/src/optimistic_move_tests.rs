@@ -263,7 +263,12 @@ fn native_drop_keeps_dispatch_responsive_during_one_second_backend_stall() {
         let active = snapshot.active_document.unwrap();
         assert_eq!(active.id, id("dest/a.rs"));
         assert_eq!(active.content, "local edit before drop");
-        assert_eq!(app.pending_move_target(), Some(&id("dest/a.rs")));
+        assert!(app.has_pending_move());
+        assert_eq!(
+            app.pending_move_target(),
+            None,
+            "a fresh move must not flash a progress indicator"
+        );
         let until = Instant::now() + Duration::from_secs(1);
         let mut ticks = 0;
         while Instant::now() < until {
@@ -281,6 +286,7 @@ fn native_drop_keeps_dispatch_responsive_during_one_second_backend_stall() {
             thread::sleep(Duration::from_millis(10));
         }
         assert!(ticks > 50);
+        assert_eq!(app.pending_move_target(), Some(&id("dest/a.rs")));
         app.dispatch(AppCommand::ChangeDocument {
             id: id("dest/a.rs"),
             content: "typed while moving".into(),
@@ -394,12 +400,14 @@ fn native_replay_of_a_slow_queued_save_does_not_block_or_overwrite_new_typing() 
     app.dispatch(AppCommand::SaveDocument(id("dest/a.rs")))
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
-    while app.pending_move_target().is_some() && Instant::now() < deadline {
+    // Polling confirms the move and starts the queued save on the worker.
+    while observed.try_recv().is_err() {
+        assert!(Instant::now() < deadline, "queued save never started");
         app.dispatch_if_changed(AppCommand::PollSearchResults)
             .unwrap();
         thread::sleep(Duration::from_millis(5));
     }
-    observed.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(app.pending_move_target(), None);
     assert!(
         app.has_pending_move(),
         "queued save must stay on the worker"

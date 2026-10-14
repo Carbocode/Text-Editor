@@ -5,7 +5,16 @@ use crate::{
     move_target, remap_command, renamed_path,
 };
 use native_workspace_domain::DocumentId;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::{
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    time::{Duration, Instant},
+};
+
+/// Moves confirmed within this time never show a progress indicator.
+const PENDING_INDICATOR_DELAY: Duration = Duration::from_millis(300);
 
 pub struct NativeApplication {
     core: Option<Application>,
@@ -14,6 +23,7 @@ pub struct NativeApplication {
     worker: Option<Receiver<Reply>>,
     relocation: Option<(DocumentId, DocumentId)>,
     pending_target: Option<DocumentId>,
+    pending_since: Option<Instant>,
     deferred: Vec<AppCommand>,
     background_error: Option<String>,
     move_trace: Option<SidebarDropTrace>,
@@ -42,6 +52,7 @@ impl NativeApplication {
             worker: None,
             relocation: None,
             pending_target: None,
+            pending_since: None,
             deferred: Vec::new(),
             background_error: None,
             move_trace: None,
@@ -57,11 +68,23 @@ impl NativeApplication {
     pub fn snapshot(&self) -> AppSnapshot {
         self.cached.clone()
     }
+    /// Lists a folder of the published snapshot without copying the snapshot.
+    pub fn sidebar_children(&self, parent: &str) -> Vec<crate::SidebarChild> {
+        self.cached.sidebar_children(parent)
+    }
+    pub fn sidebar_has_children(&self, parent: &str) -> bool {
+        self.cached.sidebar_has_children(parent)
+    }
     pub fn has_pending_move(&self) -> bool {
         self.worker.is_some()
     }
+    /// The pending row to mark, once the move has taken noticeably long.
+    /// Use `has_pending_move` to know whether a move is still unconfirmed.
     pub fn pending_move_target(&self) -> Option<&DocumentId> {
-        self.pending_target.as_ref()
+        self.pending_target.as_ref().filter(|_| {
+            self.pending_since
+                .is_some_and(|since| since.elapsed() >= PENDING_INDICATOR_DELAY)
+        })
     }
     pub fn diagnostic_observer(&self) -> DiagnosticObserver {
         self.observer.clone()
@@ -142,6 +165,7 @@ impl NativeApplication {
         }
         self.relocation = Some((id.clone(), target.clone()));
         self.pending_target = Some(target.clone());
+        self.pending_since = Some(Instant::now());
         self.move_trace = Some(trace.clone());
         self.cached.diagnostic_operation = trace.context().map_or(0, |context| context.operation);
         project_paths(&mut self.cached, &id, &target);
@@ -216,6 +240,7 @@ impl NativeApplication {
                     trace.confirmed(success);
                 }
                 self.pending_target = None;
+                self.pending_since = None;
                 if !success {
                     project_paths(&mut self.cached, &target, &source);
                     commands = commands
@@ -228,8 +253,20 @@ impl NativeApplication {
                 self.background_error = Some(error);
             }
             if commands.is_empty() {
-                self.cached = reply.snapshot;
                 self.core = Some(reply.core);
+                let mut confirmed = reply.snapshot;
+                let (revision, operation) = (confirmed.revision, confirmed.diagnostic_operation);
+                confirmed.revision = self.cached.revision;
+                confirmed.diagnostic_operation = self.cached.diagnostic_operation;
+                // A confirmation matching the projection changes nothing on
+                // screen; republishing it would copy every row again.
+                if confirmed == self.cached {
+                    self.cached.revision = revision;
+                    return Ok(None);
+                }
+                confirmed.revision = revision;
+                confirmed.diagnostic_operation = operation;
+                self.cached = confirmed;
             } else {
                 // Saves, reloads and document opens may perform I/O too. Replay
                 // queued commands off-thread without replacing local typed text.
@@ -273,18 +310,29 @@ fn project_paths(snapshot: &mut AppSnapshot, source: &DocumentId, target: &Docum
             *title = id.as_str().to_owned();
         }
     };
-    for doc in &mut snapshot.documents {
+    let documents = Arc::make_mut(&mut snapshot.documents);
+    for doc in documents.iter_mut() {
         remap(&mut doc.id, &mut doc.title);
     }
-    snapshot.documents.sort_by(|a, b| a.id.cmp(&b.id));
-    for directory in &mut snapshot.directories {
+    documents.sort_by(|a, b| a.id.cmp(&b.id));
+    let directories = Arc::make_mut(&mut snapshot.directories);
+    for directory in directories.iter_mut() {
         if affected(directory) {
             *directory = renamed_path(directory, source, target);
         }
     }
-    snapshot.directories.sort();
-    for result in &mut snapshot.search_results {
-        remap(&mut result.id, &mut result.title);
+    directories.sort();
+    // An empty query lists every document without a match to display; the
+    // confirmed snapshot replaces those rows, so skip copying them here.
+    if !snapshot.search_query.0.trim().is_empty()
+        && snapshot
+            .search_results
+            .iter()
+            .any(|result| affected(result.id.as_str()))
+    {
+        for result in Arc::make_mut(&mut snapshot.search_results) {
+            remap(&mut result.id, &mut result.title);
+        }
     }
     if let Some(doc) = &mut snapshot.active_document {
         remap(&mut doc.id, &mut doc.title);
@@ -298,7 +346,10 @@ fn project_edit(snapshot: &mut AppSnapshot, id: &DocumentId, content: &str) {
         doc.content = content.to_owned();
         doc.dirty = true;
     }
-    if let Some(doc) = snapshot.documents.iter_mut().find(|doc| &doc.id == id) {
-        doc.dirty = true;
+    // Copy the shared list only when the marker actually changes.
+    if let Ok(index) = snapshot.documents.binary_search_by(|doc| doc.id.cmp(id))
+        && !snapshot.documents[index].dirty
+    {
+        Arc::make_mut(&mut snapshot.documents)[index].dirty = true;
     }
 }
