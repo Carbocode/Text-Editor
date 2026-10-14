@@ -5,6 +5,7 @@ use std::{
 
 #[cfg(any(target_os = "macos", test))]
 mod qt;
+mod tasks;
 
 fn available(program: &str, args: &[&str]) -> bool {
     Command::new(program)
@@ -78,7 +79,14 @@ fn doctor(strict: Option<&str>) -> ExitCode {
 fn run(program: &str, args: &[&str]) -> ExitCode {
     match Command::new(program).args(args).status() {
         Ok(status) if status.success() => ExitCode::SUCCESS,
-        Ok(_) | Err(_) => ExitCode::FAILURE,
+        Ok(status) => {
+            eprintln!("{program} failed: {status}");
+            ExitCode::FAILURE
+        }
+        Err(error) => {
+            eprintln!("Could not run {program}: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -97,38 +105,19 @@ fn run_kde(args: &[&str]) -> ExitCode {
     }
 }
 
-fn build_frontend(package: &str, kde: bool) -> ExitCode {
-    // Qt compiler overrides belong to Qt, not to the bundled diagnostic engine.
-    if run(
-        "cargo",
-        &[
-            "build",
-            "-p",
-            "native-workspace-devtools",
-            "-p",
-            "native-workspace-devtools-ui",
-        ],
-    ) != ExitCode::SUCCESS
-    {
-        return ExitCode::FAILURE;
-    }
-    let args = ["build", "-p", package];
-    if kde {
-        run_kde(&args)
-    } else {
-        run("cargo", &args)
-    }
-}
-
-fn run_frontend(package: &str, kde: bool) -> ExitCode {
-    if build_frontend(package, kde) != ExitCode::SUCCESS {
-        return ExitCode::FAILURE;
-    }
+fn start_frontend(package: &str, kde: bool) -> ExitCode {
     let executable = env::var_os("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| "target".into())
         .join("debug")
         .join(format!("{package}{}", env::consts::EXE_SUFFIX));
+    if !executable.is_file() {
+        eprintln!(
+            "App not built. Run cargo xtask build {} first.",
+            if kde { "kde" } else { "gnome" }
+        );
+        return ExitCode::FAILURE;
+    }
     let mut command = Command::new(executable);
     if !kde {
         // A registered GApplication otherwise activates the previously built process.
@@ -143,17 +132,7 @@ fn run_frontend(package: &str, kde: bool) -> ExitCode {
 fn devtools(demo: bool) -> ExitCode {
     use native_workspace_devtools_protocol::{Descriptor, Health, VERSION, diagnostics_dir};
     use std::time::{Duration, Instant};
-    if run(
-        "cargo",
-        &[
-            "build",
-            "-p",
-            "native-workspace-devtools",
-            "-p",
-            "native-workspace-devtools-ui",
-        ],
-    ) != ExitCode::SUCCESS
-    {
+    if tasks::execute("build", "devtools", false) != Some(ExitCode::SUCCESS) {
         return ExitCode::FAILURE;
     }
     let Ok(client) = reqwest::blocking::Client::builder()
@@ -222,7 +201,36 @@ fn devtools(demo: bool) -> ExitCode {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // Scripts and Cargo invocations use paths relative to the workspace root.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    if let Err(error) = env::set_current_dir(root) {
+        eprintln!("Could not enter workspace: {error}");
+        return ExitCode::FAILURE;
+    }
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let dry_run = args.iter().any(|arg| arg == "--dry-run");
+    args.retain(|arg| arg != "--dry-run");
+    if args.is_empty()
+        || matches!(args.as_slice(), [cmd] if matches!(cmd.as_str(), "help" | "--help" | "-h"))
+    {
+        println!("{}", tasks::HELP);
+        return ExitCode::SUCCESS;
+    }
+    let task = match args.as_slice() {
+        [action, target] => Some((action.as_str(), target.as_str())),
+        [cmd] if cmd == "fmt" => Some(("fmt", "core")),
+        [cmd] => cmd.split_once('-'),
+        _ => None,
+    };
+    if let Some((action, target)) = task
+        && let Some(result) = tasks::execute(action, target, dry_run)
+    {
+        return result;
+    }
+    if dry_run {
+        eprintln!("--dry-run requires a build, start, run, check, lint, test, fmt or verify task.");
+        return ExitCode::FAILURE;
+    }
     match args.as_slice() {
         [cmd] if cmd == "doctor" => doctor(None),
         [cmd, flag, target] if cmd == "doctor" && flag == "--strict" => doctor(Some(target)),
@@ -234,16 +242,11 @@ fn main() -> ExitCode {
         [cmd] if cmd == "devtools-ui" => {
             run("cargo", &["run", "-p", "native-workspace-devtools-ui"])
         }
-        [cmd] if cmd == "check-core" => run("cargo", &["check"]),
-        [cmd] if cmd == "build-macos" => run("sh", &["apps/macos/build.sh"]),
-        [cmd] if cmd == "run-macos" => run("sh", &["apps/macos/run.sh"]),
-        [cmd] if cmd == "build-gnome" => build_frontend("native-workspace-gnome", false),
-        [cmd] if cmd == "run-gnome" => run_frontend("native-workspace-gnome", false),
-        [cmd] if cmd == "build-kde" => build_frontend("native-workspace-kde", true),
-        [cmd] if cmd == "run-kde" => run_frontend("native-workspace-kde", true),
         _ => {
             eprintln!(
-                "usage: cargo xtask doctor [--strict macos|gnome|kde] | devtools [--demo] | devtools-service | devtools-ui | check-core | build-macos | run-macos | build-gnome | run-gnome | build-kde | run-kde"
+                "Unknown command or target: {}\n\n{}",
+                args.join(" "),
+                tasks::HELP
             );
             ExitCode::FAILURE
         }

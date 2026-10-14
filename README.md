@@ -32,7 +32,7 @@ The following work is planned:
 13. **Basic Git integration:** show changed files and diffs before committing.
 14. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
 
-Run cargo test, cargo clippy, and cargo xtask doctor for the shared core. Build or start a frontend with cargo xtask build-macos, build-gnome, build-kde or their run-* counterparts. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
+Use `cargo xtask verify core` for shared Rust checks and `cargo xtask doctor` to inspect local tools. For `macos`, `gnome` or `kde`, `cargo xtask build <frontend>` compiles, `cargo xtask start <frontend>` opens the existing build, and `cargo xtask run <frontend>` composes both without tests. Run tests explicitly with `cargo xtask test <target>`. The previous `build-*` and `run-*` commands remain aliases. See the [command reference](docs/development.md#terminal-commands) or `cargo xtask help`; add `--dry-run` to inspect a task. Set NATIVE_WORKSPACE_KIRIGAMI=1 when running the KDE variant on a host with Kirigami.
 
 The macOS and GNOME development launchers start a new instance after building, so an already running process cannot silently receive the launch and keep executing an older binary. Existing editor sessions stay open.
 

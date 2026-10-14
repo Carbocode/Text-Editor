@@ -1,10 +1,56 @@
 # Development
 
-Rust 1.99.0 is pinned in rust-toolchain.toml, and Cargo.lock pins crate resolution. Core checks are cargo fmt --check, cargo clippy -- -D warnings, and cargo test. Default workspace members avoid GUI dependencies.
+Rust 1.99.0 is pinned in rust-toolchain.toml, and Cargo.lock pins crate resolution. Default workspace members avoid GUI dependencies. The `core` xtask target selects domain, filesystem, storage, application and syntax explicitly, including syntax tests that plain `cargo test` does not select by default.
 
 Material Icon Theme SVGs, 64 px PNGs, and the association manifest are bundled in `assets/material-icon-theme`. To update them, prepare an upstream checkout as described in `tools/update_material_icons.py`, then run `python3 tools/update_material_icons.py /path/to/vscode-material-icon-theme`. The script requires `rsvg-convert` and regenerates the GNOME embedded icon lookup table. Review the pinned upstream revision in `ATTRIBUTION.md` when updating.
 
-Use cargo xtask doctor to inspect local tools, or cargo xtask doctor --strict macos|gnome|kde for one frontend. Build with cargo xtask build-macos, cargo xtask build-gnome, or cargo xtask build-kde; run with the corresponding run-* command.
+## Terminal commands
+
+Use `cargo xtask help` to list commands and `cargo xtask doctor` to inspect local tools, or `cargo xtask doctor --strict macos|gnome|kde` for one frontend. Commands use the existing Rust xtask runner; Node.js and npm are not required.
+
+For each frontend (`macos`, `gnome` or `kde`), choose the work needed:
+
+```sh
+cargo xtask build macos       # compile and package; no tests or launch
+cargo xtask start macos       # open the existing build; no frontend compilation
+cargo xtask run macos         # build + start; no tests
+cargo xtask test macos        # Rust bridge tests + build prerequisites + Swift smoke tests
+cargo xtask verify macos      # fmt + check + lint + test; no normal editor launch
+```
+
+`start` fails with a build instruction if the executable is missing. It deliberately opens the last build, so use `run` after changing source. macOS and GNOME launch a new instance, preserving existing sessions. Cargo may still compile the xtask runner itself before any command if it has changed.
+
+The same tasks can target smaller components:
+
+```sh
+cargo xtask check core        # type-check shared Rust crates
+cargo xtask lint core         # Clippy, warnings denied
+cargo xtask test core         # shared Rust tests, without GUI dependencies
+cargo xtask verify core       # fmt + check + lint + test
+cargo xtask build devtools    # collector + console executables
+cargo xtask test devtools     # protocol, producer, collector and console Rust tests
+cargo xtask test xtask        # command composition and Qt discovery regression tests
+cargo xtask fmt               # check formatting across the workspace
+```
+
+`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the seven Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
+
+Inspect composition without running it:
+
+```sh
+cargo xtask run macos --dry-run
+cargo xtask verify core --dry-run
+```
+
+The dry run lists task steps; the macOS build and smoke steps are shell scripts. `apps/macos/build.sh` compiles and packages, `apps/macos/start.sh` launches, and `apps/macos/test.sh` compiles and executes smoke tests against an already built bridge. `apps/macos/run.sh` composes build and start. The normal frontend builds still include Developer Tools, but never execute tests.
+
+Existing action-target commands (`build-macos`, `run-macos`, `build-gnome`, `run-gnome`, `build-kde`, `run-kde`, `check-core`) remain aliases of the corresponding two-word commands. New tasks also support that spelling, for example `test-macos` and `verify-core`.
+
+## Explicit GUI smoke modes
+
+GNOME's `NATIVE_WORKSPACE_SMOKE=1` and `NATIVE_WORKSPACE_SMOKE_WORKSPACE=/path/to/disposable-fixture` enable native diagnostic and edit/save smoke paths when launching the built executable. KDE's `--smoke-sidebar` and `--smoke-drag` modes require disposable fixtures; see [KDE development](kde.md) for contents and Qt style variants. Set these only for deliberate GUI verification; no normal run task injects them. Headless Linux GUI checks need a display server such as Xvfb.
+
+## Development behavior
 
 The initial vertical slice covers opening a directory, listing files, opening, editing, and saving UTF-8 documents. The frontends now collect queued `notify` events every 250 ms and reconcile periodically for external changes. Clean open documents reload automatically. If local edits and disk content diverge, normal Save refuses to overwrite the disk; the user can reload or explicitly overwrite it. The diagnostic counter remains in the core and smoke tests, but is hidden from normal windows.
 
