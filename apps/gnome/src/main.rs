@@ -6,8 +6,8 @@ mod syntax;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, NativeApplication as Application, SearchLocation, SearchResult,
-    file_icon_name, folder_icon_name,
+    AppCommand, AppSnapshot, NativeApplication as Application, PathFilter, PathFilterResult,
+    SearchLocation, SearchResult, file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{
@@ -28,10 +28,17 @@ struct Ui {
     file_search: gtk::SearchEntry,
     search_mode: Rc<Cell<bool>>,
     sidebar_tab: Rc<Cell<u8>>,
+    /// The name filter the Files tree shows, i.e. of `file_filter`. Typed
+    /// text reaches it only after `path_filter` has listed the matches.
     file_query: Rc<RefCell<String>>,
+    file_filter: Rc<RefCell<PathFilterResult>>,
+    path_filter: Rc<RefCell<PathFilter>>,
+    watching_file_filter: Rc<Cell<bool>>,
     file_search_row: gtk::Box,
     text_search_row: gtk::Box,
     search_spinner: gtk::Spinner,
+    search_truncated: gtk::Label,
+    watching_search: Rc<Cell<bool>>,
     conflict_banner: gtk::Box,
     editor: gtk::TextView,
     editor_chrome: editor_chrome::EditorChrome,
@@ -176,6 +183,83 @@ impl Ui {
         }
     }
 
+    /// Matching every path on each keystroke froze the window on large
+    /// workspaces; a worker lists the matches and `poll_file_filter` shows them.
+    fn queue_file_filter(&self, query: &str) {
+        let (documents, directories) = {
+            let snapshot = self.snapshot.borrow();
+            (snapshot.documents.clone(), snapshot.directories.clone())
+        };
+        let ready = self
+            .path_filter
+            .borrow_mut()
+            .queue(query, documents, directories);
+        match ready {
+            Some(result) => self.apply_file_filter(result),
+            None => self.watch_file_filter(),
+        }
+    }
+
+    /// Matches stream in while a search runs; show them without waiting for
+    /// the slow workspace poll.
+    fn watch_search(&self) {
+        if !self.snapshot.borrow().search_in_progress || self.watching_search.replace(true) {
+            return;
+        }
+        let ui = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            let result = ui
+                .core
+                .borrow_mut()
+                .dispatch_if_changed(AppCommand::PollSearchResults);
+            match result {
+                Ok(Some(snapshot)) => ui.render(snapshot),
+                Ok(None) => {}
+                Err(error) => ui.status.set_label(&error.to_string()),
+            }
+            if ui.snapshot.borrow().search_in_progress {
+                glib::ControlFlow::Continue
+            } else {
+                ui.watching_search.set(false);
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    fn watch_file_filter(&self) {
+        if self.watching_file_filter.replace(true) {
+            return;
+        }
+        let ui = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            ui.poll_file_filter();
+            if ui.path_filter.borrow().in_progress() {
+                glib::ControlFlow::Continue
+            } else {
+                ui.watching_file_filter.set(false);
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    fn poll_file_filter(&self) {
+        let result = self.path_filter.borrow_mut().poll();
+        if let Some(result) = result {
+            self.apply_file_filter(result);
+        }
+    }
+
+    fn apply_file_filter(&self, result: PathFilterResult) {
+        self.file_query.replace(result.query.trim().to_owned());
+        self.file_filter.replace(result);
+        self.sidebars[0].dirty.set(true);
+        if self.sidebar_tab.get() == 0 {
+            self.updating.set(true);
+            self.render_sidebar(&self.snapshot.borrow());
+            self.updating.set(false);
+        }
+    }
+
     /// Collects watcher, search and move-worker results.
     fn poll_core(&self) {
         let has_workspace = self.snapshot.borrow().workspace_root.is_some();
@@ -265,6 +349,16 @@ impl Ui {
                 for sidebar in &self.sidebars {
                     sidebar.dirty.set(true);
                 }
+                let query = self.file_search.text();
+                if !query.trim().is_empty() {
+                    // Refilter the new paths; the current matches stay until then.
+                    self.path_filter.borrow_mut().queue(
+                        &query,
+                        snapshot.documents.clone(),
+                        snapshot.directories.clone(),
+                    );
+                    self.watch_file_filter();
+                }
             }
             if previous.search_results != snapshot.search_results
                 || previous.search_query != snapshot.search_query
@@ -322,6 +416,8 @@ impl Ui {
             .set_spinning(snapshot.search_in_progress);
         self.search_spinner
             .set_visible(self.sidebar_tab.get() == 1 && snapshot.search_in_progress);
+        self.search_truncated
+            .set_visible(self.sidebar_tab.get() == 1 && snapshot.search_truncated);
         self.conflict_banner.set_visible(
             snapshot
                 .active_document
@@ -435,6 +531,8 @@ impl Ui {
         self.text_search_row.set_visible(tab == 1);
         self.search_spinner
             .set_visible(tab == 1 && self.snapshot.borrow().search_in_progress);
+        self.search_truncated
+            .set_visible(tab == 1 && self.snapshot.borrow().search_truncated);
         if tab >= 2 {
             self.sidebar_pages.set_visible_child_name("empty");
             return;
@@ -486,12 +584,6 @@ impl Ui {
         } else if results_changed {
             let mut entries = Vec::new();
             let text_mode = self.search_mode.get();
-            let needle = self.file_query.borrow().trim().to_lowercase();
-            let documents: std::collections::HashMap<_, _> = snapshot
-                .documents
-                .iter()
-                .map(|entry| (entry.id.as_str().to_owned(), entry))
-                .collect();
             let groups: std::collections::HashMap<String, Vec<&SearchResult>> = snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
@@ -508,41 +600,12 @@ impl Ui {
             if text_mode {
                 paths.extend(groups.keys().cloned().map(|path| (path, false)));
             } else {
-                paths.extend(
-                    snapshot
-                        .documents
-                        .iter()
-                        .filter(|entry| {
-                            needle.is_empty()
-                                || entry
-                                    .id
-                                    .as_str()
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_lowercase()
-                                    .contains(&needle)
-                        })
-                        .map(|entry| (entry.id.as_str().to_owned(), false)),
-                );
-                paths.extend(
-                    snapshot
-                        .directories
-                        .iter()
-                        .filter(|path| {
-                            needle.is_empty()
-                                || path
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_lowercase()
-                                    .contains(&needle)
-                        })
-                        .cloned()
-                        .map(|path| (path, true)),
-                );
+                // The worker already listed every folder holding a match.
+                let filter = self.file_filter.borrow();
+                paths.extend(filter.files.iter().cloned().map(|path| (path, false)));
+                paths.extend(filter.directories.iter().cloned().map(|path| (path, true)));
             }
-            if text_mode || !needle.is_empty() {
+            if text_mode {
                 let matched_paths = paths.clone();
                 for (id, _) in matched_paths {
                     let mut parent = std::path::Path::new(&id).parent();
@@ -574,7 +637,7 @@ impl Ui {
                     });
                     continue;
                 }
-                let Some(document) = documents.get(&path) else {
+                let Some(document) = snapshot.document_summary(&path) else {
                     continue;
                 };
                 let suffix = if document.external_change {
@@ -1019,6 +1082,72 @@ fn sidebar_row(
     content
 }
 
+/// AdwOverlaySplitView has no resize handle of its own. Dragging this strip
+/// on the sidebar's trailing edge adjusts its preferred width.
+fn sidebar_resize_handle(split: &adw::OverlaySplitView) -> gtk::Box {
+    const MIN_WIDTH: f64 = 220.0;
+    const MIN_CONTENT_WIDTH: f64 = 320.0;
+    let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    handle.set_widget_name("sidebar-resize-handle");
+    handle.set_width_request(6);
+    handle.set_halign(gtk::Align::End);
+    handle.set_cursor_from_name(Some("col-resize"));
+    let drag = gtk::GestureDrag::new();
+    drag.set_name(Some("sidebar-resize"));
+    // The handle moves with the sidebar, so track the pointer in the split
+    // view's coordinates rather than by the gesture's own offset.
+    let pointer = {
+        let handle = handle.downgrade();
+        let split = split.downgrade();
+        move |x: f64, y: f64| {
+            let handle = handle.upgrade()?;
+            let split = split.upgrade()?;
+            handle
+                .compute_point(&split, &gtk::graphene::Point::new(x as f32, y as f32))
+                .map(|point| point.x() as f64)
+        }
+    };
+    let start = Rc::new(Cell::new((0.0, 0.0, 0.0, 0.0)));
+    {
+        let start = start.clone();
+        let split = split.downgrade();
+        let pointer = pointer.clone();
+        drag.connect_drag_begin(move |gesture, x, y| {
+            let Some(split) = split.upgrade() else {
+                return;
+            };
+            let width = split.sidebar().map_or(0, |sidebar| sidebar.width()) as f64;
+            start.set((width, pointer(x, y).unwrap_or_default(), x, y));
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+    }
+    {
+        let split = split.downgrade();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let Some(split) = split.upgrade() else {
+                return;
+            };
+            let (width, origin, x, y) = start.get();
+            let Some(current) = pointer(x + dx, y + dy) else {
+                return;
+            };
+            let direction = if split.direction() == gtk::TextDirection::Rtl {
+                -1.0
+            } else {
+                1.0
+            };
+            let max_width = (split.width() as f64 - MIN_CONTENT_WIDTH).max(MIN_WIDTH);
+            let width = (width + (current - origin) * direction).clamp(MIN_WIDTH, max_width);
+            split.set_sidebar_width_unit(adw::LengthUnit::Px);
+            split.set_min_sidebar_width(MIN_WIDTH);
+            split.set_max_sidebar_width(width);
+            split.set_sidebar_width_fraction((width / f64::from(split.width()).max(1.0)).min(1.0));
+        });
+    }
+    handle.add_controller(drag);
+    handle
+}
+
 fn sidebar_entry_widget(entry: &SidebarEntry, collapsed: bool) -> gtk::Box {
     match &entry.row {
         SidebarRow::Directory(path) => sidebar_row(
@@ -1252,6 +1381,7 @@ fn build_window(app: &adw::Application) {
     let search_mode = Rc::new(Cell::new(false));
     let sidebar_tab = Rc::new(Cell::new(0));
     let file_query = Rc::new(RefCell::new(String::new()));
+    let file_filter = Rc::new(RefCell::new(PathFilterResult::default()));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let pending_move_target = Rc::new(RefCell::new(None));
     let sidebars = [
@@ -1275,6 +1405,10 @@ fn build_window(app: &adw::Application) {
     search.set_placeholder_text(Some("Search in files"));
     let file_search = gtk::SearchEntry::new();
     file_search.set_placeholder_text(Some("Filter names"));
+    // The core's search and name-filter workers already debounce for 150 ms;
+    // GTK's own delay would double the wait before results appear.
+    search.set_search_delay(0);
+    file_search.set_search_delay(0);
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_content.add_css_class("workspace-sidebar");
     let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -1322,6 +1456,18 @@ fn build_window(app: &adw::Application) {
     text_search_row.append(&search_spinner);
     text_search_row.set_visible(false);
     sidebar_content.append(&text_search_row);
+    let search_truncated = gtk::Label::new(Some(
+        "Showing the first 20,000 matches. Refine the search to see the rest.",
+    ));
+    search_truncated.set_wrap(true);
+    search_truncated.set_xalign(0.0);
+    search_truncated.set_margin_start(8);
+    search_truncated.set_margin_end(8);
+    search_truncated.set_margin_bottom(6);
+    search_truncated.add_css_class("dim-label");
+    search_truncated.add_css_class("caption");
+    search_truncated.set_visible(false);
+    sidebar_content.append(&search_truncated);
     let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     search_row.set_margin_start(8);
     search_row.set_margin_end(8);
@@ -1394,10 +1540,14 @@ fn build_window(app: &adw::Application) {
     content_body.append(&editor_chrome.row);
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
-    split.set_sidebar(Some(&sidebar_view));
+    let sidebar_frame = gtk::Overlay::new();
+    sidebar_frame.set_child(Some(&sidebar_view));
+    split.set_sidebar(Some(&sidebar_frame));
     split.set_content(Some(&content_view));
     split.set_sidebar_width_fraction(0.28);
     split.set_vexpand(true);
+    let sidebar_resize = sidebar_resize_handle(&split);
+    sidebar_frame.add_overlay(&sidebar_resize);
     toggle_sidebar.set_active(split.shows_sidebar());
     {
         let split = split.clone();
@@ -1493,9 +1643,14 @@ fn build_window(app: &adw::Application) {
         search_mode,
         sidebar_tab,
         file_query,
+        file_filter,
+        path_filter: Rc::new(RefCell::new(PathFilter::new())),
+        watching_file_filter: Rc::new(Cell::new(false)),
         file_search_row: search_row,
         text_search_row,
         search_spinner,
+        search_truncated,
+        watching_search: Rc::new(Cell::new(false)),
         conflict_banner,
         editor,
         editor_chrome,
@@ -1561,10 +1716,7 @@ fn build_window(app: &adw::Application) {
                 if ui.updating.get() {
                     return;
                 }
-                ui.file_query.replace(search.text().to_string());
-                ui.sidebars[0].dirty.set(true);
-                let snapshot = ui.snapshot.borrow().clone();
-                ui.render(snapshot);
+                ui.queue_file_filter(search.text().as_str());
             });
     }
     for sidebar in &ui.sidebars {
@@ -1833,6 +1985,7 @@ fn build_window(app: &adw::Application) {
         ui.search.clone().connect_search_changed(move |search| {
             if !ui.updating.get() {
                 ui.dispatch(AppCommand::QueueSearchQuery(search.text().to_string()));
+                ui.watch_search();
             }
         });
     }
@@ -2035,6 +2188,89 @@ fn build_window(app: &adw::Application) {
         resume.emit_clicked();
         assert!(ui.window.is_visible());
         assert!(!ui.home_window.is_visible());
+        {
+            let settle = || {
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(80);
+                while std::time::Instant::now() < until {
+                    glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while sidebar_resize.width() < 6 && std::time::Instant::now() < deadline {
+                settle();
+            }
+            assert!(
+                sidebar_resize.width() >= 6,
+                "resize handle: {}x{}, sidebar: {}x{}, mapped: {}, shown: {}",
+                sidebar_resize.width(),
+                sidebar_resize.height(),
+                sidebar_frame.width(),
+                sidebar_frame.height(),
+                sidebar_resize.is_mapped(),
+                split.shows_sidebar()
+            );
+            assert_eq!(sidebar_resize.height(), sidebar_frame.height());
+            for y in [20.0, f64::from(sidebar_resize.height()) / 2.0] {
+                let point = sidebar_resize
+                    .compute_point(&sidebar_frame, &gtk::graphene::Point::new(3.0, y as f32))
+                    .expect("resize handle position");
+                assert_eq!(
+                    sidebar_frame.pick(
+                        f64::from(point.x()),
+                        f64::from(point.y()),
+                        gtk::PickFlags::DEFAULT
+                    ),
+                    Some(sidebar_resize.clone().upcast::<gtk::Widget>()),
+                    "resize handle must receive pointer events at the header and body"
+                );
+            }
+            let gesture = sidebar_resize
+                .observe_controllers()
+                .iter::<glib::Object>()
+                .filter_map(Result::ok)
+                .find_map(|controller| controller.downcast::<gtk::GestureDrag>().ok())
+                .expect("sidebar resize gesture");
+            let initial_width = sidebar_frame.width();
+            gesture.emit_by_name::<()>("drag-begin", &[&3.0_f64, &20.0_f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&80.0_f64, &0.0_f64]);
+            settle();
+            assert!((sidebar_frame.width() - initial_width - 80).abs() <= 1);
+            // After allocation, the handle has moved under the pointer. Keeping
+            // the pointer still must not apply the same delta a second time.
+            gesture.emit_by_name::<()>("drag-update", &[&0.0_f64, &0.0_f64]);
+            settle();
+            assert!((sidebar_frame.width() - initial_width - 80).abs() <= 1);
+            gesture.emit_by_name::<()>("drag-update", &[&40.0_f64, &0.0_f64]);
+            settle();
+            assert!((sidebar_frame.width() - initial_width - 120).abs() <= 1);
+            gesture.emit_by_name::<()>("drag-end", &[&0.0_f64, &0.0_f64]);
+            gesture.emit_by_name::<()>("drag-begin", &[&3.0_f64, &20.0_f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&10_000.0_f64, &0.0_f64]);
+            settle();
+            assert!(sidebar_frame.width() <= split.width() - 320);
+            gesture.emit_by_name::<()>("drag-end", &[&0.0_f64, &0.0_f64]);
+            gesture.emit_by_name::<()>("drag-begin", &[&3.0_f64, &20.0_f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&-10_000.0_f64, &0.0_f64]);
+            settle();
+            assert!(sidebar_frame.width() >= 220);
+            assert_eq!(split.min_sidebar_width(), 220.0);
+            assert_eq!(split.max_sidebar_width(), 220.0);
+            gesture.emit_by_name::<()>("drag-end", &[&0.0_f64, &0.0_f64]);
+            ui.window.set_default_size(700, 600);
+            settle();
+            assert!(sidebar_frame.width() >= 220);
+            assert_eq!(sidebar_resize.height(), sidebar_frame.height());
+            ui.window.set_default_size(900, 600);
+            toggle_sidebar.emit_clicked();
+            settle();
+            assert!(!split.shows_sidebar());
+            toggle_sidebar.emit_clicked();
+            settle();
+            assert!(split.shows_sidebar());
+            assert!(sidebar_resize.is_mapped());
+            println!("GTK sidebar resize/full-height handle/bounds/toggle smoke test passed");
+        }
         assert_eq!(files_scroll.hscrollbar_policy(), gtk::PolicyType::Never);
         if ui
             .snapshot
@@ -2147,7 +2383,20 @@ fn build_window(app: &adw::Application) {
             ));
             app.activate_action("save", None);
             assert_eq!(ui.status.text(), "Saved");
-            ui.file_search.set_text("main");
+            // Name filters arrive from a worker after the entry's debounce.
+            let filter_names = |query: &str| {
+                ui.file_search.set_text(query);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while *ui.file_query.borrow() != query {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "name filter {query:?} never applied"
+                    );
+                    glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            filter_names("main");
             assert!(
                 ui.sidebar()
                     .sidebar_rows
@@ -2163,7 +2412,7 @@ fn build_window(app: &adw::Application) {
                     .iter()
                     .any(|row| matches!(row, SidebarRow::Match(_)))
             );
-            ui.file_search.set_text("src");
+            filter_names("src");
             assert!(
                 ui.sidebar()
                     .sidebar_rows
@@ -2193,7 +2442,7 @@ fn build_window(app: &adw::Application) {
                 "tab switches rehighlighted the loaded document"
             );
             ui.buffer.disconnect(tag_handler);
-            ui.file_search.set_text("");
+            filter_names("");
             text_tab.set_active(true);
             ui.dispatch(AppCommand::SetSearchQuery("README".into()));
             assert!(ui.sidebar().sidebar_rows.borrow().is_empty());

@@ -100,6 +100,25 @@ struct WorkspaceStoreSmoke {
         let externalDestination = try String(contentsOf: root.appendingPathComponent("final.rs"), encoding: .utf8)
         precondition(externalDestination == "external destination")
 
+        // Typing a search query returns at once and never waits on a busy backend.
+        queue.suspend()
+        store.refreshWorkspace()
+        let searchStarted = Date()
+        store.setSearchQuery("t")
+        store.setSearchQuery("typing")
+        precondition(Date().timeIntervalSince(searchStarted) < 0.1, "Search typing blocked the main thread")
+        precondition(store.searchFieldText == "typing", "The search field did not show typed text at once")
+        queue.resume()
+        let searchDeadline = Date().addingTimeInterval(5)
+        while (store.backendBusy || store.searchInProgress || store.searchQuery != "typing") && Date() < searchDeadline {
+            store.pollSearchResults()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        precondition(store.searchQuery == "typing" && !store.searchInProgress, "Queued search did not finish")
+        precondition(store.searchResults.contains { $0.id == "dest/final.rs" && $0.location != nil },
+                     "Search did not find the saved text")
+        precondition(store.searchFieldText == "typing")
+
         let draft = SidebarRenameDraft()
         draft.begin("README.md")
         draft.changeName("preview.rs")

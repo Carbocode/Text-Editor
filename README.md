@@ -10,7 +10,7 @@ Home and Workspace use separate native windows in all three frontends. Home has 
 
 Phase 3 adds a versioned SQLite metadata store for recent workspaces. Each frontend shows the same recent-workspace list and can reopen a directory from it. Document contents remain in their original files. The database location follows the platform application-data directory; `NATIVE_WORKSPACE_STATE_DB` overrides the path for development.
 
-Phase 4 adds a search field inside each sidebar. The Rust application core matches relative paths and every occurrence in UTF-8 file contents without case sensitivity. Ripgrep's search crates filter unopened files; the core computes exact previews and editor positions, and searches unsaved buffers directly. A worker debounces queries for 150 ms and discards obsolete results. SQLite indexing is not used.
+Phase 4 adds a search field inside each sidebar. The Rust application core matches every occurrence in UTF-8 file contents without case sensitivity, searching open buffers first and then files from the workspace root downward on several threads. Matches appear as they are found; a newer query or an emptied field cancels the search. Files excluded by `.gitignore` and `.git` itself are skipped, and a search stops after 20,000 matches with a notice. A worker debounces queries for 150 ms; typing never searches on the UI thread. The Files name filter also runs on a debounced worker. SQLite indexing is not used.
 
 Phase 5 watches the full directory tree with `notify` for files added, removed, or changed outside the app. Frontends collect events every 250 ms; the core reconciles on a filesystem worker every 30 seconds, or every two seconds if a native watcher cannot start. Directory scans and buffer checks never run in the UI polling handler; results superseded by edits or moves are discarded. Clean open documents reload automatically, while local edits are preserved when the disk version changes. A conflict notice offers an explicit choice to reload from disk or overwrite it. Normal Save refuses to replace a changed disk version, including changes detected before the next check.
 
@@ -36,7 +36,7 @@ Use `cargo xtask verify core` for shared Rust checks and `cargo xtask doctor` to
 
 The macOS and GNOME development launchers start a new instance after building, so an already running process cannot silently receive the launch and keep executing an older binary. Existing editor sessions stay open.
 
-Measure listing and search latency with `cargo run -p native-workspace-application --release --example search_benchmark -- [workspace] [query]`. Without arguments it creates a temporary nested workspace with 1,000 files. Search timing includes the 150 ms debounce.
+Measure listing and search latency with `cargo run -p native-workspace-application --release --example search_benchmark -- [workspace] [query]`. Without arguments it creates a temporary nested workspace with 1,000 files. Timings for the first streamed result and the complete search include the 150 ms debounce.
 
 See [architecture](docs/architecture.md), [development](docs/development.md), [macOS](docs/macos.md), [GNOME](docs/gnome.md), and [KDE](docs/kde.md).
 

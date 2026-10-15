@@ -138,6 +138,7 @@ mod tests {
             search_query: Default::default(),
             search_results: Default::default(),
             search_in_progress: false,
+            search_truncated: false,
             directories: directories.into(),
             documents: documents.into(),
             active_document: None,

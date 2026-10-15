@@ -9,9 +9,14 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var workspaceName: String?
     @Published private(set) var workspaceRoot: String?
     @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
+    /// The query whose results are shown. The search field shows `searchFieldText`,
+    /// which typing updates at once while the core searches in the background.
     @Published private(set) var searchQuery = ""
+    @Published private(set) var searchFieldText = ""
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var searchInProgress = false
+    /// The search stopped at the core's result limit.
+    @Published private(set) var searchTruncated = false
     @Published private(set) var directories: [String] = []
     @Published private(set) var sidebarRevision: UInt64 = 0
     @Published private(set) var selectedSearchLocation: SearchLocation?
@@ -47,6 +52,8 @@ final class WorkspaceStore: ObservableObject {
     let diagnosticsEnabled: Bool
     private let operationQueue: DispatchQueue
     private var deferredActions: [() -> Void] = []
+    private var queuedSearchQuery: String?
+    private var searchSubmissionDeferred = false
     private var committedRelocation: Relocation?
     private var failedRelocation: Relocation?
     private var relocationFailure: String?
@@ -202,16 +209,30 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    /// Typing never waits on the FFI snapshot. One query at a time goes to the core,
+    /// whose worker debounces and searches; later keystrokes replace the queued one.
     func setSearchQuery(_ query: String) {
-        if deferUntilReady({ [weak self] in self?.setSearchQuery(query) }) { return }
-        guard query != searchQuery else { return }
-        do {
-            apply(try core.setSearchQuery(query: query))
-            selectedSearchResultIndex = nil
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
+        guard query != searchFieldText else { return }
+        searchFieldText = query
+        selectedSearchResultIndex = nil
+        queuedSearchQuery = query
+        submitQueuedSearch()
+    }
+
+    private func submitQueuedSearch() {
+        guard let query = queuedSearchQuery else { return }
+        if backendBusy {
+            if !searchSubmissionDeferred {
+                searchSubmissionDeferred = true
+                deferredActions.append { [weak self] in
+                    self?.searchSubmissionDeferred = false
+                    self?.submitQueuedSearch()
+                }
+            }
+            return
         }
+        queuedSearchQuery = nil
+        performInBackground { try $0.setSearchQuery(query: query) }
     }
 
     var hasDirtyActiveDocument: Bool {
@@ -452,8 +473,11 @@ final class WorkspaceStore: ObservableObject {
         if workspaceRoot != snapshot.workspaceRoot { workspaceRoot = snapshot.workspaceRoot }
         if recentWorkspaces != snapshot.recentWorkspaces { recentWorkspaces = snapshot.recentWorkspaces }
         if searchQuery != snapshot.searchQuery { searchQuery = snapshot.searchQuery }
+        // Keep text typed after the submitted query; follow resets such as a new workspace.
+        if queuedSearchQuery == nil && searchFieldText != snapshot.searchQuery { searchFieldText = snapshot.searchQuery }
         if searchResults != snapshot.searchResults { searchResults = snapshot.searchResults }
         if searchInProgress != snapshot.searchInProgress { searchInProgress = snapshot.searchInProgress }
+        if searchTruncated != snapshot.searchTruncated { searchTruncated = snapshot.searchTruncated }
         if directories != snapshot.directories { directories = snapshot.directories }
         if documents != snapshot.documents { documents = snapshot.documents }
         if pathsChanged {

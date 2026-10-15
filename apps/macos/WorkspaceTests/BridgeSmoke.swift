@@ -4,6 +4,17 @@ import Foundation
 struct BridgeSmoke {
     static func main() throws {
         let app = WorkspaceApplication()
+        // Queuing a query never searches on the caller; the worker publishes results.
+        func search(_ query: String) throws -> WorkspaceSnapshot {
+            var snapshot = try app.setSearchQuery(query: query)
+            let deadline = Date().addingTimeInterval(5)
+            while snapshot.searchInProgress {
+                precondition(Date() < deadline, "search for \(query) did not finish")
+                usleep(5_000)
+                if let polled = try app.pollSearchResults() { snapshot = polled }
+            }
+            return snapshot
+        }
         let before = try app.snapshot()
         precondition(before.counter == 0 && before.revision == 0)
         let after = try app.increment()
@@ -17,9 +28,13 @@ struct BridgeSmoke {
         precondition(listed.documents.count == 1 && listed.documents[0].id == "README.md")
         precondition(listed.recentWorkspaces.count == 1)
         precondition(URL(fileURLWithPath: listed.recentWorkspaces[0].root).lastPathComponent == directory.lastPathComponent)
-        let matching = try app.setSearchQuery(query: "read")
+        // Text search lists content matches; a file name match alone is not one.
+        let matching = try search("BEF")
         precondition(matching.searchResults.count == 1 && matching.searchResults[0].id == "README.md")
-        let missing = try app.setSearchQuery(query: "missing")
+        precondition(matching.searchResults[0].location?.column == 1)
+        let nameOnly = try search("read")
+        precondition(nameOnly.searchResults.isEmpty)
+        let missing = try search("missing")
         precondition(missing.searchResults.isEmpty)
         _ = try app.setSearchQuery(query: "")
         let openedFast = try app.openDocumentFast(id: "README.md")
@@ -31,7 +46,7 @@ struct BridgeSmoke {
         precondition(changed.activeDocument?.dirty == true)
         let saved = try app.saveDocument(id: "README.md")
         precondition(saved.activeDocument?.dirty == false)
-        let contentMatch = try app.setSearchQuery(query: "after")
+        let contentMatch = try search("after")
         precondition(contentMatch.searchResults.count == 2)
         precondition(contentMatch.searchResults[0].snippet == "after 💡 after")
         precondition(contentMatch.searchResults[0].location?.startUtf16 == 0)

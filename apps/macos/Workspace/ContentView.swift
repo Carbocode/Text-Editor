@@ -15,6 +15,9 @@ struct ContentView: View {
     @State private var newEntryPath = ""
     @State private var sidebarTab = 0
     @State private var fileNameQuery = ""
+    /// The filter the sidebar shows; follows `fileNameQuery` once typing pauses.
+    @State private var appliedFileNameQuery = ""
+    @State private var fileNameDebounce: Task<Void, Never>?
     @State private var sidebarBottomBarHeight: CGFloat = 44
     @State private var sidebarRootDropHeight: CGFloat = 0
     @State private var expandedDirectories: Set<String> = []
@@ -73,7 +76,7 @@ struct ContentView: View {
         let generation = UUID()
         sidebarIndexGeneration = generation
         let tab = sidebarTab
-        let query = fileNameQuery
+        let query = appliedFileNameQuery
         let documents = store.documents
         let directories = store.directories
         let searchResults = store.searchResults
@@ -180,7 +183,7 @@ struct ContentView: View {
     }
 
     private func visibleChildren(of parent: String) -> [SidebarOutlineRow] {
-        let searching = sidebarTab == 1 || !fileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let searching = sidebarTab == 1 || !appliedFileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         var rows: [SidebarOutlineRow] = []
         func appendChildren(of parent: String) {
             for row in sidebarChildren[parent] ?? [] {
@@ -204,7 +207,7 @@ struct ContentView: View {
         let opening = !expandedDirectories.contains(path)
         if opening { expandedDirectories.insert(path) }
         else { expandedDirectories.remove(path) }
-        if sidebarTab == 1 || !fileNameQuery.isEmpty {
+        if sidebarTab == 1 || !appliedFileNameQuery.isEmpty {
             sidebarCache.removeValue(forKey: 0)
             return
         }
@@ -230,7 +233,7 @@ struct ContentView: View {
         case .directory(let path):
             HStack(spacing: 8) {
                 Button { toggleDirectory(path) } label: {
-                    Image(systemName: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty
+                    Image(systemName: expandedDirectories.contains(path) || sidebarTab == 1 || !appliedFileNameQuery.isEmpty
                         ? "chevron.down" : "chevron.right").font(.caption)
                 }
                 .buttonStyle(.plain)
@@ -243,7 +246,7 @@ struct ContentView: View {
                     HStack(spacing: 8) {
                         SidebarEntryIcon(draft: renameDraft, originalPath: path,
                                          displayPath: store.presentationPath(path), directory: true,
-                                         expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !fileNameQuery.isEmpty)
+                                         expanded: expandedDirectories.contains(path) || sidebarTab == 1 || !appliedFileNameQuery.isEmpty)
                         entryName(path).opacity(isPendingMove(path) ? 0.5 : 1)
                         pendingMoveIndicator(path)
                     }
@@ -258,7 +261,6 @@ struct ContentView: View {
             .background(nativeDragSource(path, directory: true))
             .overlay(nativeDropTarget(path))
             .overlay { SidebarDropOutline(drag: sidebarDrag, directory: path, selected: selectedDirectory == path) }
-            .listRowBackground(Color.clear)
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
             .contextMenu {
                 Button("Rename") { beginRename(path) }
@@ -303,7 +305,6 @@ struct ContentView: View {
                     SidebarRowHighlight()
                 }
             }
-            .listRowBackground(Color.clear)
         case .match(let match):
             Button {
                 selectedDirectory = nil
@@ -326,7 +327,6 @@ struct ContentView: View {
                     SidebarRowHighlight()
                 }
             }
-            .listRowBackground(Color.clear)
         }
     }
 
@@ -473,7 +473,7 @@ struct ContentView: View {
             return valid
         }, entered: {
             sidebarDrag.enter(directory, valid: canDrop(directory), expand: {
-                guard sidebarTab == 0, fileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                guard sidebarTab == 0, appliedFileNameQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                       canDrop(directory), !directory.isEmpty,
                       !expandedDirectories.contains(directory) else { return false }
                 toggleDirectory(directory)
@@ -517,7 +517,7 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Search in files", text: Binding(
-                        get: { store.searchQuery },
+                        get: { store.searchFieldText },
                         set: { store.setSearchQuery($0) }
                     ))
                     .textFieldStyle(.plain)
@@ -525,6 +525,12 @@ struct ContentView: View {
                 }
                 .padding(10)
                 .glassEffect(.regular, in: Capsule())
+                if store.searchTruncated {
+                    Text("Showing the first 20,000 matches. Refine the search to see the rest.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.horizontal, 10)
@@ -536,19 +542,26 @@ struct ContentView: View {
         if store.workspaceName != nil {
         NavigationSplitView {
             VStack(spacing: 0) {
-                List {
-                    ForEach(sidebarRows) { row in
-                        sidebarRow(row)
+                // A SwiftUI List diffs its rows in superlinear time: replacing a
+                // few thousand rows (filtering, clearing a filter, streamed search
+                // results) froze the window for seconds. A lazy stack diffs by ID
+                // in linear time and creates only the visible rows.
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(sidebarRows) { row in
+                            sidebarRow(row)
+                                .padding(.vertical, 3)
+                                .frame(minHeight: 24)
+                                .padding(.horizontal, 10)
+                        }
+                        if sidebarTab == 0 {
+                            // Keep scrollable space after the files, below the floating controls.
+                            Color.clear.frame(height: sidebarBottomBarHeight + sidebarRootDropHeight + 8)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
                     }
-                    if sidebarTab == 0 {
-                        // Keep scrollable space after the files, below the floating controls.
-                        Color.clear.frame(height: sidebarBottomBarHeight + sidebarRootDropHeight + 8)
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
+                    .padding(.vertical, 6)
                 }
                 .safeAreaBar(edge: .top, spacing: 0) { sidebarHeader }
                 .scrollEdgeEffectStyle(.soft, for: .top)
@@ -574,7 +587,21 @@ struct ContentView: View {
                     DispatchQueue.main.async { applySidebarRelocation(relocation) }
                 }
 
-                .onChange(of: fileNameQuery) { _, _ in
+                .onChange(of: fileNameQuery) { _, query in
+                    fileNameDebounce?.cancel()
+                    // Clearing applies at once; typing waits for a pause instead of
+                    // reindexing the whole workspace on every keystroke.
+                    if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        appliedFileNameQuery = query
+                        return
+                    }
+                    fileNameDebounce = Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(150))
+                        guard !Task.isCancelled else { return }
+                        appliedFileNameQuery = query
+                    }
+                }
+                .onChange(of: appliedFileNameQuery) { _, _ in
                     sidebarCache.removeValue(forKey: 0)
                     rebuildSidebarIndex()
                 }
@@ -584,7 +611,7 @@ struct ContentView: View {
                     } else if sidebarTab < 2 && store.workspaceName != nil && sidebarRows.isEmpty && !store.searchInProgress {
                         Text(sidebarTab == 1
                              ? (store.searchQuery.isEmpty ? "Search file contents" : "No text matches")
-                             : (fileNameQuery.isEmpty ? "No files" : "No matching names"))
+                             : (appliedFileNameQuery.isEmpty ? "No files" : "No matching names"))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -682,7 +709,8 @@ struct ContentView: View {
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
             store.pollWorkspaceChanges()
         }
-        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
+        // Matches stream in while a search runs; the poll is a no-op otherwise.
+        .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
             store.pollSearchResults()
         }
         .frame(minWidth: 680, minHeight: 420)

@@ -65,10 +65,14 @@ fn main() {
         .expect("queue search");
     let queue_time = started.elapsed();
     let deadline = Instant::now() + Duration::from_secs(60);
+    let mut first_result = None;
     let completed = loop {
         let snapshot = app
             .dispatch(AppCommand::PollSearchResults)
             .expect("poll search");
+        if first_result.is_none() && !snapshot.search_results.is_empty() {
+            first_result = Some(started.elapsed());
+        }
         if !snapshot.search_in_progress {
             break snapshot;
         }
@@ -81,9 +85,10 @@ fn main() {
         opened.directories.len()
     );
     println!(
-        "open={open_time:?} queue={queue_time:?} search={:?} results={} immediate_results={}",
+        "open={open_time:?} queue={queue_time:?} first_result={first_result:?} search={:?} results={} truncated={} immediate_results={}",
         started.elapsed(),
         completed.search_results.len(),
+        completed.search_truncated,
         queued.search_results.len()
     );
 }
