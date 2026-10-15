@@ -88,6 +88,30 @@ ApplicationWindow {
         }
     }
 
+    function checkSearchRows() {
+        var list = findItem(pane, "searchResults")
+        list.forceLayout()
+        var folder = findItem(pane, "sidebarSearchFile:src")
+        check(folder, "Search did not render the parent folder")
+        check(findItem(pane, "sidebarSearchFile:" + expandedPath), "Search did not render the matching file")
+        for (var entry of pane.sidebarEntries()) {
+            var row = findItem(pane, "sidebarSearchFile:" + entry.path)
+            if (!row) continue // Only visible ListView delegates are instantiated.
+            var depth = entry.path.split("/").length - 1
+            var left = row.contentItem.mapToItem(list, 0, 0).x
+            var folderLeft = folder.contentItem.mapToItem(list, 0, 0).x
+            check(Math.abs(left - folderLeft - depth * Kirigami.Units.gridUnit) <= 1,
+                "Search row is not indented under its parent: " + entry.path)
+            for (var index of pane.matchIndicesForFile(entry.path)) {
+                var match = findItem(pane, "sidebarSearchMatch:" + index)
+                check(match, "Search occurrence is missing under " + entry.path)
+                check(Math.abs(match.contentItem.mapToItem(list, 0, 0).x - left
+                    - Kirigami.Units.gridUnit) <= 1,
+                    "Search occurrence is not indented under its file: " + entry.path)
+            }
+        }
+    }
+
     Component.onCompleted: {
         try {
             var argument = Qt.application.arguments.find(value => value.startsWith("--smoke-sidebar="))
@@ -145,6 +169,7 @@ ApplicationWindow {
                     }
                     check(pane.sidebarEntries().some(entry => entry.path === expandedPath),
                         "Search did not show the content match")
+                    checkSearchRows()
                     searchCache = pane.sidebarCaches[1]
                     searchModel = findItem(pane, "searchResults").model
                     switchedAt = Date.now()
@@ -229,7 +254,9 @@ ApplicationWindow {
                     editor.cursorPosition = editor.positionAt(scroll.availableWidth - 5,
                         lastY + editor.cursorRectangle.height / 2)
                     check(editor.cursorPosition === editor.length, "Right edge cannot reach final empty line")
-                    check(activeLine.y === editor.cursorRectangle.y - scroll.contentItem.contentY
+                    var gutter = findItem(pane, "editorLineNumbers")
+                    check(Math.abs(activeLine.mapToItem(gutter, 0, 0).y
+                        - (editor.cursorRectangle.y - scroll.contentItem.contentY)) < 1
                         && activeLine.height === editor.cursorRectangle.height,
                         "Active line does not follow final empty line")
                     check(activeLine.width === editor.width, "Active line does not fill editor width")

@@ -1412,12 +1412,15 @@ Item {
                                     width: ListView.view.width
                                     property string fileId: model.path
                                     property bool isDirectory: model.directory
+                                    // Matches nest under their file, as in the Files tree.
+                                    property real indent: Kirigami.Units.smallSpacing
+                                        + (fileGroup.fileId.split("/").length - 1) * Kirigami.Units.gridUnit
                                     Kirigami.SubtitleDelegate {
                                         id: searchFileDelegate
                                         objectName: "sidebarSearchFile:" + fileGroup.fileId
                                         width: parent.width
+                                        leftPadding: fileGroup.indent
                                         text: root.renamePath === fileGroup.fileId ? "" : fileGroup.fileId.split("/").pop()
-                                        subtitle: root.parentDirectory(fileGroup.fileId)
                                         icon.source: root.entryIcon(fileGroup.fileId, fileGroup.isDirectory, true)
                                         icon.color: "transparent"
                                         rightPadding: searchStatus.implicitWidth + Kirigami.Units.smallSpacing
@@ -1483,7 +1486,9 @@ Item {
                                             ? [] : root.matchIndicesForFile(fileGroup.fileId)
                                         delegate: Kirigami.SubtitleDelegate {
                                             property int resultIndex: modelData
+                                            objectName: "sidebarSearchMatch:" + resultIndex
                                             width: fileGroup.width
+                                            leftPadding: fileGroup.indent + Kirigami.Units.gridUnit
                                             text: root.controller.search_result_snippets[resultIndex] || ""
                                             subtitle: "Line " + root.controller.search_result_lines[resultIndex] + ", Column " + root.controller.search_result_columns[resultIndex]
                                             icon.name: "go-jump"
@@ -1584,15 +1589,18 @@ Item {
                                     height: Math.max(editorScroll.availableHeight, implicitHeight)
                                     readonly property color activeLineColor: Qt.rgba(systemColors.accent.r,
                                         systemColors.accent.g, systemColors.accent.b, 0.15)
-                                    // Code navigation annotation; keep the style's TextArea background.
+                                    // Some styles (including Fusion) have no TextArea background.
+                                    // Draw behind the text in that case; retain native backgrounds otherwise.
                                     Item {
-                                        parent: editor.background
+                                        parent: editor.background || editor
+                                        z: editor.background ? 0 : -1
                                         anchors.fill: parent
                                         clip: true
                                         Rectangle {
                                             id: activeLine
                                             objectName: "editorActiveLine"
-                                            y: editor.cursorRectangle.y - editorScroll.contentItem.contentY
+                                            y: editor.cursorRectangle.y
+                                                - (editor.background ? editorScroll.contentItem.contentY : 0)
                                             width: editor.width
                                             height: editor.cursorRectangle.height
                                             color: editor.activeLineColor

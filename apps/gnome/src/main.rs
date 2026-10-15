@@ -1082,6 +1082,72 @@ fn sidebar_row(
     content
 }
 
+/// AdwOverlaySplitView has no resize handle of its own. Dragging this strip
+/// on the sidebar's trailing edge adjusts its preferred width.
+fn sidebar_resize_handle(split: &adw::OverlaySplitView) -> gtk::Box {
+    const MIN_WIDTH: f64 = 220.0;
+    const MIN_CONTENT_WIDTH: f64 = 320.0;
+    let handle = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    handle.set_widget_name("sidebar-resize-handle");
+    handle.set_width_request(6);
+    handle.set_halign(gtk::Align::End);
+    handle.set_cursor_from_name(Some("col-resize"));
+    let drag = gtk::GestureDrag::new();
+    drag.set_name(Some("sidebar-resize"));
+    // The handle moves with the sidebar, so track the pointer in the split
+    // view's coordinates rather than by the gesture's own offset.
+    let pointer = {
+        let handle = handle.downgrade();
+        let split = split.downgrade();
+        move |x: f64, y: f64| {
+            let handle = handle.upgrade()?;
+            let split = split.upgrade()?;
+            handle
+                .compute_point(&split, &gtk::graphene::Point::new(x as f32, y as f32))
+                .map(|point| point.x() as f64)
+        }
+    };
+    let start = Rc::new(Cell::new((0.0, 0.0, 0.0, 0.0)));
+    {
+        let start = start.clone();
+        let split = split.downgrade();
+        let pointer = pointer.clone();
+        drag.connect_drag_begin(move |gesture, x, y| {
+            let Some(split) = split.upgrade() else {
+                return;
+            };
+            let width = split.sidebar().map_or(0, |sidebar| sidebar.width()) as f64;
+            start.set((width, pointer(x, y).unwrap_or_default(), x, y));
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+    }
+    {
+        let split = split.downgrade();
+        drag.connect_drag_update(move |_, dx, dy| {
+            let Some(split) = split.upgrade() else {
+                return;
+            };
+            let (width, origin, x, y) = start.get();
+            let Some(current) = pointer(x + dx, y + dy) else {
+                return;
+            };
+            let direction = if split.direction() == gtk::TextDirection::Rtl {
+                -1.0
+            } else {
+                1.0
+            };
+            let max_width = (split.width() as f64 - MIN_CONTENT_WIDTH).max(MIN_WIDTH);
+            let width = (width + (current - origin) * direction).clamp(MIN_WIDTH, max_width);
+            split.set_sidebar_width_unit(adw::LengthUnit::Px);
+            split.set_min_sidebar_width(MIN_WIDTH);
+            split.set_max_sidebar_width(width);
+            split.set_sidebar_width_fraction((width / f64::from(split.width()).max(1.0)).min(1.0));
+        });
+    }
+    handle.add_controller(drag);
+    handle
+}
+
 fn sidebar_entry_widget(entry: &SidebarEntry, collapsed: bool) -> gtk::Box {
     match &entry.row {
         SidebarRow::Directory(path) => sidebar_row(
@@ -1474,10 +1540,14 @@ fn build_window(app: &adw::Application) {
     content_body.append(&editor_chrome.row);
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
-    split.set_sidebar(Some(&sidebar_view));
+    let sidebar_frame = gtk::Overlay::new();
+    sidebar_frame.set_child(Some(&sidebar_view));
+    split.set_sidebar(Some(&sidebar_frame));
     split.set_content(Some(&content_view));
     split.set_sidebar_width_fraction(0.28);
     split.set_vexpand(true);
+    let sidebar_resize = sidebar_resize_handle(&split);
+    sidebar_frame.add_overlay(&sidebar_resize);
     toggle_sidebar.set_active(split.shows_sidebar());
     {
         let split = split.clone();
@@ -2118,6 +2188,89 @@ fn build_window(app: &adw::Application) {
         resume.emit_clicked();
         assert!(ui.window.is_visible());
         assert!(!ui.home_window.is_visible());
+        {
+            let settle = || {
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(80);
+                while std::time::Instant::now() < until {
+                    glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            };
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while sidebar_resize.width() < 6 && std::time::Instant::now() < deadline {
+                settle();
+            }
+            assert!(
+                sidebar_resize.width() >= 6,
+                "resize handle: {}x{}, sidebar: {}x{}, mapped: {}, shown: {}",
+                sidebar_resize.width(),
+                sidebar_resize.height(),
+                sidebar_frame.width(),
+                sidebar_frame.height(),
+                sidebar_resize.is_mapped(),
+                split.shows_sidebar()
+            );
+            assert_eq!(sidebar_resize.height(), sidebar_frame.height());
+            for y in [20.0, f64::from(sidebar_resize.height()) / 2.0] {
+                let point = sidebar_resize
+                    .compute_point(&sidebar_frame, &gtk::graphene::Point::new(3.0, y as f32))
+                    .expect("resize handle position");
+                assert_eq!(
+                    sidebar_frame.pick(
+                        f64::from(point.x()),
+                        f64::from(point.y()),
+                        gtk::PickFlags::DEFAULT
+                    ),
+                    Some(sidebar_resize.clone().upcast::<gtk::Widget>()),
+                    "resize handle must receive pointer events at the header and body"
+                );
+            }
+            let gesture = sidebar_resize
+                .observe_controllers()
+                .iter::<glib::Object>()
+                .filter_map(Result::ok)
+                .find_map(|controller| controller.downcast::<gtk::GestureDrag>().ok())
+                .expect("sidebar resize gesture");
+            let initial_width = sidebar_frame.width();
+            gesture.emit_by_name::<()>("drag-begin", &[&3.0_f64, &20.0_f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&80.0_f64, &0.0_f64]);
+            settle();
+            assert!((sidebar_frame.width() - initial_width - 80).abs() <= 1);
+            // After allocation, the handle has moved under the pointer. Keeping
+            // the pointer still must not apply the same delta a second time.
+            gesture.emit_by_name::<()>("drag-update", &[&0.0_f64, &0.0_f64]);
+            settle();
+            assert!((sidebar_frame.width() - initial_width - 80).abs() <= 1);
+            gesture.emit_by_name::<()>("drag-update", &[&40.0_f64, &0.0_f64]);
+            settle();
+            assert!((sidebar_frame.width() - initial_width - 120).abs() <= 1);
+            gesture.emit_by_name::<()>("drag-end", &[&0.0_f64, &0.0_f64]);
+            gesture.emit_by_name::<()>("drag-begin", &[&3.0_f64, &20.0_f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&10_000.0_f64, &0.0_f64]);
+            settle();
+            assert!(sidebar_frame.width() <= split.width() - 320);
+            gesture.emit_by_name::<()>("drag-end", &[&0.0_f64, &0.0_f64]);
+            gesture.emit_by_name::<()>("drag-begin", &[&3.0_f64, &20.0_f64]);
+            gesture.emit_by_name::<()>("drag-update", &[&-10_000.0_f64, &0.0_f64]);
+            settle();
+            assert!(sidebar_frame.width() >= 220);
+            assert_eq!(split.min_sidebar_width(), 220.0);
+            assert_eq!(split.max_sidebar_width(), 220.0);
+            gesture.emit_by_name::<()>("drag-end", &[&0.0_f64, &0.0_f64]);
+            ui.window.set_default_size(700, 600);
+            settle();
+            assert!(sidebar_frame.width() >= 220);
+            assert_eq!(sidebar_resize.height(), sidebar_frame.height());
+            ui.window.set_default_size(900, 600);
+            toggle_sidebar.emit_clicked();
+            settle();
+            assert!(!split.shows_sidebar());
+            toggle_sidebar.emit_clicked();
+            settle();
+            assert!(split.shows_sidebar());
+            assert!(sidebar_resize.is_mapped());
+            println!("GTK sidebar resize/full-height handle/bounds/toggle smoke test passed");
+        }
         assert_eq!(files_scroll.hscrollbar_policy(), gtk::PolicyType::Never);
         if ui
             .snapshot

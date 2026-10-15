@@ -10,4 +10,6 @@ On the macOS bootstrap host, Homebrew GTK4 4.24.1 and libadwaita 1.10.0 built an
 
 Files and Search keep separate sidebar models and scroll containers. Switching tabs reuses those views without rebuilding the file tree or rehighlighting the editor. Changes to documents, directories, search results, or the name filter invalidate the affected model so hidden views refresh when selected.
 
+Drag the sidebar's trailing edge to resize it, including alongside the header. The handle keeps a minimum sidebar width and reserves room for the editor; the standard sidebar toggle continues to hide and show it. The workspace GUI smoke mode checks resizing, width limits and the toggle.
+
 Inline renaming uses GTK Entry activation, Escape and a local EventControllerFocus. Moving focus out cancels the draft; no gesture on the application window captures outside clicks for rename cancellation.
