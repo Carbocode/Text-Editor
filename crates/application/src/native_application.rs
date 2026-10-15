@@ -1,5 +1,7 @@
 //! Native GTK/Qt adapter. A drop projects paths immediately; the complete core
-//! command and its snapshot run on a worker. Polls and edits never join that worker.
+//! command and its snapshot run on a worker. Deletion also runs on a worker,
+//! retaining the published state and pausing mutations until confirmation.
+//! Polls and edits never join a worker.
 use crate::{
     AppCommand, AppError, AppSnapshot, Application, DiagnosticObserver, SidebarDropTrace,
     move_target, remap_command, renamed_path,
@@ -26,6 +28,7 @@ pub struct NativeApplication {
     pending_since: Option<Instant>,
     deferred: Vec<AppCommand>,
     background_error: Option<String>,
+    deleting: bool,
     move_trace: Option<SidebarDropTrace>,
     #[cfg(debug_assertions)]
     next_drop_delay: std::time::Duration,
@@ -55,6 +58,7 @@ impl NativeApplication {
             pending_since: None,
             deferred: Vec::new(),
             background_error: None,
+            deleting: false,
             move_trace: None,
             #[cfg(debug_assertions)]
             next_drop_delay: std::time::Duration::ZERO,
@@ -75,6 +79,10 @@ impl NativeApplication {
     pub fn sidebar_has_children(&self, parent: &str) -> bool {
         self.cached.sidebar_has_children(parent)
     }
+    pub fn deletion_pending(&self) -> bool {
+        self.deleting
+    }
+
     pub fn has_pending_move(&self) -> bool {
         self.worker.is_some()
     }
@@ -197,6 +205,15 @@ impl NativeApplication {
         Ok(self.snapshot())
     }
     pub fn dispatch(&mut self, command: AppCommand) -> Result<AppSnapshot, AppError> {
+        if (self.deleting
+            || (self.worker.is_some() && matches!(command, AppCommand::DeleteEntry(_))))
+            && !matches!(
+                command,
+                AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults
+            )
+        {
+            return Err(AppError::DeleteInProgress);
+        }
         if self.worker.is_some() {
             if !matches!(
                 command,
@@ -209,6 +226,23 @@ impl NativeApplication {
                 }
                 self.deferred.push(command);
             }
+            return Ok(self.snapshot());
+        }
+        if matches!(command, AppCommand::DeleteEntry(_)) {
+            let mut core = self.core.take().unwrap();
+            let (tx, rx) = mpsc::channel();
+            self.worker = Some(rx);
+            self.deleting = true;
+            std::thread::spawn(move || {
+                let result = core.dispatch(command);
+                let error = result.as_ref().err().map(ToString::to_string);
+                let snapshot = core.snapshot();
+                let _ = tx.send(Reply {
+                    core,
+                    snapshot,
+                    error,
+                });
+            });
             return Ok(self.snapshot());
         }
         if let AppCommand::MoveEntryOptimistic { id, directory } = command {
@@ -233,6 +267,7 @@ impl NativeApplication {
                 }
             };
             self.worker = None;
+            self.deleting = false;
             let mut commands = std::mem::take(&mut self.deferred);
             if let Some((source, target)) = self.relocation.take() {
                 let success = reply.error.is_none();

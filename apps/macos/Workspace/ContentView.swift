@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var choosingWorkspace = false
     @Environment(\.openWindow) private var openWindow
     @State private var resolvingExternalChange = false
+    @State private var deletePath = ""
+    @State private var confirmingDelete = false
     @State private var renamePath: String?
     @State private var renameDraft = SidebarRenameDraft()
     @State private var sidebarDrag = SidebarDragState()
@@ -264,6 +266,7 @@ struct ContentView: View {
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
             .contextMenu {
                 Button("Rename") { beginRename(path) }
+                Button("Delete…", role: .destructive) { requestDelete(path) }
             }
         case .file(let group):
             Button {
@@ -298,6 +301,7 @@ struct ContentView: View {
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
             .contextMenu {
                 Button("Rename") { beginRename(group.id) }
+                Button("Delete…", role: .destructive) { requestDelete(group.id) }
             }
             .overlay {
                 if selectedDirectory == nil && store.selectedSearchResultIndex == nil
@@ -345,6 +349,12 @@ struct ContentView: View {
         } else {
             Text(store.presentationPath(path).split(separator: "/").last.map(String.init) ?? path)
         }
+    }
+
+    private func requestDelete(_ path: String) {
+        cancelRename()
+        deletePath = path
+        confirmingDelete = true
     }
 
     private func beginRename(_ path: String) {
@@ -683,6 +693,13 @@ struct ContentView: View {
         }
         }
         }
+        .disabled(store.deletionPending)
+        .confirmationDialog("Delete \"\(deletePath)\"?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            Button("Delete Permanently", role: .destructive) { store.deleteEntry(deletePath) }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This permanently deletes the entry and all its contents. Modified documents must be saved first. This cannot be undone.")
+        }
         .background(WindowTitleView(title: store.workspaceName ?? "Native Workspace"))
         .fileImporter(isPresented: $choosingWorkspace, allowedContentTypes: [.folder]) { result in
             switch result {
@@ -761,7 +778,7 @@ struct ContentView: View {
                 HStack {
                     Text(store.activeDocument?.title ?? "No document")
                     Spacer()
-                    Text(store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved"))
+                    Text(store.deletionPending ? "Deleting…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

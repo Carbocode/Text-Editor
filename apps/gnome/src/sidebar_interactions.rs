@@ -13,6 +13,7 @@ type MoveValidator = Rc<dyn Fn(&str, &str) -> bool>;
 pub struct Callbacks {
     pub begin_drop: Rc<dyn Fn() -> native_workspace_application::SidebarDropTrace>,
     pub rename: Rc<dyn Fn(String, String) -> bool>,
+    pub delete: Rc<dyn Fn(String)>,
     pub move_entry: Rc<dyn Fn(String, String) -> bool>,
     pub can_move: MoveValidator,
     pub expand: Rc<dyn Fn(&str) -> bool>,
@@ -427,7 +428,23 @@ impl Interactions {
                 menu.set_parent(&widget);
                 menu.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
                 let button = gtk::Button::with_label("Rename");
-                menu.set_child(Some(&button));
+                let actions = gtk::Box::new(gtk::Orientation::Vertical, 4);
+                actions.append(&button);
+                let delete = gtk::Button::with_label("Delete…");
+                delete.add_css_class("destructive-action");
+                actions.append(&delete);
+                menu.set_child(Some(&actions));
+                let delete_state = state.clone();
+                let delete_path = path.clone();
+                let delete_menu = menu.downgrade();
+                delete.connect_clicked(move |_| {
+                    if let Some(menu) = delete_menu.upgrade() {
+                        menu.popdown();
+                    }
+                    if let Some(callbacks) = delete_state.callbacks.borrow().as_ref() {
+                        (callbacks.delete)(delete_path.clone());
+                    }
+                });
                 let weak_menu = menu.downgrade();
                 let state = state.clone();
                 let path = path.clone();
@@ -655,6 +672,7 @@ mod tests {
         state.callbacks.replace(Some(Callbacks {
             begin_drop: Rc::new(native_workspace_application::SidebarDropTrace::default),
             rename: Rc::new(|_, _| true),
+            delete: Rc::new(|_| {}),
             move_entry: Rc::new(move |source, directory| {
                 let release_state = release_state.upgrade().unwrap();
                 assert!(
@@ -686,6 +704,7 @@ mod tests {
         branches.callbacks.replace(Some(Callbacks {
             begin_drop: Rc::new(native_workspace_application::SidebarDropTrace::default),
             rename: Rc::new(|_, _| true),
+            delete: Rc::new(|_| {}),
             move_entry: Rc::new(|_, _| true),
             can_move: Rc::new(|_, _| true),
             expand: Rc::new(move |path| expanded_open.borrow_mut().insert(path.into())),

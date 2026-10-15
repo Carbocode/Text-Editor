@@ -59,3 +59,11 @@ Normal frontend launches open a SQLite metadata database in the platform applica
 The sidebar search matches relative paths and UTF-8 file contents throughout the directory tree, ignoring case and surrounding whitespace in the query. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty query shows every listed document. Search runs in a worker and does not use SQLite.
 
 Normal run commands launch the selected editor. Developer Tools open only through the editor button and run in separate service/console processes. The console interface is in English. See [implementation and verification](devtools/IMPLEMENTATION.md) for standalone diagnostics commands, protocol budgets and coverage still pending.
+
+## Deletion verification
+
+Use a disposable workspace with a nested folder and at least two files. In Files or Search, choose **Delete…** from a file or folder context menu. Cancel and verify that the disk, editor and tree remain unchanged. Confirm **Delete Permanently** to remove an unmodified file or populated folder; its open documents must close, while unrelated documents remain open. The entry must disappear from both Files and Search, including when a search was already running.
+
+Modify a nested document, switch to another file, then try deleting its parent folder. The operation must fail with an instruction to save modified documents, preserving both the disk files and unsaved buffers. Save the document and retry. While a deletion is running, the editor temporarily prevents typing; completion restores editing even after a filesystem error. Deletion does not use the system Trash and cannot be undone. A filesystem error can leave a partially removed directory; the normal watcher refresh reconciles the remaining entries without discarding buffers.
+
+The shared deletion tests cover inactive unsaved descendants, unrelated dirty buffers, successful subtree removal, search invalidation, background execution, filesystem failure, and symlink boundaries. The Swift bridge smoke test also exercises deletion rejection and success through UniFFI.
