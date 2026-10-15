@@ -37,6 +37,8 @@ struct Ui {
     file_search_row: gtk::Box,
     text_search_row: gtk::Box,
     search_spinner: gtk::Spinner,
+    search_truncated: gtk::Label,
+    watching_search: Rc<Cell<bool>>,
     conflict_banner: gtk::Box,
     editor: gtk::TextView,
     editor_chrome: editor_chrome::EditorChrome,
@@ -196,6 +198,32 @@ impl Ui {
             Some(result) => self.apply_file_filter(result),
             None => self.watch_file_filter(),
         }
+    }
+
+    /// Matches stream in while a search runs; show them without waiting for
+    /// the slow workspace poll.
+    fn watch_search(&self) {
+        if !self.snapshot.borrow().search_in_progress || self.watching_search.replace(true) {
+            return;
+        }
+        let ui = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            let result = ui
+                .core
+                .borrow_mut()
+                .dispatch_if_changed(AppCommand::PollSearchResults);
+            match result {
+                Ok(Some(snapshot)) => ui.render(snapshot),
+                Ok(None) => {}
+                Err(error) => ui.status.set_label(&error.to_string()),
+            }
+            if ui.snapshot.borrow().search_in_progress {
+                glib::ControlFlow::Continue
+            } else {
+                ui.watching_search.set(false);
+                glib::ControlFlow::Break
+            }
+        });
     }
 
     fn watch_file_filter(&self) {
@@ -388,6 +416,8 @@ impl Ui {
             .set_spinning(snapshot.search_in_progress);
         self.search_spinner
             .set_visible(self.sidebar_tab.get() == 1 && snapshot.search_in_progress);
+        self.search_truncated
+            .set_visible(self.sidebar_tab.get() == 1 && snapshot.search_truncated);
         self.conflict_banner.set_visible(
             snapshot
                 .active_document
@@ -501,6 +531,8 @@ impl Ui {
         self.text_search_row.set_visible(tab == 1);
         self.search_spinner
             .set_visible(tab == 1 && self.snapshot.borrow().search_in_progress);
+        self.search_truncated
+            .set_visible(tab == 1 && self.snapshot.borrow().search_truncated);
         if tab >= 2 {
             self.sidebar_pages.set_visible_child_name("empty");
             return;
@@ -1358,6 +1390,18 @@ fn build_window(app: &adw::Application) {
     text_search_row.append(&search_spinner);
     text_search_row.set_visible(false);
     sidebar_content.append(&text_search_row);
+    let search_truncated = gtk::Label::new(Some(
+        "Showing the first 20,000 matches. Refine the search to see the rest.",
+    ));
+    search_truncated.set_wrap(true);
+    search_truncated.set_xalign(0.0);
+    search_truncated.set_margin_start(8);
+    search_truncated.set_margin_end(8);
+    search_truncated.set_margin_bottom(6);
+    search_truncated.add_css_class("dim-label");
+    search_truncated.add_css_class("caption");
+    search_truncated.set_visible(false);
+    sidebar_content.append(&search_truncated);
     let search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     search_row.set_margin_start(8);
     search_row.set_margin_end(8);
@@ -1535,6 +1579,8 @@ fn build_window(app: &adw::Application) {
         file_search_row: search_row,
         text_search_row,
         search_spinner,
+        search_truncated,
+        watching_search: Rc::new(Cell::new(false)),
         conflict_banner,
         editor,
         editor_chrome,
@@ -1869,6 +1915,7 @@ fn build_window(app: &adw::Application) {
         ui.search.clone().connect_search_changed(move |search| {
             if !ui.updating.get() {
                 ui.dispatch(AppCommand::QueueSearchQuery(search.text().to_string()));
+                ui.watch_search();
             }
         });
     }

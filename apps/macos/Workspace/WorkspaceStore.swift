@@ -15,6 +15,8 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var searchFieldText = ""
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var searchInProgress = false
+    /// The search stopped at the core's result limit.
+    @Published private(set) var searchTruncated = false
     @Published private(set) var directories: [String] = []
     @Published private(set) var sidebarRevision: UInt64 = 0
     @Published private(set) var selectedSearchLocation: SearchLocation?
@@ -475,6 +477,7 @@ final class WorkspaceStore: ObservableObject {
         if queuedSearchQuery == nil && searchFieldText != snapshot.searchQuery { searchFieldText = snapshot.searchQuery }
         if searchResults != snapshot.searchResults { searchResults = snapshot.searchResults }
         if searchInProgress != snapshot.searchInProgress { searchInProgress = snapshot.searchInProgress }
+        if searchTruncated != snapshot.searchTruncated { searchTruncated = snapshot.searchTruncated }
         if directories != snapshot.directories { directories = snapshot.directories }
         if documents != snapshot.documents { documents = snapshot.documents }
         if pathsChanged {

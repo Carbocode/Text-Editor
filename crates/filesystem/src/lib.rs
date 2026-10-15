@@ -1,22 +1,17 @@
 //! The concrete filesystem boundary for local workspaces.
 
-use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use grep_searcher::{SearcherBuilder, sinks::UTF8};
 use native_workspace_domain::{DocumentId, Workspace};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
-    cell::RefCell,
+    collections::HashSet,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
 };
 
-thread_local! {
-    /// Search jobs stay on one worker thread, so the compiled matcher is reused
-    /// across every file in a query without locking the UI thread.
-    static SEARCH_MATCHER: RefCell<Option<(String, RegexMatcher)>> = const { RefCell::new(None) };
-}
+/// Larger files are listed but never searched.
+pub const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
 
 /// Delivers relevant filesystem events without rescanning the workspace on each UI tick.
 pub struct WorkspaceWatcher {
@@ -83,14 +78,16 @@ pub trait WorkspaceFilesystem: Send + Sync {
     fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
         self.read_document(root, id).ok()
     }
-    fn read_document_if_matching(
+    /// Like `read_document_for_search`, but folders recorded in `verified`
+    /// are not checked again, so a workspace search checks each folder once.
+    fn read_document_for_search_in(
         &self,
         root: &Path,
         id: &DocumentId,
-        needle: &str,
+        verified: &mut HashSet<String>,
     ) -> Option<String> {
-        let content = self.read_document_for_search(root, id)?;
-        content.to_lowercase().contains(needle).then_some(content)
+        let _ = verified;
+        self.read_document_for_search(root, id)
     }
     fn write_document(
         &self,
@@ -176,6 +173,18 @@ fn rename_without_replacing(_from: &Path, _to: &Path) -> io::Result<()> {
         io::ErrorKind::Unsupported,
         "safe rename is unavailable on this platform",
     ))
+}
+
+/// UTF-8 content of at most `MAX_SEARCH_BYTES`; otherwise nothing.
+fn read_bounded_utf8(file: fs::File) -> Option<String> {
+    let mut bytes = Vec::new();
+    file.take(MAX_SEARCH_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_SEARCH_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 #[derive(Debug, Default)]
@@ -281,66 +290,46 @@ impl WorkspaceFilesystem for RealFilesystem {
     }
 
     fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
-        const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
         let path = Self::document_path(root, id).ok()?;
-        let mut bytes = Vec::new();
-        fs::File::open(path)
-            .ok()?
-            .take(MAX_SEARCH_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() as u64 > MAX_SEARCH_BYTES {
-            return None;
-        }
-        String::from_utf8(bytes).ok()
+        read_bounded_utf8(fs::File::open(path).ok()?)
     }
 
-    fn read_document_if_matching(
+    #[cfg(unix)]
+    fn read_document_for_search_in(
         &self,
         root: &Path,
         id: &DocumentId,
-        needle: &str,
+        verified: &mut HashSet<String>,
     ) -> Option<String> {
-        if !needle.is_ascii() || needle.chars().any(char::is_control) {
-            return self.read_document_for_search(root, id);
+        use std::os::unix::fs::OpenOptionsExt;
+        // Same guarantees as `document_path`: no symlinked ancestor folders
+        // and a regular final file, with one check per folder per search.
+        let relative = id.as_str();
+        let mut end = 0;
+        while let Some(separator) = relative[end..].find('/') {
+            end += separator;
+            if !verified.contains(&relative[..end]) {
+                if !fs::symlink_metadata(root.join(&relative[..end]))
+                    .ok()?
+                    .file_type()
+                    .is_dir()
+                {
+                    return None;
+                }
+                verified.insert(relative[..end].to_owned());
+            }
+            end += 1;
         }
-        const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
-        let path = Self::document_path(root, id).ok()?;
-        if fs::metadata(&path).ok()?.len() > MAX_SEARCH_BYTES {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(root.join(relative))
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.file_type().is_file() || metadata.len() > MAX_SEARCH_BYTES {
             return None;
         }
-        let found = SEARCH_MATCHER.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            if cache.as_ref().is_none_or(|(query, _)| query != needle) {
-                // Rust's lowercase expansion can match text that Unicode regex
-                // case folding does not (for example, `i` in `İ`). Such files
-                // pass through to the exact matcher in the application core.
-                let matcher = RegexMatcherBuilder::new()
-                    .case_insensitive(true)
-                    .build(&format!("(?:{}|[^\\x00-\\x7F])", regex::escape(needle)))
-                    .ok()?;
-                *cache = Some((needle.to_owned(), matcher));
-            }
-            let matcher = &cache.as_ref()?.1;
-            let mut found = false;
-            let mut searcher = SearcherBuilder::new().build();
-            searcher
-                .search_path(
-                    matcher,
-                    &path,
-                    UTF8(|_, _| {
-                        found = true;
-                        Ok::<bool, io::Error>(false)
-                    }),
-                )
-                .ok()?;
-            Some(found)
-        })?;
-        if found {
-            self.read_document_for_search(root, id)
-        } else {
-            None
-        }
+        read_bounded_utf8(file)
     }
 
     fn write_document(
@@ -489,22 +478,40 @@ mod tests {
                 .read_document_for_search(dir.path(), &id)
                 .is_none()
         );
+        assert!(
+            filesystem
+                .read_document_for_search_in(dir.path(), &id, &mut HashSet::new())
+                .is_none()
+        );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn ripgrep_filter_preserves_literal_and_unicode_case_matches() {
+    fn search_reads_check_each_folder_and_never_follow_symlinks() {
         let dir = tempfile::tempdir().unwrap();
-        let id = DocumentId::parse("note.md").unwrap();
-        fs::write(dir.path().join(id.as_str()), "a.b İ K").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret.txt"),
+            dir.path().join("src/link.txt"),
+        )
+        .unwrap();
         let filesystem = RealFilesystem;
-        for query in ["a.b", "i", "k"] {
-            assert!(
-                filesystem
-                    .read_document_if_matching(dir.path(), &id, query)
-                    .is_some(),
-                "query {query:?}"
-            );
-        }
+        let mut verified = HashSet::new();
+        let mut read = |name: &str| {
+            filesystem.read_document_for_search_in(
+                dir.path(),
+                &DocumentId::parse(name).unwrap(),
+                &mut verified,
+            )
+        };
+        assert_eq!(read("src/main.rs").as_deref(), Some("fn main() {}"));
+        assert_eq!(read("src/link.txt"), None);
+        assert_eq!(read("linked/secret.txt"), None);
+        assert!(verified.contains("src") && !verified.contains("linked"));
     }
 
     #[cfg(unix)]

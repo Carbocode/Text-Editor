@@ -89,6 +89,7 @@ pub struct WorkspaceSnapshot {
     pub search_query: String,
     pub search_results: Vec<SearchResult>,
     pub search_in_progress: bool,
+    pub search_truncated: bool,
     pub directories: Vec<String>,
     pub documents: Vec<DocumentSummary>,
     pub active_document: Option<DocumentSnapshot>,
@@ -113,6 +114,7 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                 })
                 .collect(),
             search_query: snapshot.search_query.0,
+            search_truncated: snapshot.search_truncated,
             search_results: std::sync::Arc::unwrap_or_clone(snapshot.search_results)
                 .into_iter()
                 .map(|result| SearchResult {

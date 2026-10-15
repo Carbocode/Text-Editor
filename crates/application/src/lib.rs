@@ -4,16 +4,20 @@ mod diagnostics;
 mod drop_diagnostics;
 mod native_application;
 mod path_filter;
+mod search;
 mod sidebar_tree;
 pub use drop_diagnostics::SidebarDropTrace;
 pub use native_application::NativeApplication;
 pub use path_filter::{PathFilter, PathFilterResult};
+use search::{Matcher, SearchBatch, SearchJob};
 pub use sidebar_tree::SidebarChild;
 mod icons;
 pub use diagnostics::DiagnosticObserver;
 use diagnostics::{Context, Diagnostics};
 #[cfg(test)]
 mod optimistic_move_tests;
+#[cfg(test)]
+mod search_tests;
 pub use icons::{file_icon_name, folder_icon_name};
 
 use native_workspace_domain::{DiagnosticState, DocumentId, Workspace};
@@ -111,11 +115,19 @@ pub enum AppEvent {
     SearchQueryChanged {
         query: SearchQuery,
         results: Vec<SearchResult>,
+        truncated: bool,
     },
     /// The query changed and the worker will publish its results, so typing
     /// never scans the workspace on the UI thread.
     SearchQueryQueued(SearchQuery),
-    SearchResultsUpdated(Vec<SearchResult>),
+    /// Matches from the search worker, appended as they stream in or
+    /// replacing the current results when a re-search finishes.
+    SearchResultsUpdated {
+        results: Vec<SearchResult>,
+        replace: bool,
+        finished: bool,
+        truncated: bool,
+    },
     SearchStarted,
     WorkspaceOpened {
         workspace: Workspace,
@@ -126,7 +138,6 @@ pub enum AppEvent {
     WorkspaceRefreshed {
         documents: Vec<DocumentEntry>,
         directories: Vec<String>,
-        search_results: Vec<SearchResult>,
     },
     DocumentLoaded {
         id: DocumentId,
@@ -187,28 +198,14 @@ pub struct SearchLocation {
     pub end_utf16: u64,
 }
 
-fn preview(line: &str, match_start: usize) -> String {
-    let leading = line.chars().take_while(|ch| ch.is_whitespace()).count();
-    let line = line.trim();
-    let match_start = match_start.saturating_sub(leading);
-    let start = match_start.saturating_sub(40);
-    let mut chars = line.chars().skip(start);
-    let text: String = chars.by_ref().take(160).collect();
-    format!(
-        "{}{}{}",
-        if start > 0 { "…" } else { "" },
-        text,
-        if chars.next().is_some() { "…" } else { "" }
-    )
-}
-
+/// Every match of `needle` in `content`. An empty query lists the document itself.
 fn search_results_for(
     entry: &DocumentEntry,
     needle: &str,
     content: Option<&str>,
 ) -> Vec<SearchResult> {
     let mut results = Vec::new();
-    if needle.is_empty() || entry.id.as_str().to_lowercase().contains(needle) {
+    if needle.is_empty() {
         results.push(SearchResult {
             id: entry.id.clone(),
             title: entry.id.as_str().to_owned(),
@@ -216,71 +213,8 @@ fn search_results_for(
             snippet: None,
             location: None,
         });
-    }
-    if needle.is_empty() {
-        return results;
-    }
-    let Some(content) = content else {
-        return results;
-    };
-    let mut line_start_char = 0usize;
-    let mut line_start_utf16 = 0usize;
-    for (line_index, raw_line) in content.split_inclusive('\n').enumerate() {
-        let line = raw_line.strip_suffix('\n').unwrap_or(raw_line);
-        let mut folded = String::new();
-        let mut positions = Vec::new();
-        let mut char_offset = line_start_char;
-        let mut utf16_offset = line_start_utf16;
-        for ch in line.chars() {
-            let next_char = char_offset + 1;
-            let next_utf16 = utf16_offset + ch.len_utf16();
-            for lower in ch.to_lowercase() {
-                positions.push((
-                    folded.len(),
-                    char_offset,
-                    next_char,
-                    utf16_offset,
-                    next_utf16,
-                ));
-                folded.push(lower);
-            }
-            char_offset = next_char;
-            utf16_offset = next_utf16;
-        }
-        let mut search_from = 0;
-        while search_from < folded.len() {
-            let Some(relative) = folded[search_from..].find(needle) else {
-                break;
-            };
-            let start_byte = search_from + relative;
-            let start_index = positions
-                .binary_search_by_key(&start_byte, |position| position.0)
-                .expect("match starts at a character boundary");
-            let end_byte = start_byte + needle.len();
-            let end_index = positions
-                .binary_search_by_key(&end_byte, |position| position.0)
-                .unwrap_or_else(|index| index);
-            let (_, start_char, _, start_utf16, _) = positions[start_index];
-            let (_, _, end_char, _, end_utf16) = positions[end_index - 1];
-            let column = start_char - line_start_char + 1;
-            results.push(SearchResult {
-                id: entry.id.clone(),
-                title: entry.id.as_str().to_owned(),
-                dirty: entry.dirty(),
-                snippet: Some(preview(line, column - 1)),
-                location: Some(SearchLocation {
-                    line: (line_index + 1) as u64,
-                    column: column as u64,
-                    start_char: start_char as u64,
-                    end_char: end_char as u64,
-                    start_utf16: start_utf16 as u64,
-                    end_utf16: end_utf16 as u64,
-                }),
-            });
-            search_from = start_byte + folded[start_byte..].chars().next().unwrap().len_utf8();
-        }
-        line_start_char += raw_line.chars().count();
-        line_start_utf16 += raw_line.encode_utf16().count();
+    } else if let Some(content) = content {
+        Matcher::new(needle).content_results(entry, content, &mut results);
     }
     results
 }
@@ -298,6 +232,8 @@ pub struct AppSnapshot {
     /// Shared, so publishing or keeping a snapshot never copies every row.
     pub search_results: Arc<Vec<SearchResult>>,
     pub search_in_progress: bool,
+    /// The search stopped at its result limit; more matches may exist.
+    pub search_truncated: bool,
     pub directories: Arc<Vec<String>>,
     pub documents: Arc<Vec<DocumentSummary>>,
     pub active_document: Option<DocumentSnapshot>,
@@ -359,6 +295,10 @@ pub struct AppState {
     search_query: SearchQuery,
     search_results: Vec<SearchResult>,
     search_in_progress: bool,
+    search_truncated: bool,
+    /// Documents whose results were recomputed from their buffer while a
+    /// search ran; that search's possibly older matches for them are dropped.
+    search_touched: HashSet<DocumentId>,
     directories: Vec<String>,
     documents: Vec<DocumentEntry>,
     active_document: Option<DocumentId>,
@@ -417,6 +357,7 @@ impl AppState {
                 .get_or_init(|| Arc::new(self.search_results.clone()))
                 .clone(),
             search_in_progress: self.search_in_progress,
+            search_truncated: self.search_truncated,
             directories: self
                 .published_directories
                 .get_or_init(|| Arc::new(self.directories.clone()))
@@ -450,7 +391,7 @@ impl AppState {
             | AppEvent::DocumentOpened { .. }
             | AppEvent::DocumentClosed { .. }
             | AppEvent::DocumentChanged { .. } => {}
-            AppEvent::SearchQueryChanged { .. } | AppEvent::SearchResultsUpdated(_) => {
+            AppEvent::SearchQueryChanged { .. } | AppEvent::SearchResultsUpdated { .. } => {
                 self.published_search_results = OnceLock::new();
             }
             _ => {
@@ -483,32 +424,40 @@ impl AppState {
                 if let Some(active) = &mut self.active_document {
                     *active = DocumentId::parse(renamed_path(active.as_str(), id, target)).unwrap();
                 }
-                let needle = self.search_query.0.trim().to_lowercase();
-                self.search_results = self
-                    .documents
-                    .iter()
-                    .flat_map(|entry| search_results_for(entry, &needle, entry.content.as_deref()))
-                    .collect();
+                if self.search_query.0.trim().is_empty() {
+                    self.list_documents_as_results();
+                } else {
+                    // Matches move with their files; nothing is searched again.
+                    for result in &mut self.search_results {
+                        if affected(result.id.as_str()) {
+                            result.id =
+                                DocumentId::parse(renamed_path(result.id.as_str(), id, target))
+                                    .unwrap();
+                            result.title = result.id.as_str().to_owned();
+                        }
+                    }
+                }
             }
             AppEvent::DiagnosticIncremented => {
                 self.diagnostic
                     .increment()
                     .expect("diagnostic overflow checked before producing event");
             }
-            AppEvent::SearchQueryChanged { query, results } => {
+            AppEvent::SearchQueryChanged {
+                query,
+                results,
+                truncated,
+            } => {
                 self.search_query = query.clone();
                 self.search_results = results.clone();
                 self.search_in_progress = false;
+                self.search_truncated = *truncated;
             }
             AppEvent::SearchQueryQueued(query) => {
                 let needle = query.0.trim();
                 if needle.is_empty() {
                     self.published_search_results = OnceLock::new();
-                    self.search_results = self
-                        .documents
-                        .iter()
-                        .flat_map(|entry| search_results_for(entry, "", None))
-                        .collect();
+                    self.list_documents_as_results();
                     self.search_in_progress = false;
                 } else if !self.search_results.is_empty() {
                     // Results of the previous query no longer apply.
@@ -516,12 +465,41 @@ impl AppState {
                     self.search_results.clear();
                 }
                 self.search_query = query.clone();
+                self.search_truncated = false;
             }
-            AppEvent::SearchResultsUpdated(results) => {
-                self.search_results = results.clone();
-                self.search_in_progress = false;
+            AppEvent::SearchResultsUpdated {
+                results,
+                replace,
+                finished,
+                truncated,
+            } => {
+                let touched = std::mem::take(&mut self.search_touched);
+                if *replace {
+                    self.search_results = results.clone();
+                    for id in &touched {
+                        if self.documents.iter().any(|entry| &entry.id == id) {
+                            self.refresh_search_result(id);
+                        }
+                    }
+                } else {
+                    self.search_results.extend(
+                        results
+                            .iter()
+                            .filter(|result| !touched.contains(&result.id))
+                            .cloned(),
+                    );
+                }
+                if *finished {
+                    self.search_in_progress = false;
+                    self.search_truncated = *truncated;
+                } else {
+                    self.search_touched = touched;
+                }
             }
-            AppEvent::SearchStarted => self.search_in_progress = true,
+            AppEvent::SearchStarted => {
+                self.search_in_progress = true;
+                self.search_touched.clear();
+            }
             AppEvent::WorkspaceOpened {
                 workspace,
                 documents,
@@ -543,21 +521,34 @@ impl AppState {
                         external_change: false,
                     })
                     .collect();
-                self.search_results = self
-                    .documents
-                    .iter()
-                    .flat_map(|entry| search_results_for(entry, "", None))
-                    .collect();
+                self.list_documents_as_results();
                 self.active_document = None;
             }
             AppEvent::WorkspaceRefreshed {
                 documents,
                 directories,
-                search_results,
             } => {
                 self.documents = documents.clone();
                 self.directories = directories.clone();
-                self.search_results = search_results.clone();
+                if self.search_query.0.trim().is_empty() {
+                    self.list_documents_as_results();
+                } else {
+                    // Like VS Code, disk changes do not rerun a search: removed
+                    // files drop out and open buffers are matched again.
+                    let listed: HashSet<&DocumentId> =
+                        self.documents.iter().map(|entry| &entry.id).collect();
+                    self.search_results
+                        .retain(|result| listed.contains(&result.id));
+                    let loaded: Vec<DocumentId> = self
+                        .documents
+                        .iter()
+                        .filter(|entry| entry.content.is_some())
+                        .map(|entry| entry.id.clone())
+                        .collect();
+                    for id in &loaded {
+                        self.refresh_search_result(id);
+                    }
+                }
                 if self
                     .active_document
                     .as_ref()
@@ -607,7 +598,19 @@ impl AppState {
             .expect("document validated before producing event")
     }
 
+    /// An empty query lists every document.
+    fn list_documents_as_results(&mut self) {
+        self.search_results = self
+            .documents
+            .iter()
+            .flat_map(|entry| search_results_for(entry, "", None))
+            .collect();
+    }
+
     fn refresh_search_result(&mut self, id: &DocumentId) {
+        if self.search_in_progress {
+            self.search_touched.insert(id.clone());
+        }
         let needle = self.search_query.0.trim().to_lowercase();
         let index = self
             .documents
@@ -652,7 +655,7 @@ pub struct Application {
     watcher: Option<WorkspaceWatcher>,
     last_reconcile: Instant,
     search_jobs: Sender<SearchJob>,
-    search_results_rx: Receiver<SearchFinished>,
+    search_results_rx: Receiver<SearchBatch>,
     search_generation: Arc<AtomicU64>,
     pending_move: Option<PendingMove>,
     pending_reconcile: Option<PendingReconcile>,
@@ -678,7 +681,6 @@ fn reconcile_workspace(
     root: &Path,
     previous_documents: &[DocumentEntry],
     previous_directories: &[String],
-    query: &str,
 ) -> Result<Vec<AppEvent>, AppError> {
     let (_, ids, directories) = filesystem.open_workspace(root)?;
     let listed: HashSet<_> = ids.iter().collect();
@@ -723,15 +725,9 @@ fn reconcile_workspace(
     if documents == previous_documents && directories == previous_directories {
         Ok(Vec::new())
     } else {
-        let needle = query.trim().to_lowercase();
-        let search_results = documents
-            .iter()
-            .flat_map(|entry| search_results_for(entry, &needle, entry.content.as_deref()))
-            .collect();
         Ok(vec![AppEvent::WorkspaceRefreshed {
             documents,
             directories,
-            search_results,
         }])
     }
 }
@@ -778,144 +774,6 @@ fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) 
     }
 }
 
-struct SearchJob {
-    diagnostic: Context,
-    generation: u64,
-    root: PathBuf,
-    documents: Vec<DocumentEntry>,
-    query: String,
-}
-
-struct SearchFinished {
-    diagnostic: Context,
-    generation: u64,
-    results: Vec<SearchResult>,
-}
-
-fn collect_search_results(
-    filesystem: &dyn WorkspaceFilesystem,
-    root: Option<&Path>,
-    documents: &[DocumentEntry],
-    query: &str,
-    cancelled: impl Fn() -> bool,
-) -> Vec<SearchResult> {
-    let needle = query.trim().to_lowercase();
-    documents
-        .iter()
-        .take_while(|_| !cancelled())
-        .flat_map(|entry| {
-            let disk_content = if needle.is_empty() || entry.content.is_some() {
-                None
-            } else {
-                root.and_then(|root| filesystem.read_document_if_matching(root, &entry.id, &needle))
-            };
-            search_results_for(
-                entry,
-                &needle,
-                entry.content.as_deref().or(disk_content.as_deref()),
-            )
-        })
-        .collect()
-}
-
-fn search_worker(
-    jobs: Receiver<SearchJob>,
-    results: Sender<SearchFinished>,
-    filesystem: Arc<dyn WorkspaceFilesystem>,
-    generation: Arc<AtomicU64>,
-) {
-    while let Ok(mut job) = jobs.recv() {
-        let mut debounce_span = job.diagnostic.begin("search.debounce", "search-worker");
-        loop {
-            match jobs.recv_timeout(Duration::from_millis(150)) {
-                Ok(newer) => {
-                    job.diagnostic.end(
-                        "search.debounce",
-                        "search-worker",
-                        debounce_span,
-                        "cancelled",
-                        0,
-                        0,
-                    );
-                    job.diagnostic
-                        .event("search.superseded", "search-worker", 0, 0);
-                    job = newer;
-                    debounce_span = job.diagnostic.begin("search.debounce", "search-worker");
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    job.diagnostic.end(
-                        "search.debounce",
-                        "search-worker",
-                        debounce_span,
-                        "cancelled",
-                        0,
-                        0,
-                    );
-                    return;
-                }
-            }
-        }
-        if generation.load(Ordering::Relaxed) != job.generation {
-            job.diagnostic.end(
-                "search.debounce",
-                "search-worker",
-                debounce_span,
-                "cancelled",
-                0,
-                0,
-            );
-            job.diagnostic
-                .event("search.superseded", "search-worker", 0, 0);
-            continue;
-        }
-        job.diagnostic.end(
-            "search.debounce",
-            "search-worker",
-            debounce_span,
-            "ok",
-            0,
-            0,
-        );
-        let span = job.diagnostic.begin("search.execute", "search-worker");
-        let found = collect_search_results(
-            filesystem.as_ref(),
-            Some(&job.root),
-            &job.documents,
-            &job.query,
-            || generation.load(Ordering::Relaxed) != job.generation,
-        );
-        let current = generation.load(Ordering::Relaxed) == job.generation;
-        job.diagnostic.end(
-            "search.execute",
-            "search-worker",
-            span,
-            if current { "ok" } else { "cancelled" },
-            0,
-            found.len() as u64,
-        );
-        if !current {
-            job.diagnostic
-                .event("search.superseded", "search-worker", 0, 0);
-        }
-        if current {
-            job.diagnostic
-                .event("search.published", "search-worker", 0, found.len() as u64);
-        }
-        if current
-            && results
-                .send(SearchFinished {
-                    diagnostic: job.diagnostic,
-                    generation: job.generation,
-                    results: found,
-                })
-                .is_err()
-        {
-            return;
-        }
-    }
-}
-
 impl Application {
     pub fn new() -> Self {
         Self::with_filesystem(Box::new(RealFilesystem))
@@ -929,7 +787,7 @@ impl Application {
         let worker_filesystem = Arc::clone(&filesystem);
         let worker_generation = Arc::clone(&search_generation);
         thread::spawn(move || {
-            search_worker(jobs_rx, results_tx, worker_filesystem, worker_generation)
+            search::search_worker(jobs_rx, results_tx, worker_filesystem, worker_generation)
         });
         Self {
             diagnostics: Diagnostics::default(),
@@ -1042,20 +900,37 @@ impl Application {
         self.pending_move.is_some()
     }
 
-    fn search_results(&self, documents: &[DocumentEntry], query: &str) -> Vec<SearchResult> {
-        collect_search_results(
+    /// Searches on the calling thread; `SetSearchQuery` exists for tests.
+    fn search_now(&self, query: &str) -> (Vec<SearchResult>, bool) {
+        let needle = query.trim().to_lowercase();
+        if needle.is_empty() {
+            let results = self
+                .state
+                .documents
+                .iter()
+                .flat_map(|entry| search_results_for(entry, "", None))
+                .collect();
+            return (results, false);
+        }
+        let Some(workspace) = &self.state.workspace else {
+            return (Vec::new(), false);
+        };
+        let mut results = Vec::new();
+        let truncated = search::run_search(
             self.filesystem.as_ref(),
-            self.state
-                .workspace
-                .as_ref()
-                .map(|workspace| workspace.root.as_path()),
-            documents,
+            &workspace.root,
+            &self.state.documents,
             query,
-            || false,
-        )
+            &|| false,
+            |batch| results.extend(batch),
+        );
+        search::sort_by_document(&mut results);
+        (results, truncated)
     }
 
-    fn queue_current_search(&mut self) {
+    /// `stream` publishes matches as they are found; use it when the current
+    /// results were cleared. Otherwise they stay until the search finishes.
+    fn queue_current_search(&mut self, stream: bool) {
         if self.pending_move.is_some() {
             return;
         }
@@ -1073,6 +948,7 @@ impl Application {
                 root: workspace.root.clone(),
                 documents: self.state.documents.clone(),
                 query: self.state.search_query.0.clone(),
+                stream,
             });
         }
     }
@@ -1144,7 +1020,6 @@ impl Application {
         } else {
             None
         };
-        self.queue_current_search();
         for command in std::mem::take(&mut self.deferred_commands) {
             let command = if let Some((source, target)) = &rollback {
                 remap_command(command, source, target)
@@ -1173,7 +1048,7 @@ impl Application {
             self.snapshot_operation = if result.as_ref().is_ok_and(|events| {
                 events
                     .iter()
-                    .any(|event| matches!(event, AppEvent::SearchResultsUpdated(_)))
+                    .any(|event| matches!(event, AppEvent::SearchResultsUpdated { .. }))
             }) {
                 self.search_context.operation
             } else {
@@ -1183,7 +1058,7 @@ impl Application {
         if let Ok(events) = &result {
             let facts = if events
                 .iter()
-                .any(|event| matches!(event, AppEvent::SearchResultsUpdated(_)))
+                .any(|event| matches!(event, AppEvent::SearchResultsUpdated { .. }))
             {
                 &self.search_context
             } else {
@@ -1206,7 +1081,7 @@ impl Application {
                     AppEvent::WorkspaceRefreshed { documents, .. } => {
                         ("workspace.refreshed", documents.len() as u64)
                     }
-                    AppEvent::SearchResultsUpdated(results) => {
+                    AppEvent::SearchResultsUpdated { results, .. } => {
                         ("search.results_applied", results.len() as u64)
                     }
                     AppEvent::SearchQueryChanged { results, .. } => {
@@ -1284,21 +1159,11 @@ impl Application {
             .checked_add(1)
             .ok_or(AppError::RevisionOverflow)?;
         let mut events = self.resolve(command)?;
-        if !queued_query
-            && !synchronous_query
-            && !self.state.search_query.0.trim().is_empty()
-            && events.iter().any(|event| {
-                matches!(
-                    event,
-                    AppEvent::EntryRenamed { .. }
-                        | AppEvent::EntryMoved { .. }
-                        | AppEvent::WorkspaceRefreshed { .. }
-                        | AppEvent::DocumentLoaded { .. }
-                        | AppEvent::DocumentChanged { .. }
-                        | AppEvent::DocumentSaved { .. }
-                )
-            })
-        {
+        // Only a new query or an explicit refresh searches the workspace again;
+        // other changes update the existing matches (see `AppState::apply`).
+        // A refresh that changed nothing searches again without a new revision.
+        let research = explicit_refresh && !self.state.search_query.0.trim().is_empty();
+        if research && !events.is_empty() {
             events.push(AppEvent::SearchStarted);
         }
         if !events.is_empty() {
@@ -1309,28 +1174,15 @@ impl Application {
             if events
                 .iter()
                 .any(|event| matches!(event, AppEvent::WorkspaceOpened { .. }))
+                || synchronous_query
             {
                 self.search_generation.fetch_add(1, Ordering::Relaxed);
-            } else if queued_query
-                || (!synchronous_query
-                    && events.iter().any(|event| {
-                        matches!(
-                            event,
-                            AppEvent::EntryRenamed { .. }
-                                | AppEvent::EntryMoved { .. }
-                                | AppEvent::WorkspaceRefreshed { .. }
-                                | AppEvent::DocumentLoaded { .. }
-                                | AppEvent::DocumentChanged { .. }
-                                | AppEvent::DocumentSaved { .. }
-                        )
-                    }))
-            {
-                self.queue_current_search();
-            } else if synchronous_query {
-                self.search_generation.fetch_add(1, Ordering::Relaxed);
+            } else if queued_query {
+                self.queue_current_search(true);
             }
-        } else if explicit_refresh {
-            self.queue_current_search();
+        }
+        if research {
+            self.queue_current_search(false);
         }
         Ok(events)
     }
@@ -1412,10 +1264,11 @@ impl Application {
                 if self.state.search_query.0 == query {
                     Vec::new()
                 } else {
-                    let results = self.search_results(&self.state.documents, &query);
+                    let (results, truncated) = self.search_now(&query);
                     vec![AppEvent::SearchQueryChanged {
                         query: SearchQuery(query),
                         results,
+                        truncated,
                     }]
                 }
             }
@@ -1432,20 +1285,13 @@ impl Application {
                 }
             }
             AppCommand::PollSearchResults => {
-                let mut latest = None;
-                while let Ok(finished) = self.search_results_rx.try_recv() {
-                    if finished.generation == self.search_generation.load(Ordering::Relaxed) {
-                        finished.diagnostic.event(
-                            "search.delivered",
-                            "main",
-                            self.state.revision,
-                            finished.results.len() as u64,
-                        );
-                        self.search_context = finished.diagnostic;
-                        latest = Some(finished.results);
-                    } else {
-                        let span = finished.diagnostic.begin("search.delivery", "main");
-                        finished.diagnostic.end(
+                // Streamed batches are merged into one event per poll.
+                let current = self.search_generation.load(Ordering::Relaxed);
+                let mut merged: Option<(Vec<SearchResult>, bool, bool, bool)> = None;
+                while let Ok(batch) = self.search_results_rx.try_recv() {
+                    if batch.generation != current {
+                        let span = batch.diagnostic.begin("search.delivery", "main");
+                        batch.diagnostic.end(
                             "search.delivery",
                             "main",
                             span,
@@ -1453,16 +1299,41 @@ impl Application {
                             self.state.revision,
                             0,
                         );
-                        finished.diagnostic.event(
+                        batch.diagnostic.event(
                             "search.stale_generation",
                             "main",
                             self.state.revision,
-                            finished.generation,
+                            batch.generation,
                         );
+                        continue;
                     }
+                    batch.diagnostic.event(
+                        "search.delivered",
+                        "main",
+                        self.state.revision,
+                        batch.results.len() as u64,
+                    );
+                    self.search_context = batch.diagnostic;
+                    let (results, replace, finished, truncated) =
+                        merged.get_or_insert_with(|| (Vec::new(), false, false, false));
+                    if batch.replace {
+                        *results = batch.results;
+                        *replace = true;
+                    } else {
+                        results.extend(batch.results);
+                    }
+                    *finished |= batch.finished;
+                    *truncated |= batch.truncated;
                 }
-                latest
-                    .map(|results| vec![AppEvent::SearchResultsUpdated(results)])
+                merged
+                    .map(|(results, replace, finished, truncated)| {
+                        vec![AppEvent::SearchResultsUpdated {
+                            results,
+                            replace,
+                            finished,
+                            truncated,
+                        }]
+                    })
                     .unwrap_or_default()
             }
             AppCommand::OpenWorkspace(path) => {
@@ -1493,9 +1364,6 @@ impl Application {
                             if pending.revision != self.state.revision {
                                 self.last_reconcile = Instant::now() - Duration::from_secs(30);
                                 return Ok(Vec::new());
-                            }
-                            if result.as_ref().is_ok_and(Vec::is_empty) {
-                                self.queue_current_search();
                             }
                             return result;
                         }
@@ -1536,7 +1404,6 @@ impl Application {
                     let root = self.state.workspace.as_ref().unwrap().root.clone();
                     let documents = self.state.documents.clone();
                     let directories = self.state.directories.clone();
-                    let query = self.state.search_query.0.clone();
                     let filesystem = Arc::clone(&self.filesystem);
                     let (sender, result) = mpsc::channel();
                     self.pending_reconcile = Some(PendingReconcile {
@@ -1552,7 +1419,6 @@ impl Application {
                             &root,
                             &documents,
                             &directories,
-                            &query,
                         );
                         context.end(
                             "reconcile.background",
@@ -1580,7 +1446,6 @@ impl Application {
                     root,
                     &self.state.documents,
                     &self.state.directories,
-                    &self.state.search_query.0,
                 )?
             }
 
@@ -2040,7 +1905,8 @@ mod tests {
             assert!(Instant::now() < deadline, "queued search did not finish");
             std::thread::sleep(Duration::from_millis(10));
         };
-        assert_eq!(found.search_results.len(), 2);
+        assert_eq!(found.search_results.len(), 1, "content matches only");
+        assert_eq!(found.search_results[0].id, id("other.md"));
         let refined = app
             .dispatch(AppCommand::QueueSearchQuery("alpha b".into()))
             .unwrap();
@@ -2132,9 +1998,11 @@ mod tests {
     }
 
     #[test]
-    fn filename_search_filters_in_core_and_keeps_open_document() {
+    fn text_search_lists_content_matches_only_and_keeps_open_document() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("Alpha.md"), "one").unwrap();
+        // A file name match alone is not a text match.
+        fs::write(dir.path().join("Alpha.md"), "one alpha").unwrap();
+        fs::write(dir.path().join("alpine.md"), "two").unwrap();
         fs::write(dir.path().join("beta.txt"), "two").unwrap();
         let mut app = Application::new();
         app.dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
@@ -2146,11 +2014,12 @@ mod tests {
             .unwrap();
         assert!(matches!(
             outcome.events.as_slice(),
-            [AppEvent::SearchQueryChanged { query, results }]
+            [AppEvent::SearchQueryChanged { query, results, .. }]
                 if query.0 == "  ALP  " && results.len() == 1
         ));
         assert_eq!(outcome.snapshot.search_results.len(), 1);
         assert_eq!(outcome.snapshot.search_results[0].id, id("Alpha.md"));
+        assert!(outcome.snapshot.search_results[0].location.is_some());
         assert_eq!(outcome.snapshot.active_document.unwrap().id, id("beta.txt"));
         let revision = outcome.snapshot.revision;
         let unchanged = app
@@ -2160,7 +2029,7 @@ mod tests {
         let cleared = app
             .dispatch(AppCommand::SetSearchQuery(String::new()))
             .unwrap();
-        assert_eq!(cleared.search_results.len(), 2);
+        assert_eq!(cleared.search_results.len(), 3);
     }
 
     #[test]
@@ -2275,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    fn filename_hit_and_content_occurrences_remain_individually_selectable() {
+    fn content_occurrences_remain_individually_selectable() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("note.md"), "note note").unwrap();
         let mut app = Application::new();
@@ -2284,10 +2153,9 @@ mod tests {
         let found = app
             .dispatch(AppCommand::SetSearchQuery("note".into()))
             .unwrap();
-        assert_eq!(found.search_results.len(), 3);
-        assert!(found.search_results[0].location.is_none());
+        assert_eq!(found.search_results.len(), 2);
         assert_eq!(
-            found.search_results[1]
+            found.search_results[0]
                 .location
                 .as_ref()
                 .unwrap()
@@ -2295,7 +2163,7 @@ mod tests {
             0
         );
         assert_eq!(
-            found.search_results[2]
+            found.search_results[1]
                 .location
                 .as_ref()
                 .unwrap()

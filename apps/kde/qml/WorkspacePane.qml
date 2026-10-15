@@ -1184,6 +1184,17 @@ Item {
                                         Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
                                     }
                                 }
+                                Label {
+                                    objectName: "searchTruncated"
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                                    Layout.rightMargin: Kirigami.Units.smallSpacing
+                                    visible: root.sidebarTab === 1 && root.controller.search_truncated
+                                    text: "Showing the first 20,000 matches. Refine the search to see the rest."
+                                    wrapMode: Text.Wrap
+                                    font: Kirigami.Theme.smallFont
+                                    opacity: 0.7
+                                }
                             }
                             Item {
                                 anchors.top: sidebarHeader.bottom

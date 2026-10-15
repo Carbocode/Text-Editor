@@ -28,8 +28,12 @@ struct BridgeSmoke {
         precondition(listed.documents.count == 1 && listed.documents[0].id == "README.md")
         precondition(listed.recentWorkspaces.count == 1)
         precondition(URL(fileURLWithPath: listed.recentWorkspaces[0].root).lastPathComponent == directory.lastPathComponent)
-        let matching = try search("read")
+        // Text search lists content matches; a file name match alone is not one.
+        let matching = try search("BEF")
         precondition(matching.searchResults.count == 1 && matching.searchResults[0].id == "README.md")
+        precondition(matching.searchResults[0].location?.column == 1)
+        let nameOnly = try search("read")
+        precondition(nameOnly.searchResults.isEmpty)
         let missing = try search("missing")
         precondition(missing.searchResults.isEmpty)
         _ = try app.setSearchQuery(query: "")

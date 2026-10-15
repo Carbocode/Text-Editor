@@ -26,6 +26,7 @@ pub mod qobject {
         #[qproperty(QString, workspace_root)]
         #[qproperty(QString, search_query)]
         #[qproperty(bool, search_in_progress)]
+        #[qproperty(bool, search_truncated)]
         #[qproperty(QStringList, search_result_ids)]
         #[qproperty(QStringList, search_result_snippets)]
         #[qproperty(QStringList, search_result_lines)]
@@ -124,6 +125,7 @@ pub struct AppControllerRust {
     workspace_root: QString,
     search_query: QString,
     search_in_progress: bool,
+    search_truncated: bool,
     search_result_ids: QStringList,
     search_result_snippets: QStringList,
     search_result_lines: QStringList,
@@ -325,6 +327,8 @@ impl qobject::AppController {
             .set_search_query(QString::from(snapshot.search_query.0));
         self.as_mut()
             .set_search_in_progress(snapshot.search_in_progress);
+        self.as_mut()
+            .set_search_truncated(snapshot.search_truncated);
         if search_changed {
             // An empty query lists every document without a match to show.
             let results: &[SearchResult] = if query_empty {

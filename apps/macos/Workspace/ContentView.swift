@@ -261,7 +261,6 @@ struct ContentView: View {
             .background(nativeDragSource(path, directory: true))
             .overlay(nativeDropTarget(path))
             .overlay { SidebarDropOutline(drag: sidebarDrag, directory: path, selected: selectedDirectory == path) }
-            .listRowBackground(Color.clear)
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(path); return .handled }
             .contextMenu {
                 Button("Rename") { beginRename(path) }
@@ -306,7 +305,6 @@ struct ContentView: View {
                     SidebarRowHighlight()
                 }
             }
-            .listRowBackground(Color.clear)
         case .match(let match):
             Button {
                 selectedDirectory = nil
@@ -329,7 +327,6 @@ struct ContentView: View {
                     SidebarRowHighlight()
                 }
             }
-            .listRowBackground(Color.clear)
         }
     }
 
@@ -528,6 +525,12 @@ struct ContentView: View {
                 }
                 .padding(10)
                 .glassEffect(.regular, in: Capsule())
+                if store.searchTruncated {
+                    Text("Showing the first 20,000 matches. Refine the search to see the rest.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(.horizontal, 10)
@@ -539,19 +542,26 @@ struct ContentView: View {
         if store.workspaceName != nil {
         NavigationSplitView {
             VStack(spacing: 0) {
-                List {
-                    ForEach(sidebarRows) { row in
-                        sidebarRow(row)
+                // A SwiftUI List diffs its rows in superlinear time: replacing a
+                // few thousand rows (filtering, clearing a filter, streamed search
+                // results) froze the window for seconds. A lazy stack diffs by ID
+                // in linear time and creates only the visible rows.
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(sidebarRows) { row in
+                            sidebarRow(row)
+                                .padding(.vertical, 3)
+                                .frame(minHeight: 24)
+                                .padding(.horizontal, 10)
+                        }
+                        if sidebarTab == 0 {
+                            // Keep scrollable space after the files, below the floating controls.
+                            Color.clear.frame(height: sidebarBottomBarHeight + sidebarRootDropHeight + 8)
+                                .allowsHitTesting(false)
+                                .accessibilityHidden(true)
+                        }
                     }
-                    if sidebarTab == 0 {
-                        // Keep scrollable space after the files, below the floating controls.
-                        Color.clear.frame(height: sidebarBottomBarHeight + sidebarRootDropHeight + 8)
-                            .listRowInsets(EdgeInsets())
-                            .listRowSeparator(.hidden)
-                            .listRowBackground(Color.clear)
-                            .allowsHitTesting(false)
-                            .accessibilityHidden(true)
-                    }
+                    .padding(.vertical, 6)
                 }
                 .safeAreaBar(edge: .top, spacing: 0) { sidebarHeader }
                 .scrollEdgeEffectStyle(.soft, for: .top)
@@ -699,7 +709,8 @@ struct ContentView: View {
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
             store.pollWorkspaceChanges()
         }
-        .onReceive(Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()) { _ in
+        // Matches stream in while a search runs; the poll is a no-op otherwise.
+        .onReceive(Timer.publish(every: 0.1, on: .main, in: .common).autoconnect()) { _ in
             store.pollSearchResults()
         }
         .frame(minWidth: 680, minHeight: 420)
