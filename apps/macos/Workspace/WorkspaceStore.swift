@@ -47,6 +47,7 @@ final class WorkspaceStore: ObservableObject {
         }
     }
     @Published private(set) var pendingRelocation: Relocation?
+    @Published private(set) var deletionPending = false
     private(set) var backendBusy = false
     private let core: WorkspaceApplication
     let diagnosticsEnabled: Bool
@@ -170,7 +171,11 @@ final class WorkspaceStore: ObservableObject {
                 }
                 if let outcome = try operation(core) { snapshot = outcome }
             } catch {
-                failure = error.localizedDescription
+                if let workspaceError = error as? WorkspaceError, case .DeleteUnsavedChanges = workspaceError {
+                    failure = "Save all modified documents in this file or folder before deleting it."
+                } else {
+                    failure = error.localizedDescription
+                }
                 snapshot = try? core.snapshot()
             }
             let finishedSnapshot = snapshot
@@ -188,6 +193,7 @@ final class WorkspaceStore: ObservableObject {
                 if let failure = finishedFailure { self.errorMessage = failure }
                 else if clearError && finishedSnapshot != nil { self.errorMessage = nil }
                 self.backendBusy = false
+                self.deletionPending = false
                 if preserveEdits, let active = self.activeDocument, self.editorText != active.content {
                     self.performInBackground(clearError: false) { _ in nil }
                 }
@@ -326,6 +332,18 @@ final class WorkspaceStore: ObservableObject {
         return true
     }
 
+    func deleteEntry(_ path: String) {
+        let requestedRoot = workspaceRoot
+        let action: () -> Void = { [weak self] in
+            guard let self, self.workspaceRoot == requestedRoot else { return }
+            self.relocationFailure = nil
+            self.errorMessage = nil
+            self.deletionPending = true
+            self.performInBackground { try $0.deleteEntry(path: path) }
+        }
+        if !deferUntilReady(action) { action() }
+    }
+
     func createEntry(_ path: String, directory: Bool) {
         if deferUntilReady({ [weak self] in self?.createEntry(path, directory: directory) }) { return }
         do {
@@ -398,6 +416,7 @@ final class WorkspaceStore: ObservableObject {
     }
 
     func changeDocument(_ content: String) {
+        guard !deletionPending else { return }
         guard let id = activeDocument?.id, content != editorText else { return }
         editorContentRevision &+= 1
         editorText = content

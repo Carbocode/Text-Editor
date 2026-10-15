@@ -9,6 +9,7 @@ import org.nativeworkspace.Editor 1.0
 
 Item {
     id: root
+    enabled: !controller || !controller.deletion_pending
     SystemPalette { id: systemColors; colorGroup: SystemPalette.Active }
     // Keep selection accented when focus moves to the editor or another window.
     // The host's accent may differ from Breeze's default selection blue.
@@ -507,6 +508,45 @@ Item {
                 root.collapsedDirectories[root.draggingPath] === false)
             icon.color: "transparent"
         }
+    }
+
+    Kirigami.Dialog {
+        id: deleteEntryDialog
+        objectName: "deleteEntryDialog"
+        property string path: ""
+        property string workspaceRoot: ""
+        modal: true
+        title: "Delete “" + path + "”?"
+        preferredWidth: Kirigami.Units.gridUnit * 26
+        standardButtons: Kirigami.Dialog.NoButton
+        Label {
+            text: "This permanently deletes the entry and all its contents. Modified documents must be saved first. This cannot be undone."
+            wrapMode: Text.WordWrap
+        }
+        customFooterActions: [
+            Kirigami.Action {
+                text: "Cancel"
+                onTriggered: deleteEntryDialog.close()
+            },
+            Kirigami.Action {
+                text: "Delete Permanently"
+                icon.name: "edit-delete"
+                onTriggered: {
+                    deleteEntryDialog.close()
+                    if (deleteEntryDialog.workspaceRoot === root.controller.workspace_root && root.flushEditor())
+                        root.controller.delete_entry(deleteEntryDialog.path)
+                }
+            }
+        ]
+    }
+
+    function requestDelete(path) {
+        if (root.controller.move_pending) return
+        fileTree.closeEditor()
+        renamePath = ""
+        deleteEntryDialog.workspaceRoot = root.controller.workspace_root
+        deleteEntryDialog.path = path
+        deleteEntryDialog.open()
     }
 
     Kirigami.Dialog {
@@ -1320,6 +1360,10 @@ Item {
                                             text: "Rename…"
                                             onTriggered: root.beginRename(entryMenu.path)
                                         }
+                                        MenuItem {
+                                            text: "Delete…"
+                                            onTriggered: root.requestDelete(entryMenu.path)
+                                        }
                                     }
                                     DragHandler {
                                         id: rowDrag
@@ -1458,6 +1502,10 @@ Item {
                                                 text: "Rename…"
                                                 icon.name: "edit-rename"
                                                 onTriggered: root.beginRename(fileGroup.fileId)
+                                            }
+                                            MenuItem {
+                                                text: "Delete…"
+                                                onTriggered: root.requestDelete(fileGroup.fileId)
                                             }
                                         }
                                         TextField {
@@ -1615,7 +1663,7 @@ Item {
                                         textDocument: editor.textDocument
                                         colors: root.syntaxColors
                                     }
-                                    enabled: root.controller.active_document_id.length > 0
+                                    enabled: root.controller.active_document_id.length > 0 && !root.controller.deletion_pending
                                     onCursorRectangleChanged: lineNumbers.requestPaint()
                                     onActiveLineColorChanged: lineNumbers.requestPaint()
                                     onEnabledChanged: lineNumbers.requestPaint()
@@ -1761,11 +1809,11 @@ Item {
             spacing: Kirigami.Units.largeSpacing
             BusyIndicator {
                 objectName: "pendingMoveIndicator"
-                visible: root.controller.pending_move_target.length > 0
+                visible: root.controller.deletion_pending || root.controller.pending_move_target.length > 0
                 running: visible
                 Layout.preferredWidth: Kirigami.Units.iconSizes.small
                 Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                Accessible.name: "Moving… Waiting for confirmation"
+                Accessible.name: root.controller.deletion_pending ? "Deleting…" : "Moving… Waiting for confirmation"
             }
             Label {
                 text: root.controller.active_document_id || "No document"
@@ -1773,7 +1821,7 @@ Item {
                 Layout.fillWidth: true
             }
             Label {
-                text: root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved")
+                text: root.controller.deletion_pending ? "Deleting…" : (root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved"))
             }
         }
     }

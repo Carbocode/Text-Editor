@@ -293,8 +293,34 @@ impl Ui {
         }
     }
 
-    /// Confirms a sidebar move as soon as its worker finishes, instead of on
-    /// the next slow poll, so a completed move never looks like it is loading.
+    fn confirm_delete(&self, path: String) {
+        if self.core.borrow().has_pending_move() {
+            return;
+        }
+        let dialog = adw::AlertDialog::builder()
+            .heading(format!("Delete “{path}”?"))
+            .body("This permanently deletes the entry and all its contents. Modified documents must be saved first. This cannot be undone.")
+            .build();
+        dialog.add_responses(&[("cancel", "Cancel"), ("delete", "Delete Permanently")]);
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let requested_root = self.snapshot.borrow().workspace_root.clone();
+        let ui = self.clone();
+        dialog.connect_response(Some("delete"), move |_, _| {
+            if ui.snapshot.borrow().workspace_root != requested_root {
+                return;
+            }
+            if let Ok(id) = DocumentId::parse(path.clone()) {
+                ui.dispatch(AppCommand::DeleteEntry(id));
+                ui.sync_pending_move();
+                ui.watch_pending_move();
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    /// Collect move and deletion completions promptly without joining the worker.
     fn watch_pending_move(&self) {
         let ui = self.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
@@ -308,6 +334,12 @@ impl Ui {
     }
 
     fn sync_pending_move(&self) {
+        self.window
+            .set_sensitive(!self.core.borrow().deletion_pending());
+        self.editor.set_editable(
+            self.snapshot.borrow().active_document.is_some()
+                && !self.core.borrow().deletion_pending(),
+        );
         let target = self
             .core
             .borrow()
@@ -426,14 +458,18 @@ impl Ui {
         );
         self.counter
             .set_label(&format!("Counter: {}", snapshot.diagnostic_counter));
-        self.editor.set_editable(snapshot.active_document.is_some());
+        self.editor.set_editable(
+            snapshot.active_document.is_some() && !self.core.borrow().deletion_pending(),
+        );
         self.status
             .set_label(match snapshot.active_document.as_ref() {
                 Some(doc) if doc.dirty => "Modified",
                 Some(_) => "Saved",
                 None => "Select a document",
             });
-        if let Some(error) = self.background_move_error.borrow().as_deref() {
+        if self.core.borrow().deletion_pending() {
+            self.status.set_label("Deleting…");
+        } else if let Some(error) = self.background_move_error.borrow().as_deref() {
             self.status.set_label(error);
         }
         if recent_changed {
@@ -1721,6 +1757,7 @@ fn build_window(app: &adw::Application) {
     }
     for sidebar in &ui.sidebars {
         let rename_ui = ui.clone();
+        let delete_ui = ui.clone();
         let move_ui = ui.clone();
         let trace_ui = ui.clone();
         let validate_ui = ui.clone();
@@ -1738,6 +1775,7 @@ fn build_window(app: &adw::Application) {
                     trace_ui.drop_trace.replace(Some(trace.clone()));
                     trace
                 }),
+                delete: Rc::new(move |path| delete_ui.confirm_delete(path)),
                 rename: Rc::new(move |path, name| {
                     let Ok(id) = DocumentId::parse(path) else {
                         return false;

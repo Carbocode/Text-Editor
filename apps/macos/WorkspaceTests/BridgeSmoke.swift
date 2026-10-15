@@ -99,6 +99,20 @@ struct BridgeSmoke {
         _ = try app.saveDocument(id: "todo.md")
         let movedContent = try String(contentsOf: directory.appendingPathComponent("todo.md"), encoding: .utf8)
         precondition(movedContent == "unsaved move")
+        _ = try app.createEntry(path: "delete-test", directory: true)
+        _ = try app.createEntry(path: "delete-test/note", directory: false)
+        _ = try app.openDocument(id: "delete-test/note")
+        _ = try app.changeDocument(id: "delete-test/note", content: "keep unsaved")
+        var deletionBlocked = false
+        do { _ = try app.deleteEntry(path: "delete-test") }
+        catch { deletionBlocked = true }
+        precondition(deletionBlocked)
+        precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("delete-test/note").path))
+        _ = try app.saveDocument(id: "delete-test/note")
+        let deleted = try app.deleteEntry(path: "delete-test")
+        precondition(deleted.activeDocument == nil)
+        precondition(!deleted.directories.contains("delete-test"))
+        precondition(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("delete-test").path))
         print("Swift → UniFFI → Rust workspace smoke test passed")
     }
 }

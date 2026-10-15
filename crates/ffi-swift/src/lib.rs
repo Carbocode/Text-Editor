@@ -164,6 +164,10 @@ pub enum WorkspaceError {
     DocumentNotOpen(String),
     #[error("save modified documents before changing workspaces")]
     UnsavedChanges,
+    #[error("save all modified documents in this file or folder before deleting it")]
+    DeleteUnsavedChanges,
+    #[error("a file operation is in progress; wait for it to finish")]
+    DeleteInProgress,
     #[error("document changed on disk: {0}")]
     ExternalChanges(String),
     #[error("invalid document name")]
@@ -191,6 +195,8 @@ impl From<AppError> for WorkspaceError {
             AppError::DocumentNotFound(id) => Self::DocumentNotFound(id),
             AppError::DocumentNotOpen(id) => Self::DocumentNotOpen(id),
             AppError::UnsavedChanges => Self::UnsavedChanges,
+            AppError::DeleteUnsavedChanges => Self::DeleteUnsavedChanges,
+            AppError::DeleteInProgress => Self::DeleteInProgress,
             AppError::ExternalChanges(id) => Self::ExternalChanges(id),
             AppError::Filesystem(error) => Self::Filesystem(error.to_string()),
             AppError::Storage(error) => Self::Storage(error.to_string()),
@@ -364,6 +370,10 @@ impl WorkspaceApplication {
             id: Self::parse_id(path)?,
             new_name,
         })
+    }
+
+    pub fn delete_entry(&self, path: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::DeleteEntry(Self::parse_id(path)?))
     }
 
     pub fn create_entry(

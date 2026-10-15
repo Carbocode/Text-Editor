@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct NoWrapTextEditor: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
     let documentID: String
     var documentIdentity: UInt64? = nil
     let textRevision: UInt64
@@ -19,6 +20,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
         context.coordinator.container = container
         (scrollView.documentView as? NSTextView)?.delegate = context.coordinator
         if let textView = scrollView.documentView as? NSTextView {
+            textView.isEditable = isEnabled
             SyntaxHighlighting.apply(to: textView, fileName: documentID)
         }
         container.refreshContent()
@@ -53,6 +55,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
     func updateNSView(_ container: EditorContainer, context: Context) {
         let scrollView = container.scrollView
         guard let textView = scrollView.documentView as? NSTextView else { return }
+        textView.isEditable = isEnabled
         context.coordinator.parent = self
         let pathChanged = context.coordinator.documentID != documentID
         let switchedDocument = context.coordinator.documentIdentity != documentIdentity

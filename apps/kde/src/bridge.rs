@@ -49,6 +49,7 @@ pub mod qobject {
         #[qproperty(bool, active_document_external_change)]
         #[qproperty(QString, pending_move_target)]
         #[qproperty(bool, move_pending)]
+        #[qproperty(bool, deletion_pending)]
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
 
@@ -92,6 +93,8 @@ pub mod qobject {
         fn move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString, text: &QString);
         #[qinvokable]
         fn rename_entry(self: Pin<&mut Self>, path: &QString, new_name: &QString);
+        #[qinvokable]
+        fn delete_entry(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
         fn create_entry(self: Pin<&mut Self>, path: &QString, directory: bool);
         #[qinvokable]
@@ -148,6 +151,7 @@ pub struct AppControllerRust {
     active_document_external_change: bool,
     pending_move_target: QString,
     move_pending: bool,
+    deletion_pending: bool,
     error_message: QString,
     devtools_available: bool,
     application: Application,
@@ -279,6 +283,8 @@ impl qobject::AppController {
         self.as_mut().set_pending_move_target(target);
         let pending = self.rust().application.has_pending_move();
         self.as_mut().set_move_pending(pending);
+        let deleting = self.rust().application.deletion_pending();
+        self.as_mut().set_deletion_pending(deleting);
     }
 
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
@@ -675,6 +681,13 @@ impl qobject::AppController {
                 id,
                 new_name: new_name.to_string(),
             }),
+            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
+        }
+    }
+
+    pub fn delete_entry(mut self: Pin<&mut Self>, path: &QString) {
+        match DocumentId::parse(path.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::DeleteEntry(id)),
             Err(_) => self.set_error_message(QString::from("Invalid relative path")),
         }
     }

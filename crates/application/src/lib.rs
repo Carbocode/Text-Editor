@@ -15,6 +15,8 @@ mod icons;
 pub use diagnostics::DiagnosticObserver;
 use diagnostics::{Context, Diagnostics};
 #[cfg(test)]
+mod delete_tests;
+#[cfg(test)]
 mod optimistic_move_tests;
 #[cfg(test)]
 mod search_tests;
@@ -63,6 +65,7 @@ pub enum AppCommand {
         id: DocumentId,
         directory: String,
     },
+    DeleteEntry(DocumentId),
     RefreshWorkspace,
     PollWorkspaceChanges,
     OpenDocument(DocumentId),
@@ -88,6 +91,7 @@ impl AppCommand {
             Self::RenameEntry { .. } => "command.entry_rename",
             Self::MoveEntry { .. } => "command.entry_move",
             Self::MoveEntryOptimistic { .. } => "command.entry_move_optimistic",
+            Self::DeleteEntry(_) => "command.entry_delete",
             Self::RefreshWorkspace => "command.workspace_refresh",
             Self::PollWorkspaceChanges => "command.workspace_poll",
             Self::OpenDocument(_) => "command.document_open",
@@ -103,6 +107,9 @@ impl AppCommand {
 /// A fact produced by a successful command. Events are transient, not a persisted log.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
+    EntryDeleted {
+        id: DocumentId,
+    },
     EntryRenamed {
         id: DocumentId,
         target: DocumentId,
@@ -259,6 +266,10 @@ pub enum AppError {
     DocumentNotOpen(String),
     #[error("save modified documents before changing workspaces or closing them")]
     UnsavedChanges,
+    #[error("save all modified documents in this file or folder before deleting it")]
+    DeleteUnsavedChanges,
+    #[error("a file operation is in progress; wait for it to finish")]
+    DeleteInProgress,
     #[error("document changed on disk; reload it or explicitly overwrite the disk version: {0}")]
     ExternalChanges(String),
     #[error("diagnostic counter overflow")]
@@ -401,6 +412,20 @@ impl AppState {
             }
         }
         match event {
+            AppEvent::EntryDeleted { id } => {
+                self.documents
+                    .retain(|entry| !entry_is_within(entry.id.as_str(), id));
+                self.directories.retain(|path| !entry_is_within(path, id));
+                self.search_results
+                    .retain(|result| !entry_is_within(result.id.as_str(), id));
+                if self
+                    .active_document
+                    .as_ref()
+                    .is_some_and(|active| entry_is_within(active.as_str(), id))
+                {
+                    self.active_document = None;
+                }
+            }
             AppEvent::EntryRenamed { id, target } | AppEvent::EntryMoved { id, target } => {
                 let affected = |path: &str| {
                     path == id.as_str()
@@ -741,10 +766,18 @@ fn move_target(id: &DocumentId, directory: &str) -> Result<DocumentId, AppError>
     Ok(DocumentId::parse(format!("{}/{name}", parent.as_str())).unwrap())
 }
 
+fn entry_is_within(path: &str, id: &DocumentId) -> bool {
+    path == id.as_str()
+        || path
+            .strip_prefix(id.as_str())
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) -> AppCommand {
     let map =
         |id: DocumentId| DocumentId::parse(renamed_path(id.as_str(), source, target)).unwrap();
     match command {
+        AppCommand::DeleteEntry(id) => AppCommand::DeleteEntry(map(id)),
         AppCommand::OpenDocument(id) => AppCommand::OpenDocument(map(id)),
         AppCommand::CloseDocument(id) => AppCommand::CloseDocument(map(id)),
         AppCommand::SaveDocument(id) => AppCommand::SaveDocument(map(id)),
@@ -1091,6 +1124,7 @@ impl Application {
                     AppEvent::SearchStarted => ("search.started", 0),
                     AppEvent::EntryRenamed { .. } => ("filesystem.entry_renamed", 0),
                     AppEvent::EntryMoved { .. } => ("filesystem.entry_moved", 0),
+                    AppEvent::EntryDeleted { .. } => ("filesystem.entry_deleted", 0),
                     AppEvent::DiagnosticIncremented => ("diagnostic.incremented", 0),
                 };
                 facts.event(name, "main", self.state.revision, value);
@@ -1152,7 +1186,10 @@ impl Application {
         }
         let queued_query = matches!(command, AppCommand::QueueSearchQuery(_));
         let synchronous_query = matches!(command, AppCommand::SetSearchQuery(_));
-        let explicit_refresh = matches!(command, AppCommand::RefreshWorkspace);
+        let explicit_refresh = matches!(
+            command,
+            AppCommand::RefreshWorkspace | AppCommand::DeleteEntry(_)
+        );
         let next_revision = self
             .state
             .revision
@@ -1510,6 +1547,33 @@ impl Application {
                 } else {
                     Vec::new()
                 }
+            }
+            AppCommand::DeleteEntry(id) => {
+                let workspace = self
+                    .state
+                    .workspace
+                    .as_ref()
+                    .ok_or(AppError::WorkspaceNotOpen)?;
+                if !self.state.documents.iter().any(|entry| entry.id == id)
+                    && !self
+                        .state
+                        .directories
+                        .iter()
+                        .any(|path| path == id.as_str())
+                {
+                    return Err(AppError::DocumentNotFound(id.as_str().to_owned()));
+                }
+                if self
+                    .state
+                    .documents
+                    .iter()
+                    .any(|entry| entry_is_within(entry.id.as_str(), &id) && entry.dirty())
+                {
+                    return Err(AppError::DeleteUnsavedChanges);
+                }
+                self.filesystem.delete_entry(&workspace.root, &id)?;
+                self.pending_reconcile = None;
+                vec![AppEvent::EntryDeleted { id }]
             }
             AppCommand::CreateEntry { id, directory } => {
                 let workspace = self

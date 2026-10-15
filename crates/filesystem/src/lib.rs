@@ -117,6 +117,24 @@ pub trait WorkspaceFilesystem: Send + Sync {
         })
     }
 
+    /// Remove only entries inside the workspace; symlinked ancestors are rejected.
+    /// Recursive removal unlinks child symlinks without following their targets.
+    fn delete_entry(&self, root: &Path, id: &DocumentId) -> Result<(), FilesystemError> {
+        let path = RealFilesystem::safe_document_location(root, id)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|source| FilesystemError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let result = if metadata.is_dir() {
+            fs::remove_dir_all(&path)
+        } else if metadata.is_file() {
+            fs::remove_file(&path)
+        } else {
+            return Err(FilesystemError::InvalidDocument(path));
+        };
+        result.map_err(|source| FilesystemError::Io { path, source })
+    }
+
     fn create_entry(
         &self,
         root: &Path,
@@ -364,6 +382,38 @@ impl WorkspaceFilesystem for RealFilesystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn deleting_folders_unlinks_child_symlinks_and_rejects_symlinked_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "keep").unwrap();
+        fs::create_dir_all(dir.path().join("folder/nested/empty")).unwrap();
+        fs::write(dir.path().join("folder/nested/file"), "remove").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("folder/link")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("alias")).unwrap();
+        for path in ["alias", "alias/secret"] {
+            assert!(
+                RealFilesystem
+                    .delete_entry(dir.path(), &DocumentId::parse(path).unwrap())
+                    .is_err()
+            );
+        }
+        RealFilesystem
+            .delete_entry(dir.path(), &DocumentId::parse("folder").unwrap())
+            .unwrap();
+        assert!(!dir.path().join("folder").exists());
+        assert_eq!(
+            fs::read_to_string(outside.path().join("secret")).unwrap(),
+            "keep"
+        );
+        assert!(
+            RealFilesystem
+                .delete_entry(dir.path(), &DocumentId::parse("missing").unwrap())
+                .is_err()
+        );
+    }
 
     #[test]
     fn rename_never_replaces_existing_files_or_folders() {
