@@ -1,8 +1,8 @@
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::{QString, QStringList, QUrl};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, DocumentSummary, NativeApplication as Application, SearchResult,
-    file_icon_name, folder_icon_name,
+    AppCommand, AppSnapshot, DocumentSummary, NativeApplication as Application, PathFilter,
+    PathFilterResult, SearchResult, file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{path::PathBuf, pin::Pin, sync::Arc};
@@ -32,6 +32,10 @@ pub mod qobject {
         #[qproperty(QStringList, search_result_columns)]
         #[qproperty(QStringList, search_result_starts)]
         #[qproperty(QStringList, search_result_ends)]
+        #[qproperty(QString, file_filter_query)]
+        #[qproperty(QStringList, file_filter_files)]
+        #[qproperty(QStringList, file_filter_directories)]
+        #[qproperty(bool, file_filter_in_progress)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, directory_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
@@ -65,6 +69,14 @@ pub mod qobject {
         fn initialize_persistence(self: Pin<&mut Self>);
         #[qinvokable]
         fn search_files(self: Pin<&mut Self>, query: &QString);
+        #[qinvokable]
+        fn search_files_now(self: Pin<&mut Self>, query: &QString);
+        #[qinvokable]
+        fn filter_files(self: Pin<&mut Self>, query: &QString);
+        #[qinvokable]
+        fn filter_files_now(self: Pin<&mut Self>, query: &QString);
+        #[qinvokable]
+        fn poll_file_filter(self: Pin<&mut Self>);
         #[qinvokable]
         fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString;
         #[qinvokable]
@@ -118,6 +130,10 @@ pub struct AppControllerRust {
     search_result_columns: QStringList,
     search_result_starts: QStringList,
     search_result_ends: QStringList,
+    file_filter_query: QString,
+    file_filter_files: QStringList,
+    file_filter_directories: QStringList,
+    file_filter_in_progress: bool,
     document_ids: QStringList,
     directory_ids: QStringList,
     dirty_document_ids: QStringList,
@@ -136,6 +152,9 @@ pub struct AppControllerRust {
     background_move_error: Option<String>,
     drop_trace: Option<native_workspace_application::SidebarDropTrace>,
     published: Option<PublishedLists>,
+    path_filter: PathFilter,
+    /// The latest name filter typed, refiltered when the paths change.
+    file_filter_input: String,
 }
 
 /// The shared lists behind the last published properties.
@@ -144,6 +163,19 @@ struct PublishedLists {
     query_empty: bool,
     documents: Arc<Vec<DocumentSummary>>,
     directories: Arc<Vec<String>>,
+}
+
+impl AppControllerRust {
+    /// The paths the sidebar currently shows, shared rather than copied.
+    fn published_paths(&self) -> (Arc<Vec<DocumentSummary>>, Arc<Vec<String>>) {
+        match &self.published {
+            Some(lists) => (lists.documents.clone(), lists.directories.clone()),
+            None => {
+                let snapshot = self.application.snapshot();
+                (snapshot.documents, snapshot.directories)
+            }
+        }
+    }
 }
 
 impl qobject::AppController {
@@ -269,6 +301,18 @@ impl qobject::AppController {
             ),
             None => (true, true, true),
         };
+        if (documents_changed || directories_changed)
+            && !self.rust().file_filter_input.trim().is_empty()
+        {
+            let query = self.rust().file_filter_input.clone();
+            let (documents, directories) =
+                (snapshot.documents.clone(), snapshot.directories.clone());
+            self.as_mut()
+                .rust_mut()
+                .path_filter
+                .queue(&query, documents, directories);
+            self.as_mut().set_file_filter_in_progress(true);
+        }
         self.as_mut().rust_mut().published = Some(PublishedLists {
             search_results: snapshot.search_results.clone(),
             query_empty,
@@ -443,8 +487,72 @@ impl qobject::AppController {
         self.dispatch(AppCommand::IncrementDiagnostic);
     }
 
+    /// Typing only records the query; the core's worker debounces and searches.
     pub fn search_files(self: Pin<&mut Self>, query: &QString) {
         self.dispatch(AppCommand::QueueSearchQuery(query.to_string()));
+    }
+
+    /// Searches on the calling thread. For smoke tests only.
+    pub fn search_files_now(self: Pin<&mut Self>, query: &QString) {
+        self.dispatch(AppCommand::SetSearchQuery(query.to_string()));
+    }
+
+    /// Typing only records the query; `poll_file_filter` publishes the
+    /// matches once the worker has debounced and listed them.
+    pub fn filter_files(mut self: Pin<&mut Self>, query: &QString) {
+        let query = query.to_string();
+        let (documents, directories) = self.rust().published_paths();
+        self.as_mut().rust_mut().file_filter_input = query.clone();
+        let ready = self
+            .as_mut()
+            .rust_mut()
+            .path_filter
+            .queue(&query, documents, directories);
+        if let Some(result) = ready {
+            self.as_mut().publish_file_filter(result);
+        }
+        let pending = self.rust().path_filter.in_progress();
+        self.set_file_filter_in_progress(pending);
+    }
+
+    /// Filters on the calling thread. For smoke tests only.
+    pub fn filter_files_now(mut self: Pin<&mut Self>, query: &QString) {
+        let query = query.to_string();
+        let (documents, directories) = self.rust().published_paths();
+        self.as_mut().rust_mut().file_filter_input = query.clone();
+        let result =
+            self.as_mut()
+                .rust_mut()
+                .path_filter
+                .filter_now(&query, documents, directories);
+        self.as_mut().publish_file_filter(result);
+        self.set_file_filter_in_progress(false);
+    }
+
+    pub fn poll_file_filter(mut self: Pin<&mut Self>) {
+        if let Some(result) = self.as_mut().rust_mut().path_filter.poll() {
+            self.as_mut().publish_file_filter(result);
+        }
+        let pending = self.rust().path_filter.in_progress();
+        self.set_file_filter_in_progress(pending);
+    }
+
+    fn publish_file_filter(mut self: Pin<&mut Self>, result: PathFilterResult) {
+        self.as_mut().set_file_filter_files(
+            result
+                .files
+                .iter()
+                .map(|path| QString::from(path.as_str()))
+                .collect(),
+        );
+        self.as_mut().set_file_filter_directories(
+            result
+                .directories
+                .iter()
+                .map(|path| QString::from(path.as_str()))
+                .collect(),
+        );
+        self.set_file_filter_query(QString::from(result.query.trim()));
     }
 
     pub fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString {

@@ -31,12 +31,16 @@ Item {
         { title: "Warnings", icon: "dialog-warning", explanation: "Workspace diagnostics are not available yet." },
         { title: "Errors", icon: "dialog-error", explanation: "Workspace diagnostics are not available yet." }
     ]
+    // The typed name filter. The tree shows `fileFilter`, the query whose
+    // matches the controller has published, so typing never filters inline.
     property string fileNameQuery: ""
+    readonly property string fileFilter: controller ? controller.file_filter_query : ""
     onSidebarTabChanged: {
         scheduleSidebarUpdate()
         if (sidebarTab === 0) Qt.callLater(root.restoreFileTreeSelection)
     }
-    onFileNameQueryChanged: invalidateSidebar(0)
+    onFileNameQueryChanged: if (controller) controller.filter_files(fileNameQuery)
+    onFileFilterChanged: invalidateSidebar(0)
     property bool syncingEditor: false
     property bool updatingHighlight: false
     property var minimapLines: [""]
@@ -126,9 +130,10 @@ Item {
         }
         function onDirectory_idsChanged() { root.invalidateSidebar(0) }
         function onDocument_idsChanged() { root.invalidateSidebar(0) }
+        function onFile_filter_filesChanged() { root.invalidateSidebar(0) }
+        function onFile_filter_directoriesChanged() { root.invalidateSidebar(0) }
         function onSearch_result_idsChanged() { root.invalidateSidebar(1) }
         function onSearch_result_linesChanged() { root.invalidateSidebar(1) }
-        function onSearch_queryChanged() { root.invalidateSidebar(1) }
     }
 
     Component.onCompleted: {
@@ -178,6 +183,12 @@ Item {
         minimapOffsets = offsets
         minimapLines = lines
         minimap.requestPaint()
+    }
+
+    // Smoke tests need the filtered tree before returning.
+    function filterNamesNow(query) {
+        fileNameQuery = query
+        controller.filter_files_now(query)
     }
 
     function invalidateSidebar(tab) {
@@ -308,7 +319,7 @@ Item {
         temporaryDragDirectories = keep
         closing.sort((a, b) => b.length - a.length)
         for (var path of closing) if (collapsedDirectories[path] === false) {
-            if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeRowForPath(path) >= 0) {
+            if (sidebarTab === 0 && fileFilter.length === 0 && treeRowForPath(path) >= 0) {
                 toggleDirectory(path)
             } else {
                 var restored = Object.assign({}, collapsedDirectories)
@@ -569,20 +580,8 @@ Item {
     function fileIds() {
         if (sidebarTab >= 2) return []
         if (sidebarTab === 1) return textSearchFileIds()
-        var ids = controller.document_ids
-        var needle = fileNameQuery.trim().toLowerCase()
-        // Workspace document ids are unique; only filtering needs a pass.
-        if (needle.length === 0) return Array.from(ids)
-        var files = []
-        var seen = ({})
-        for (var i = 0; i < ids.length; ++i) {
-            if (!ids[i].split("/").pop().toLowerCase().includes(needle)) continue
-            if (!seen["#" + ids[i]]) {
-                files.push(ids[i])
-                seen["#" + ids[i]] = true
-            }
-        }
-        return files
+        // The controller filters names on a worker; see filter_files.
+        return Array.from(fileFilter.length > 0 ? controller.file_filter_files : controller.document_ids)
     }
 
     function entryIcon(path, directory, expanded) {
@@ -592,7 +591,7 @@ Item {
     // The plain Files tree asks the core for one folder at a time, so
     // collapsed dependency folders cost nothing. Searches and name filters
     // still list every path.
-    function lazyTree() { return sidebarTab === 0 && fileNameQuery.trim().length === 0 }
+    function lazyTree() { return sidebarTab === 0 && fileFilter.length === 0 }
 
     function childEntries(parent) {
         var key = "#" + parent
@@ -702,24 +701,16 @@ Item {
         var directories = []
         var workspaceDirectories = root.controller.directory_ids
         var seenDirectories = ({})
-        if (sidebarTab === 0 && fileNameQuery.trim().length === 0) {
+        if (sidebarTab === 0) {
+            // A published name filter already lists every folder holding a match.
+            if (fileFilter.length > 0) workspaceDirectories = root.controller.file_filter_directories
             for (var k = 0; k < workspaceDirectories.length; ++k) {
                 var directory = workspaceDirectories[k]
                 directories.push(directory)
                 seenDirectories["#" + directory] = true
             }
         }
-        if (sidebarTab === 0 && fileNameQuery.trim().length > 0) {
-            var folderNeedle = fileNameQuery.trim().toLowerCase()
-            for (var k = 0; k < workspaceDirectories.length; ++k) {
-                var namedFolder = workspaceDirectories[k]
-                if (namedFolder.split("/").pop().toLowerCase().includes(folderNeedle)) {
-                    directories.push(namedFolder)
-                    seenDirectories["#" + namedFolder] = true
-                }
-            }
-        }
-        if (sidebarTab === 1 || fileNameQuery.trim().length > 0) {
+        if (sidebarTab === 1) {
             for (var i = 0; i < files.length; ++i) {
                 var parts = files[i].split("/")
                 for (var j = 1; j < parts.length; ++j) {
@@ -773,7 +764,7 @@ Item {
             restoringFileTree = true
             fileTreeNeedsRestore = true
             var indexPaths = ({})
-            var rootRows = buildTreeRows("", [], indexPaths, fileNameQuery.trim().length > 0)
+            var rootRows = buildTreeRows("", [], indexPaths, fileFilter.length > 0)
             treeIndexPaths = indexPaths
             fileTreeModel.rows = rootRows
             Qt.callLater(root.restoreFileTreeExpansion)
@@ -792,7 +783,7 @@ Item {
     }
 
     function updateVisibleEntries() {
-        var searching = sidebarTab === 1 || fileNameQuery.trim().length > 0
+        var searching = sidebarTab === 1 || fileFilter.length > 0
         var visible = []
         var hiddenPrefix = ""
         for (var i = 0; i < orderedSidebarEntries.length; ++i) {
@@ -866,7 +857,7 @@ Item {
             return
         }
         if (sidebarTab === 0) {
-            if (fileNameQuery.trim().length > 0) {
+            if (fileFilter.length > 0) {
                 fileTree.expandRecursively(-1)
             } else {
                 function expandChildren(parent) {
@@ -922,7 +913,7 @@ Item {
             invalidateSidebar(0)
         }
         cacheCurrentSidebar()
-        if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeIndexPaths["#" + path]) {
+        if (sidebarTab === 0 && fileFilter.length === 0 && treeIndexPaths["#" + path]) {
             if (expanding) materializeTreeFolder(path)
             var treeRow = fileTree.rowAtIndex(nativeTreeModel.mapFromSource(fileTreeModel.index(treeIndexPaths["#" + path], 0)))
             if (treeRow >= 0 && fileTree.isExpanded(treeRow) !== expanding) {
@@ -946,6 +937,19 @@ Item {
         onTriggered: if (root.flushEditor()) {
             root.controller.poll_workspace_changes()
             root.controller.poll_search_results()
+        }
+    }
+
+    // Searches and name filters run on workers; publish their results
+    // promptly instead of on the next slow poll.
+    Timer {
+        interval: 16
+        repeat: true
+        running: root.controller && (root.controller.search_in_progress || root.controller.file_filter_in_progress)
+        onTriggered: {
+            root.controller.poll_file_filter()
+            if (root.controller.search_in_progress && root.flushEditor())
+                root.controller.poll_search_results()
         }
     }
 
@@ -1145,14 +1149,23 @@ Item {
                                         }
                                     }
                                 }
-                                Kirigami.SearchField {
-                                    objectName: "fileNameFilter"
+                                RowLayout {
                                     Layout.fillWidth: true
                                     Layout.margins: Kirigami.Units.smallSpacing
                                     visible: root.sidebarTab === 0
-                                    text: root.fileNameQuery
-                                    placeholderText: "Filter names…"
-                                    onTextEdited: { root.selectedResultIndex = -1; root.fileNameQuery = text }
+                                    Kirigami.SearchField {
+                                        objectName: "fileNameFilter"
+                                        Layout.fillWidth: true
+                                        text: root.fileNameQuery
+                                        placeholderText: "Filter names…"
+                                        onTextEdited: { root.selectedResultIndex = -1; root.fileNameQuery = text }
+                                    }
+                                    BusyIndicator {
+                                        running: root.controller.file_filter_in_progress
+                                        visible: running
+                                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                                    }
                                 }
                                 RowLayout {
                                     Layout.fillWidth: true
@@ -1212,13 +1225,13 @@ Item {
                                 columnWidthProvider: function() { return width }
                                 onWidthChanged: forceLayout()
                                 onExpanded: function(row) {
-                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileFilter.length > 0) return
                                     var entry = root.treeEntry(fileTree.index(row, 0))
                                     if (entry && root.collapsedDirectories[entry.path] !== false)
                                         root.toggleDirectory(entry.path)
                                 }
                                 onCollapsed: function(row) {
-                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileFilter.length > 0) return
                                     var entry = root.treeEntry(fileTree.index(row, 0))
                                     if (entry && root.collapsedDirectories[entry.path] === false)
                                         root.toggleDirectory(entry.path)
@@ -1226,9 +1239,9 @@ Item {
                                 Kirigami.PlaceholderMessage {
                                     anchors.centerIn: parent
                                     width: parent.width - Kirigami.Units.largeSpacing * 2
-                                    visible: root.visibleSidebarEntries.length === 0
                                     icon.name: "folder"
-                                    text: root.fileNameQuery.length > 0 ? "No matching names" : "No files"
+                                    visible: root.visibleSidebarEntries.length === 0 && !root.controller.file_filter_in_progress
+                                    text: root.fileFilter.length > 0 ? "No matching names" : "No files"
                                 }
                                 delegate: TreeViewDelegate {
                                     id: treeRow

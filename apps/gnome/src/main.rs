@@ -6,8 +6,8 @@ mod syntax;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, NativeApplication as Application, SearchLocation, SearchResult,
-    file_icon_name, folder_icon_name,
+    AppCommand, AppSnapshot, NativeApplication as Application, PathFilter, PathFilterResult,
+    SearchLocation, SearchResult, file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{
@@ -28,7 +28,12 @@ struct Ui {
     file_search: gtk::SearchEntry,
     search_mode: Rc<Cell<bool>>,
     sidebar_tab: Rc<Cell<u8>>,
+    /// The name filter the Files tree shows, i.e. of `file_filter`. Typed
+    /// text reaches it only after `path_filter` has listed the matches.
     file_query: Rc<RefCell<String>>,
+    file_filter: Rc<RefCell<PathFilterResult>>,
+    path_filter: Rc<RefCell<PathFilter>>,
+    watching_file_filter: Rc<Cell<bool>>,
     file_search_row: gtk::Box,
     text_search_row: gtk::Box,
     search_spinner: gtk::Spinner,
@@ -176,6 +181,57 @@ impl Ui {
         }
     }
 
+    /// Matching every path on each keystroke froze the window on large
+    /// workspaces; a worker lists the matches and `poll_file_filter` shows them.
+    fn queue_file_filter(&self, query: &str) {
+        let (documents, directories) = {
+            let snapshot = self.snapshot.borrow();
+            (snapshot.documents.clone(), snapshot.directories.clone())
+        };
+        let ready = self
+            .path_filter
+            .borrow_mut()
+            .queue(query, documents, directories);
+        match ready {
+            Some(result) => self.apply_file_filter(result),
+            None => self.watch_file_filter(),
+        }
+    }
+
+    fn watch_file_filter(&self) {
+        if self.watching_file_filter.replace(true) {
+            return;
+        }
+        let ui = self.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(16), move || {
+            ui.poll_file_filter();
+            if ui.path_filter.borrow().in_progress() {
+                glib::ControlFlow::Continue
+            } else {
+                ui.watching_file_filter.set(false);
+                glib::ControlFlow::Break
+            }
+        });
+    }
+
+    fn poll_file_filter(&self) {
+        let result = self.path_filter.borrow_mut().poll();
+        if let Some(result) = result {
+            self.apply_file_filter(result);
+        }
+    }
+
+    fn apply_file_filter(&self, result: PathFilterResult) {
+        self.file_query.replace(result.query.trim().to_owned());
+        self.file_filter.replace(result);
+        self.sidebars[0].dirty.set(true);
+        if self.sidebar_tab.get() == 0 {
+            self.updating.set(true);
+            self.render_sidebar(&self.snapshot.borrow());
+            self.updating.set(false);
+        }
+    }
+
     /// Collects watcher, search and move-worker results.
     fn poll_core(&self) {
         let has_workspace = self.snapshot.borrow().workspace_root.is_some();
@@ -264,6 +320,16 @@ impl Ui {
             {
                 for sidebar in &self.sidebars {
                     sidebar.dirty.set(true);
+                }
+                let query = self.file_search.text();
+                if !query.trim().is_empty() {
+                    // Refilter the new paths; the current matches stay until then.
+                    self.path_filter.borrow_mut().queue(
+                        &query,
+                        snapshot.documents.clone(),
+                        snapshot.directories.clone(),
+                    );
+                    self.watch_file_filter();
                 }
             }
             if previous.search_results != snapshot.search_results
@@ -486,12 +552,6 @@ impl Ui {
         } else if results_changed {
             let mut entries = Vec::new();
             let text_mode = self.search_mode.get();
-            let needle = self.file_query.borrow().trim().to_lowercase();
-            let documents: std::collections::HashMap<_, _> = snapshot
-                .documents
-                .iter()
-                .map(|entry| (entry.id.as_str().to_owned(), entry))
-                .collect();
             let groups: std::collections::HashMap<String, Vec<&SearchResult>> = snapshot
                 .search_results
                 .chunk_by(|left, right| left.id == right.id)
@@ -508,41 +568,12 @@ impl Ui {
             if text_mode {
                 paths.extend(groups.keys().cloned().map(|path| (path, false)));
             } else {
-                paths.extend(
-                    snapshot
-                        .documents
-                        .iter()
-                        .filter(|entry| {
-                            needle.is_empty()
-                                || entry
-                                    .id
-                                    .as_str()
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_lowercase()
-                                    .contains(&needle)
-                        })
-                        .map(|entry| (entry.id.as_str().to_owned(), false)),
-                );
-                paths.extend(
-                    snapshot
-                        .directories
-                        .iter()
-                        .filter(|path| {
-                            needle.is_empty()
-                                || path
-                                    .rsplit('/')
-                                    .next()
-                                    .unwrap_or("")
-                                    .to_lowercase()
-                                    .contains(&needle)
-                        })
-                        .cloned()
-                        .map(|path| (path, true)),
-                );
+                // The worker already listed every folder holding a match.
+                let filter = self.file_filter.borrow();
+                paths.extend(filter.files.iter().cloned().map(|path| (path, false)));
+                paths.extend(filter.directories.iter().cloned().map(|path| (path, true)));
             }
-            if text_mode || !needle.is_empty() {
+            if text_mode {
                 let matched_paths = paths.clone();
                 for (id, _) in matched_paths {
                     let mut parent = std::path::Path::new(&id).parent();
@@ -574,7 +605,7 @@ impl Ui {
                     });
                     continue;
                 }
-                let Some(document) = documents.get(&path) else {
+                let Some(document) = snapshot.document_summary(&path) else {
                     continue;
                 };
                 let suffix = if document.external_change {
@@ -1252,6 +1283,7 @@ fn build_window(app: &adw::Application) {
     let search_mode = Rc::new(Cell::new(false));
     let sidebar_tab = Rc::new(Cell::new(0));
     let file_query = Rc::new(RefCell::new(String::new()));
+    let file_filter = Rc::new(RefCell::new(PathFilterResult::default()));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let pending_move_target = Rc::new(RefCell::new(None));
     let sidebars = [
@@ -1275,6 +1307,10 @@ fn build_window(app: &adw::Application) {
     search.set_placeholder_text(Some("Search in files"));
     let file_search = gtk::SearchEntry::new();
     file_search.set_placeholder_text(Some("Filter names"));
+    // The core's search and name-filter workers already debounce for 150 ms;
+    // GTK's own delay would double the wait before results appear.
+    search.set_search_delay(0);
+    file_search.set_search_delay(0);
     let sidebar_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     sidebar_content.add_css_class("workspace-sidebar");
     let tab_row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -1493,6 +1529,9 @@ fn build_window(app: &adw::Application) {
         search_mode,
         sidebar_tab,
         file_query,
+        file_filter,
+        path_filter: Rc::new(RefCell::new(PathFilter::new())),
+        watching_file_filter: Rc::new(Cell::new(false)),
         file_search_row: search_row,
         text_search_row,
         search_spinner,
@@ -1561,10 +1600,7 @@ fn build_window(app: &adw::Application) {
                 if ui.updating.get() {
                     return;
                 }
-                ui.file_query.replace(search.text().to_string());
-                ui.sidebars[0].dirty.set(true);
-                let snapshot = ui.snapshot.borrow().clone();
-                ui.render(snapshot);
+                ui.queue_file_filter(search.text().as_str());
             });
     }
     for sidebar in &ui.sidebars {
@@ -2147,7 +2183,20 @@ fn build_window(app: &adw::Application) {
             ));
             app.activate_action("save", None);
             assert_eq!(ui.status.text(), "Saved");
-            ui.file_search.set_text("main");
+            // Name filters arrive from a worker after the entry's debounce.
+            let filter_names = |query: &str| {
+                ui.file_search.set_text(query);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while *ui.file_query.borrow() != query {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "name filter {query:?} never applied"
+                    );
+                    glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            };
+            filter_names("main");
             assert!(
                 ui.sidebar()
                     .sidebar_rows
@@ -2163,7 +2212,7 @@ fn build_window(app: &adw::Application) {
                     .iter()
                     .any(|row| matches!(row, SidebarRow::Match(_)))
             );
-            ui.file_search.set_text("src");
+            filter_names("src");
             assert!(
                 ui.sidebar()
                     .sidebar_rows
@@ -2193,7 +2242,7 @@ fn build_window(app: &adw::Application) {
                 "tab switches rehighlighted the loaded document"
             );
             ui.buffer.disconnect(tag_handler);
-            ui.file_search.set_text("");
+            filter_names("");
             text_tab.set_active(true);
             ui.dispatch(AppCommand::SetSearchQuery("README".into()));
             assert!(ui.sidebar().sidebar_rows.borrow().is_empty());

@@ -28,6 +28,7 @@ ApplicationWindow {
     property var searchModel
     property int initialTreeResets: 0
     property string expandedPath: "src/main.rs"
+    property real nameFilterTypedAt: 0
     property real switchedAt: 0
     property bool waitingMoveSave: false
     property bool nativeEscapeChecked: false
@@ -164,16 +165,28 @@ ApplicationWindow {
                     pane.sidebarEntries()
                     break
                 case 3:
-                    check(pane.treeRowForPath(expandedPath) >= 0, "Tab switch lost folder expansion")
-                    check(pane.treeMatchesSidebarEntries(), "Cached tree and sidebar disagree")
-                    checkFileRows()
-                    // Search updates while Files is active must not reset its tree.
-                    controller.search_files("no-such-content")
-                    check(pane.sidebarCaches[0] === filesCache, "Search invalidated Files cache")
-                    pane.sidebarTab = 1
-                    check(pane.sidebarEntries().length === 0, "Search cache was not invalidated")
-                    // A name filter edited off-tab must invalidate only Files.
-                    pane.fileNameQuery = "main"
+                    if (nameFilterTypedAt === 0) {
+                        check(pane.treeRowForPath(expandedPath) >= 0, "Tab switch lost folder expansion")
+                        check(pane.treeMatchesSidebarEntries(), "Cached tree and sidebar disagree")
+                        checkFileRows()
+                        // Search updates while Files is active must not reset its tree.
+                        controller.search_files_now("no-such-content")
+                        check(pane.sidebarCaches[0] === filesCache, "Search invalidated Files cache")
+                        pane.sidebarTab = 1
+                        check(pane.sidebarEntries().length === 0, "Search cache was not invalidated")
+                        // A name filter edited off-tab must invalidate only Files.
+                        // Typing only queues it; the worker publishes the matches.
+                        pane.fileNameQuery = "main"
+                        check(pane.fileFilter === "" && controller.file_filter_in_progress,
+                            "Typing a name filter must not filter on the UI thread")
+                        nameFilterTypedAt = Date.now()
+                    }
+                    if (pane.fileFilter !== "main") {
+                        check(Date.now() - nameFilterTypedAt < 3000, "Name filter results never arrived")
+                        --step
+                        break
+                    }
+                    check(!controller.file_filter_in_progress, "Published name filter still pending")
                     pane.sidebarTab = 0
                     check(pane.sidebarEntries().some(entry => entry.path === expandedPath),
                         "Off-tab name filter did not find the file")
@@ -184,6 +197,7 @@ ApplicationWindow {
                     check(pane.treeMatchesSidebarEntries(), "Filtered native tree disagrees with sidebar")
                     controller.create_entry("src/new.rs", false)
                     pane.fileNameQuery = ""
+                    check(pane.fileFilter === "", "Clearing the name filter must apply at once")
                     pane.sidebarEntries()
                     break
                 case 5:

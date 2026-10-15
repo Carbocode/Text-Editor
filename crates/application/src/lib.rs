@@ -3,9 +3,11 @@
 mod diagnostics;
 mod drop_diagnostics;
 mod native_application;
+mod path_filter;
 mod sidebar_tree;
 pub use drop_diagnostics::SidebarDropTrace;
 pub use native_application::NativeApplication;
+pub use path_filter::{PathFilter, PathFilterResult};
 pub use sidebar_tree::SidebarChild;
 mod icons;
 pub use diagnostics::DiagnosticObserver;
@@ -24,7 +26,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
         mpsc::{self, Receiver, Sender},
     },
@@ -110,6 +112,9 @@ pub enum AppEvent {
         query: SearchQuery,
         results: Vec<SearchResult>,
     },
+    /// The query changed and the worker will publish its results, so typing
+    /// never scans the workspace on the UI thread.
+    SearchQueryQueued(SearchQuery),
     SearchResultsUpdated(Vec<SearchResult>),
     SearchStarted,
     WorkspaceOpened {
@@ -357,6 +362,11 @@ pub struct AppState {
     directories: Vec<String>,
     documents: Vec<DocumentEntry>,
     active_document: Option<DocumentId>,
+    /// Lists published by the last snapshot. Unchanged lists keep the same
+    /// `Arc`, so frontends skip reconverting tens of thousands of paths.
+    published_documents: OnceLock<Arc<Vec<DocumentSummary>>>,
+    published_directories: OnceLock<Arc<Vec<String>>>,
+    published_search_results: OnceLock<Arc<Vec<SearchResult>>>,
 }
 
 fn renamed_path(path: &str, id: &DocumentId, target: &DocumentId) -> String {
@@ -402,25 +412,53 @@ impl AppState {
                 .map(|workspace| workspace.root.clone()),
             recent_workspaces: self.recent_workspaces.clone(),
             search_query: self.search_query.clone(),
-            search_results: Arc::new(self.search_results.clone()),
+            search_results: self
+                .published_search_results
+                .get_or_init(|| Arc::new(self.search_results.clone()))
+                .clone(),
             search_in_progress: self.search_in_progress,
-            directories: Arc::new(self.directories.clone()),
-            documents: Arc::new(
-                self.documents
-                    .iter()
-                    .map(|entry| DocumentSummary {
-                        id: entry.id.clone(),
-                        title: entry.id.as_str().to_owned(),
-                        dirty: entry.dirty(),
-                        external_change: entry.external_change,
-                    })
-                    .collect(),
-            ),
+            directories: self
+                .published_directories
+                .get_or_init(|| Arc::new(self.directories.clone()))
+                .clone(),
+            documents: self
+                .published_documents
+                .get_or_init(|| {
+                    Arc::new(
+                        self.documents
+                            .iter()
+                            .map(|entry| DocumentSummary {
+                                id: entry.id.clone(),
+                                title: entry.id.as_str().to_owned(),
+                                dirty: entry.dirty(),
+                                external_change: entry.external_change,
+                            })
+                            .collect(),
+                    )
+                })
+                .clone(),
             active_document,
         }
     }
 
     fn apply(&mut self, event: &AppEvent) {
+        match event {
+            // These invalidate only the lists they actually change.
+            AppEvent::DiagnosticIncremented
+            | AppEvent::SearchStarted
+            | AppEvent::SearchQueryQueued(_)
+            | AppEvent::DocumentOpened { .. }
+            | AppEvent::DocumentClosed { .. }
+            | AppEvent::DocumentChanged { .. } => {}
+            AppEvent::SearchQueryChanged { .. } | AppEvent::SearchResultsUpdated(_) => {
+                self.published_search_results = OnceLock::new();
+            }
+            _ => {
+                self.published_documents = OnceLock::new();
+                self.published_directories = OnceLock::new();
+                self.published_search_results = OnceLock::new();
+            }
+        }
         match event {
             AppEvent::EntryRenamed { id, target } | AppEvent::EntryMoved { id, target } => {
                 let affected = |path: &str| {
@@ -461,6 +499,23 @@ impl AppState {
                 self.search_query = query.clone();
                 self.search_results = results.clone();
                 self.search_in_progress = false;
+            }
+            AppEvent::SearchQueryQueued(query) => {
+                let needle = query.0.trim();
+                if needle.is_empty() {
+                    self.published_search_results = OnceLock::new();
+                    self.search_results = self
+                        .documents
+                        .iter()
+                        .flat_map(|entry| search_results_for(entry, "", None))
+                        .collect();
+                    self.search_in_progress = false;
+                } else if !self.search_results.is_empty() {
+                    // Results of the previous query no longer apply.
+                    self.published_search_results = OnceLock::new();
+                    self.search_results.clear();
+                }
+                self.search_query = query.clone();
             }
             AppEvent::SearchResultsUpdated(results) => {
                 self.search_results = results.clone();
@@ -524,7 +579,16 @@ impl AppState {
                 self.active_document = None;
             }
             AppEvent::DocumentChanged { id, content } => {
-                self.document_mut(id).content = Some(content.clone());
+                let entry = self.document_mut(id);
+                let was_dirty = entry.dirty();
+                entry.content = Some(content.clone());
+                // Typing changes the summaries only when the dirty marker flips.
+                if entry.dirty() != was_dirty {
+                    self.published_documents = OnceLock::new();
+                    self.published_search_results = OnceLock::new();
+                } else if !self.search_query.0.trim().is_empty() {
+                    self.published_search_results = OnceLock::new();
+                }
                 self.refresh_search_result(id);
             }
             AppEvent::DocumentSaved { id } => {
@@ -1148,6 +1212,7 @@ impl Application {
                     AppEvent::SearchQueryChanged { results, .. } => {
                         ("search.input_changed", results.len() as u64)
                     }
+                    AppEvent::SearchQueryQueued(_) => ("search.input_changed", 0),
                     AppEvent::SearchStarted => ("search.started", 0),
                     AppEvent::EntryRenamed { .. } => ("filesystem.entry_renamed", 0),
                     AppEvent::EntryMoved { .. } => ("filesystem.entry_moved", 0),
@@ -1358,20 +1423,9 @@ impl Application {
                 if self.state.search_query.0 == query {
                     Vec::new()
                 } else {
-                    let needle = query.trim().to_lowercase();
-                    let results = self
-                        .state
-                        .documents
-                        .iter()
-                        .flat_map(|entry| {
-                            search_results_for(entry, &needle, entry.content.as_deref())
-                        })
-                        .collect();
-                    let mut events = vec![AppEvent::SearchQueryChanged {
-                        query: SearchQuery(query),
-                        results,
-                    }];
-                    if !needle.is_empty() {
+                    let searching = !query.trim().is_empty();
+                    let mut events = vec![AppEvent::SearchQueryQueued(SearchQuery(query))];
+                    if searching {
                         events.push(AppEvent::SearchStarted);
                     }
                     events
@@ -1956,6 +2010,50 @@ mod tests {
             assert!(Instant::now() < deadline, "queued search did not finish");
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    #[test]
+    fn typing_a_query_leaves_searching_and_unchanged_lists_to_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("alpha.md"), "beta").unwrap();
+        fs::write(dir.path().join("other.md"), "alpha beta").unwrap();
+        let mut app = Application::new();
+        let opened = app
+            .dispatch(AppCommand::OpenWorkspace(dir.path().to_path_buf()))
+            .unwrap();
+        let queued = app
+            .dispatch(AppCommand::QueueSearchQuery("alpha".into()))
+            .unwrap();
+        assert!(queued.search_in_progress);
+        assert!(
+            queued.search_results.is_empty(),
+            "no scan before the worker"
+        );
+        assert!(Arc::ptr_eq(&opened.documents, &queued.documents));
+        assert!(Arc::ptr_eq(&opened.directories, &queued.directories));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let found = loop {
+            let snapshot = app.dispatch(AppCommand::PollSearchResults).unwrap();
+            if !snapshot.search_in_progress {
+                break snapshot;
+            }
+            assert!(Instant::now() < deadline, "queued search did not finish");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(found.search_results.len(), 2);
+        let refined = app
+            .dispatch(AppCommand::QueueSearchQuery("alpha b".into()))
+            .unwrap();
+        assert!(refined.search_in_progress);
+        assert!(
+            refined.search_results.is_empty(),
+            "stale results are cleared"
+        );
+        let cleared = app
+            .dispatch(AppCommand::QueueSearchQuery(String::new()))
+            .unwrap();
+        assert!(!cleared.search_in_progress);
+        assert_eq!(cleared.search_results.len(), 2, "every document is listed");
     }
 
     #[test]

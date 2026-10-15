@@ -92,7 +92,7 @@ Kirigami.ApplicationWindow {
                                 + " expand-next-turn=" + expandedSettledMs + "ms"
                                 + " collapse=" + collapseMs + "ms/" + collapsedRows.length
                                 + " collapse-next-turn=" + (Date.now() - collapsedAt) + "ms")
-                            workspacePane.fileNameQuery = expandedChildPath.split("/").pop()
+                            workspacePane.filterNamesNow(expandedChildPath.split("/").pop())
                             workspacePane.sidebarEntries()
                             Qt.callLater(function() {
                                 if (!workspacePane.treeMatchesSidebarEntries())
@@ -159,14 +159,14 @@ Kirigami.ApplicationWindow {
                             throw new Error("Nested directory contents did not appear after expansion")
                     }
                 }
-                workspacePane.fileNameQuery = "main"
+                workspacePane.filterNamesNow("main")
                 if (!workspacePane.sidebarEntries().some(entry => entry.path === "src/main.rs")
                     || workspacePane.sidebarEntries().some(entry => entry.path === "README.md"))
                     throw new Error("Name filter did not isolate matching files")
-                workspacePane.fileNameQuery = "src"
+                workspacePane.filterNamesNow("src")
                 if (!workspacePane.sidebarEntries().some(entry => entry.path === "src"))
                     throw new Error("Name filter did not find a folder")
-                workspacePane.fileNameQuery = ""
+                workspacePane.filterNamesNow("")
                 workspacePane.sidebarTab = 1
                 workspacePane.scheduleSidebarUpdate()
                 controller.search_files("unlikely-no-match")
@@ -190,7 +190,7 @@ Kirigami.ApplicationWindow {
                 workspacePane.saveActive()
                 if (controller.active_document_dirty)
                     throw new Error("Document remained dirty after save")
-                controller.search_files("phase 1")
+                controller.search_files_now("phase 1")
                 if (controller.search_result_ids.length !== 2 || controller.search_result_snippets[0] !== "QML Phase 1 smoke content")
                     throw new Error("Content search did not return a matching preview")
                 if (workspacePane.searchFileCount !== 1)
