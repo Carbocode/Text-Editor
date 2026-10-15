@@ -1,22 +1,41 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Basic as Basic
 import QtQuick.Layouts
 import QtQml.Models
 import Qt.labs.qmlmodels
+import org.kde.kirigami as Kirigami
 import org.nativeworkspace.Syntax 1.0
 import org.nativeworkspace.Editor 1.0
 
 Item {
     id: root
+    SystemPalette { id: systemColors; colorGroup: SystemPalette.Active }
+    // Keep selection accented when focus moves to the editor or another window.
+    // The host's accent may differ from Breeze's default selection blue.
+    Kirigami.Theme.highlightColor: systemColors.accent
+    Kirigami.Theme.highlightedTextColor: systemColors.highlightedText
     property var controller
     property bool enableBrowse: false
     property bool showingHome: true
     property alias homeWindow: homeWindow
+    property alias sidebar: workspaceSidebar
+    property alias sidebarHeaderBar: sidebarTopBar
+    property alias workspacePage: editorPage
     property bool creatingDirectory: false
-    property int sidebarTab: 0 // 0: files, 1: text search, 2-5: empty tabs
+    property int sidebarTab: 0 // Files, Search, Git, Bookmarks, Warnings, Errors
+    readonly property var sidebarSections: [
+        { title: "Files", icon: "folder" },
+        { title: "Search", icon: "edit-find" },
+        { title: "Git", icon: "vcs-branch", explanation: "Git integration is not available yet." },
+        { title: "Bookmarks", icon: "bookmarks", explanation: "Bookmarks are not available yet." },
+        { title: "Warnings", icon: "dialog-warning", explanation: "Workspace diagnostics are not available yet." },
+        { title: "Errors", icon: "dialog-error", explanation: "Workspace diagnostics are not available yet." }
+    ]
     property string fileNameQuery: ""
-    onSidebarTabChanged: scheduleSidebarUpdate()
+    onSidebarTabChanged: {
+        scheduleSidebarUpdate()
+        if (sidebarTab === 0) Qt.callLater(root.restoreFileTreeSelection)
+    }
     onFileNameQueryChanged: invalidateSidebar(0)
     property bool syncingEditor: false
     property bool updatingHighlight: false
@@ -31,6 +50,7 @@ Item {
     property alias editorText: editor.text
     property alias editorFont: editor.font
     property alias editorSelectedText: editor.selectedText
+    property alias editorActiveLine: activeLine
     property real editorScrollY: editorScroll.contentItem.contentY
     property int searchFileCount: textSearchFileIds().length
     property var collapsedDirectories: ({})
@@ -61,24 +81,24 @@ Item {
 
     signal browseRequested()
 
-    MouseArea {
-        id: renameOutsideClick
-        objectName: "renameOutsideClick"
-        anchors.fill: parent
-        z: 1000
-        enabled: root.renamePath.length > 0 && root.activeRenameEditor && root.activeRenameEditor.visible
-        acceptedButtons: Qt.AllButtons
-        onPressed: function(mouse) {
-            mouse.accepted = root.cancelRenameForClick(renameOutsideClick, mouse.x, mouse.y)
-        }
-    }
-
-    SystemPalette { id: sidebarPalette }
     ListModel { id: sidebarModel }
     TreeModel {
         id: fileTreeModel
-        TableModelColumn { display: "name" }
+        TableModelColumn { display: "name"; edit: "name" }
+        onDataChanged: function(topLeft, bottomRight, roles) {
+            var entry = getRow(topLeft)
+            if (!entry || entry.name === entry.path.split("/").pop()) return
+            var source = entry.path
+            var name = entry.name
+            // Let the native edit delegate finish before updating the tree.
+            Qt.callLater(function() {
+                if (root.flushEditor()) root.controller.rename_entry(source, name)
+                if (root.controller.error_message.length > 0) root.invalidateSidebar(0)
+            })
+        }
     }
+
+    NativeTreeModel { id: nativeTreeModel; sourceModel: fileTreeModel }
 
     Timer {
         id: sidebarUpdate
@@ -208,16 +228,14 @@ Item {
         activeRenameEditor = null
         renamePath = path
         renameName = path.split("/").pop()
+        if (sidebarTab === 0) {
+            if (sidebarEntriesDirty) rebuildOrderedEntries()
+            fileTree.forceLayout()
+            var row = treeRowForPath(path)
+            if (row < 0) return
+            fileTree.edit(fileTree.index(row, 0))
+        }
         Qt.callLater(root.focusInlineRename)
-    }
-
-    function cancelRenameForClick(item, x, y) {
-        if (!activeRenameEditor || renamePath.length === 0) return false
-        var point = activeRenameEditor.mapFromItem(item, x, y)
-        if (activeRenameEditor.contains(point)) return false
-        renamePath = ""
-        activeRenameEditor = null
-        return true
     }
 
     function clickSidebarEntry(path, directory) {
@@ -227,8 +245,6 @@ Item {
             toggleDirectory(path)
             return
         }
-        var selected = selectedDirectoryPath.length === 0 && selectedResultIndex < 0 && controller.active_document_id === path
-        if (selected) { beginRename(path); return }
         if (flushEditor()) {
             selectedDirectoryPath = ""
             controller.open_document(path)
@@ -241,14 +257,11 @@ Item {
             if (!activeRenameEditor || !activeRenameEditor.visible) return
             if (activeRenameEditor.activeFocus) return
         } else {
-            if (sidebarEntriesDirty) rebuildOrderedEntries()
-            fileTree.forceLayout()
-            var row = treeRowForPath(renamePath)
-            if (row < 0) return
-            var delegate = fileTree.itemAtCell(Qt.point(0, row))
-            if (!delegate || !delegate.renameEditor) return
-            if (activeRenameEditor === delegate.renameEditor && activeRenameEditor.activeFocus) return
-            activeRenameEditor = delegate.renameEditor
+            var field = root.Window.window ? root.Window.window.activeFocusItem : null
+            if (!field || typeof field.select !== "function" || field === editor) return
+            if (activeRenameEditor === field && field.activeFocus) return
+            activeRenameEditor = field
+            activeRenameEditor.objectName = "sidebarRenameField"
         }
         activeRenameEditor.text = renameName
         activeRenameEditor.forceActiveFocus(Qt.OtherFocusReason)
@@ -258,7 +271,10 @@ Item {
 
     function commitRename() {
         if (renamePath.length === 0 || !flushEditor()) return
-        controller.rename_entry(renamePath, renameName)
+        var path = renamePath
+        var name = renameName
+        if (sidebarTab === 0) fileTree.closeEditor()
+        controller.rename_entry(path, name)
         if (controller.error_message.length === 0) renamePath = ""
     }
 
@@ -401,8 +417,8 @@ Item {
         dropTraceStarted = false
         dropCommitted = false
         renamePath = ""
-        dragGhost.x = point.x + 12
-        dragGhost.y = point.y + 12
+        dragGhost.x = point.x + Kirigami.Units.smallSpacing
+        dragGhost.y = point.y + Kirigami.Units.smallSpacing
         draggingPath = path
         dragPreviewVisible = true
     }
@@ -456,58 +472,44 @@ Item {
     Shortcut {
         sequence: "Escape"
         enabled: root.draggingPath.length > 0 || root.renamePath.length > 0
-        onActivated: { root.renamePath = ""; root.finishEntryDrag(true) }
+        onActivated: { fileTree.closeEditor(); root.renamePath = ""; root.finishEntryDrag(true) }
     }
 
-    Rectangle {
+    Kirigami.AbstractCard {
         id: dragGhost
         objectName: "sidebarDragGhost"
         z: 1000
         visible: root.dragPreviewVisible
-        width: ghostLabel.implicitWidth + 36
-        height: 34
-        radius: 5
-        color: sidebarPalette.base
-        opacity: 0.9
-        border.color: sidebarPalette.highlight
-        border.width: 1
+        width: implicitWidth
+        height: implicitHeight
         Drag.active: root.draggingPath.length > 0
-        // Qt excludes the source item's subtree from drop hit testing. Using
-        // the workspace pane here would exclude every destination row.
         Drag.source: dragGhost
         Drag.keys: ["native-workspace-entry"]
-        Drag.hotSpot.x: -12
-        Drag.hotSpot.y: -12
+        Drag.hotSpot.x: -Kirigami.Units.smallSpacing
+        Drag.hotSpot.y: -Kirigami.Units.smallSpacing
         Drag.supportedActions: Qt.MoveAction
         Drag.proposedAction: Qt.MoveAction
-        Rectangle {
-            anchors.fill: parent
-            anchors.topMargin: 4
-            anchors.leftMargin: 3
-            anchors.rightMargin: -3
-            anchors.bottomMargin: -4
-            radius: 5
-            color: "#40000000"
-            z: -1
-        }
-        Label {
-            id: ghostLabel
-            anchors.centerIn: parent
-            text: root.draggingPath.split("/").pop()
+        contentItem: Kirigami.IconTitleSubtitle {
+            title: root.draggingPath.split("/").pop()
+            icon.source: root.entryIcon(root.draggingPath,
+                root.controller.directory_ids.indexOf(root.draggingPath) !== -1,
+                root.collapsedDirectories[root.draggingPath] === false)
+            icon.color: "transparent"
         }
     }
 
-    Dialog {
+    Kirigami.Dialog {
         id: createEntryDialog
-        anchors.centerIn: parent
-        modal: true
+        preferredWidth: Kirigami.Units.gridUnit * 24
         title: root.creatingDirectory ? "New Folder" : "New File"
-        standardButtons: Dialog.Ok | Dialog.Cancel
-        contentItem: TextField {
-            id: newEntryPath
-            implicitWidth: 320
-            placeholderText: "Path relative to workspace"
-            onAccepted: createEntryDialog.accept()
+        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
+        Kirigami.FormLayout {
+            TextField {
+                id: newEntryPath
+                Kirigami.FormData.label: "Relative path:"
+                placeholderText: root.creatingDirectory ? "folder" : "file.txt"
+                onAccepted: createEntryDialog.accept()
+            }
         }
         onOpened: {
             newEntryPath.text = ""
@@ -583,17 +585,8 @@ Item {
         return files
     }
 
-    function documentThemeIcon(path) {
-        var name = path.split("/").pop().toLowerCase()
-        if (name.endsWith(".md")) return "text-markdown"
-        if (name.endsWith(".json")) return "application-json"
-        if (name.endsWith(".xml")) return "application-xml"
-        if (name.endsWith(".html") || name.endsWith(".htm")) return "text-html"
-        if (name.endsWith(".py")) return "text-x-python"
-        if (name.endsWith(".cpp") || name.endsWith(".cc") || name.endsWith(".cxx")) return "text-x-c++src"
-        if (name.endsWith(".h") || name.endsWith(".hpp")) return "text-x-c++hdr"
-        if (name.endsWith(".js") || name.endsWith(".ts")) return "application-javascript"
-        return "text-x-generic"
+    function entryIcon(path, directory, expanded) {
+        return directory ? controller.folder_icon(path, expanded) : controller.file_icon(path)
     }
 
     // The plain Files tree asks the core for one folder at a time, so
@@ -645,7 +638,7 @@ Item {
     }
 
     function treeEntry(modelIndex) {
-        var entry = fileTreeModel.getRow(modelIndex)
+        var entry = fileTreeModel.getRow(nativeTreeModel.mapToSource(modelIndex))
         return entry && !entry.placeholder ? entry : null
     }
 
@@ -848,7 +841,7 @@ Item {
     function treeMatchesSidebarEntries() {
         for (var row = 0; row < visibleSidebarEntries.length; ++row) {
             var indexPath = treeIndexPaths["#" + visibleSidebarEntries[row].path]
-            if (!indexPath || fileTree.rowAtIndex(fileTreeModel.index(indexPath, 0)) !== row)
+            if (!indexPath || fileTree.rowAtIndex(nativeTreeModel.mapFromSource(fileTreeModel.index(indexPath, 0))) !== row)
                 return false
         }
         return true
@@ -856,7 +849,15 @@ Item {
 
     function treeRowForPath(path) {
         var indexPath = treeIndexPaths["#" + path]
-        return indexPath ? fileTree.rowAtIndex(fileTreeModel.index(indexPath, 0)) : -1
+        return indexPath ? fileTree.rowAtIndex(nativeTreeModel.mapFromSource(fileTreeModel.index(indexPath, 0))) : -1
+    }
+
+    function restoreFileTreeSelection() {
+        if (sidebarTab !== 0 || renamePath.length > 0) return
+        var path = selectedDirectoryPath || controller.active_document_id
+        var row = treeRowForPath(path)
+        if (row >= 0)
+            fileTree.selectionModel.setCurrentIndex(fileTree.index(row, 0), ItemSelectionModel.ClearAndSelect)
     }
 
     function restoreFileTreeExpansion() {
@@ -872,7 +873,7 @@ Item {
                     for (var entry of root.childEntries(parent)) {
                         if (!entry.directory || collapsedDirectories[entry.path] !== false) continue
                         var modelIndex = fileTreeModel.index(treeIndexPaths["#" + entry.path], 0)
-                        var row = fileTree.rowAtIndex(modelIndex)
+                        var row = fileTree.rowAtIndex(nativeTreeModel.mapFromSource(modelIndex))
                         if (row >= 0 && !fileTree.isExpanded(row)) fileTree.expand(row)
                         expandChildren(entry.path)
                     }
@@ -882,6 +883,7 @@ Item {
         }
         fileTreeNeedsRestore = false
         restoringFileTree = false
+        restoreFileTreeSelection()
         if (renamePath.length > 0) Qt.callLater(root.focusInlineRename)
     }
 
@@ -922,7 +924,7 @@ Item {
         cacheCurrentSidebar()
         if (sidebarTab === 0 && fileNameQuery.trim().length === 0 && treeIndexPaths["#" + path]) {
             if (expanding) materializeTreeFolder(path)
-            var treeRow = fileTree.rowAtIndex(fileTreeModel.index(treeIndexPaths["#" + path], 0))
+            var treeRow = fileTree.rowAtIndex(nativeTreeModel.mapFromSource(fileTreeModel.index(treeIndexPaths["#" + path], 0)))
             if (treeRow >= 0 && fileTree.isExpanded(treeRow) !== expanding) {
                 if (expanding) fileTree.expand(treeRow)
                 else fileTree.collapse(treeRow)
@@ -957,105 +959,116 @@ Item {
         }
     }
 
-    ApplicationWindow {
+
+    readonly property list<Action> applicationActions: [homeAction, openAction, developerAction, quitAction]
+    readonly property list<Action> pageActions: [saveAction, newFileAction, newFolderAction]
+    readonly property var syntaxColors: [Kirigami.Theme.textColor, Kirigami.Theme.linkColor,
+        Kirigami.Theme.neutralTextColor, Kirigami.Theme.positiveTextColor,
+        Kirigami.Theme.disabledTextColor, Kirigami.Theme.activeTextColor]
+    onSyntaxColorsChanged: Qt.callLater(function() {
+        lineNumbers.requestPaint()
+        minimap.requestPaint()
+    })
+
+    Kirigami.Action {
+        id: homeAction
+        text: "Home"
+        icon.name: "go-home"
+        onTriggered: if (root.flushEditor()) root.showingHome = true
+    }
+    Kirigami.Action {
+        id: openAction
+        text: "Open Folder…"
+        icon.name: "document-open-folder"
+        shortcut: StandardKey.Open
+        onTriggered: root.browseRequested()
+    }
+    Kirigami.Action {
+        id: resumeAction
+        text: "Resume Workspace"
+        icon.name: "go-next"
+        visible: root.controller.workspace_root.length > 0
+        onTriggered: root.showingHome = false
+    }
+    Kirigami.Action {
+        id: saveAction
+        text: "Save"
+        icon.name: "document-save"
+        enabled: root.controller.active_document_dirty && !root.controller.active_document_external_change
+        onTriggered: root.saveActive()
+    }
+    Kirigami.Action {
+        id: newFileAction
+        text: "New File…"
+        icon.name: "document-new"
+        onTriggered: { root.creatingDirectory = false; createEntryDialog.open() }
+    }
+    Kirigami.Action {
+        id: newFolderAction
+        text: "New Folder…"
+        icon.name: "folder-new"
+        onTriggered: { root.creatingDirectory = true; createEntryDialog.open() }
+    }
+    Kirigami.Action {
+        id: developerAction
+        text: "Developer Tools"
+        icon.name: "tools-report-bug"
+        visible: root.controller.devtools_available
+        onTriggered: root.controller.open_devtools()
+    }
+    Kirigami.Action {
+        id: quitAction
+        text: "Quit"
+        icon.name: "application-exit"
+        shortcut: StandardKey.Quit
+        onTriggered: Qt.quit()
+    }
+
+    Kirigami.ApplicationWindow {
         id: homeWindow
         transientParent: null
         title: "Native Workspace"
-        width: 640
-        height: 560
-        minimumWidth: 480
-        minimumHeight: 400
+        width: Kirigami.Units.gridUnit * 36
+        height: Kirigami.Units.gridUnit * 32
+        minimumWidth: Kirigami.Units.gridUnit * 24
+        minimumHeight: Kirigami.Units.gridUnit * 20
         visible: root.enableBrowse && root.showingHome
-        // Keep native window-manager decorations, including on KDE.
         onClosing: Qt.quit()
-        ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: 28
-            spacing: 18
-            Label {
-                text: "Native Workspace"
-                font.pixelSize: 30
-                font.bold: true
-            }
-            Label {
-                text: "A place for your files and ideas."
-                opacity: 0.7
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-            }
-            RowLayout {
-                Button {
-                    text: "Open Folder…"
-                    highlighted: true
-                    onClicked: root.browseRequested()
-                }
-                Button {
-                    text: "Resume Workspace"
-                    visible: root.controller.workspace_root.length > 0
-                    onClicked: root.showingHome = false
-                }
-            }
-            Rectangle { Layout.fillWidth: true; height: 1; color: palette.mid }
-            Label { text: "Recent Workspaces"; font.pixelSize: 18; font.bold: true }
-            Label {
-                text: "Open a folder. It will appear here for quick access."
-                visible: root.controller.recent_workspace_paths.length === 0
-                opacity: 0.7
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-            }
+        globalDrawer: Kirigami.GlobalDrawer {
+            title: "Native Workspace"
+            titleIcon: "accessories-text-editor"
+            isMenu: true
+            actions: [developerAction, quitAction]
+        }
+        pageStack.initialPage: Kirigami.ScrollablePage {
+            title: "Recent Workspaces"
+            actions: [openAction, resumeAction]
             ListView {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-                spacing: 6
                 model: root.controller.recent_workspace_paths
-                ScrollBar.vertical: ScrollBar { }
-                delegate: Basic.ItemDelegate {
+                delegate: Kirigami.SubtitleDelegate {
                     required property int index
                     required property string modelData
                     width: ListView.view.width
-                    height: 68
-                    background: Rectangle {
-                        radius: 8
-                        color: parent.hovered ? palette.alternateBase : palette.base
-                        border.color: palette.mid
-                    }
-                    ToolTip.visible: hovered
-                    ToolTip.text: modelData
-                    contentItem: RowLayout {
-                        spacing: 12
-                        Label { text: "▸"; opacity: 0.6 }
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 4
-                            Label {
-                                text: root.controller.recent_workspace_names[index]
-                                font.bold: true
-                                Layout.fillWidth: true
-                                elide: Text.ElideMiddle
-                            }
-                            Label {
-                                text: modelData
-                                opacity: 0.65
-                                Layout.fillWidth: true
-                                elide: Text.ElideMiddle
-                            }
-                        }
-                    }
+                    text: root.controller.recent_workspace_names[index]
+                    subtitle: modelData
+                    icon.source: root.controller.folder_icon(modelData, false)
+                    icon.color: "transparent"
                     onClicked: root.openWorkspace(modelData)
                 }
+                Kirigami.PlaceholderMessage {
+                    anchors.centerIn: parent
+                    width: parent.width - Kirigami.Units.largeSpacing * 2
+                    visible: root.controller.recent_workspace_paths.length === 0
+                    icon.name: "document-open-folder"
+                    text: "No Recent Workspaces"
+                    explanation: "Open a folder to start editing."
+                    helpfulAction: openAction
+                }
             }
-            Label {
+            footer: Kirigami.InlineMessage {
+                visible: root.controller.error_message.length > 0
                 text: root.controller.error_message
-                visible: text.length > 0
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-            }
-            Button {
-                text: "Developer Tools"
-                visible: root.controller.devtools_available
-                onClicked: root.controller.open_devtools()
+                type: Kirigami.MessageType.Error
             }
         }
     }
@@ -1064,781 +1077,681 @@ Item {
         anchors.fill: parent
         spacing: 0
         visible: root.controller.workspace_name.length > 0
-        ToolBar {
-            Layout.fillWidth: true
-            contentItem: RowLayout {
-                spacing: 8
-                Item { Layout.fillWidth: true }
-                ToolButton {
-                    text: "Home"
-                    icon.name: "go-home"
-                    icon.width: 20
-                    icon.height: 20
-                    display: AbstractButton.TextBesideIcon
-                    onClicked: if (root.flushEditor()) root.showingHome = true
-                }
-            }
-        }
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 1
-            color: palette.mid
-        }
-        SplitView {
+        Kirigami.PageRow {
+            id: workspacePages
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Pane {
-                SplitView.preferredWidth: 240
-                SplitView.minimumWidth: 180
+            globalToolBar.style: Kirigami.ApplicationHeaderStyle.ToolBar
+            leftSidebar: Kirigami.OverlayDrawer {
+                id: workspaceSidebar
+                objectName: "workspaceSidebar"
+                modal: false
+                drawerOpen: true
+                handleVisible: false
+                interactiveResizeEnabled: true
+                preferredSize: Kirigami.Units.gridUnit * 18
+                minimumSize: Kirigami.Units.gridUnit * 12
                 padding: 0
-                background: Rectangle {
-                    color: palette.window
-                    border.color: palette.mid
-                    border.width: 1
-                }
-                Item {
-                    anchors.fill: parent
-                    Column {
-                        id: sidebarTabs
-                        anchors.top: parent.top
-                        anchors.left: parent.left
-                        anchors.bottom: parent.bottom
-                        width: 36
-                        spacing: 0
-                        Repeater {
-                            model: [
-                                { title: "Files", icon: "folder", source: "" },
-                                { title: "Search", icon: "edit-find", source: "" },
-                                { title: "Git", icon: "", source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/git-branch.png" },
-                                { title: "Bookmarks", icon: "", source: "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/icons/bookmark.png" },
-                                { title: "Warnings", icon: "dialog-warning", source: "" },
-                                { title: "Errors", icon: "dialog-error", source: "" }
-                            ]
-                            delegate: ToolButton {
-                                id: tabButton
-                                required property int index
-                                required property var modelData
-                                text: modelData.title
-                                icon.name: modelData.icon
-                                icon.source: modelData.source
-                                icon.width: 16
-                                icon.height: 16
-                                display: AbstractButton.IconOnly
-                                width: sidebarTabs.width
-                                height: 80
-                                leftPadding: 0
-                                rightPadding: 0
-                                topPadding: tabLabel.width + 4
-                                bottomPadding: 0
-                                ToolTip.visible: hovered
-                                ToolTip.text: text
-                                checkable: true
-                                checked: root.sidebarTab === index
-                                Label {
-                                    id: tabLabel
+                Kirigami.Theme.highlightColor: root.Kirigami.Theme.highlightColor
+                Kirigami.Theme.highlightedTextColor: root.Kirigami.Theme.highlightedTextColor
+                contentItem: ColumnLayout {
+                    spacing: 0
+                    ToolBar {
+                        id: sidebarTopBar
+                        objectName: "sidebarTopBar"
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: workspacePages.globalToolBar.preferredHeight
+                        contentItem: Kirigami.Heading {
+                            text: root.sidebarSections[root.sidebarTab].title
+                            level: 2
+                            elide: Text.ElideRight
+                        }
+                    }
+                    Pane {
+                        id: sidebarPane
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        padding: 0
+                        Kirigami.Theme.colorSet: Kirigami.Theme.View
+                        Item {
+                            anchors.fill: parent
+                            ColumnLayout {
+                                id: sidebarHeader
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                spacing: Kirigami.Units.smallSpacing
+                                TabBar {
+                                    id: sidebarTabs
+                                    objectName: "sidebarTabs"
+                                    Layout.fillWidth: true
+                                    currentIndex: root.sidebarTab
+                                    onCurrentIndexChanged: if (currentIndex >= 0) {
+                                        root.sidebarTab = currentIndex
+                                        root.selectedResultIndex = -1
+                                    }
+                                    Repeater {
+                                        model: root.sidebarSections
+                                        delegate: Kirigami.NavigationTabButton {
+                                            required property int index
+                                            required property var modelData
+                                            text: modelData.title
+                                            icon.name: modelData.icon
+                                            display: AbstractButton.IconOnly
+                                            checked: root.sidebarTab === index
+                                            ToolTip.visible: hovered
+                                            ToolTip.text: text
+                                            ToolTip.delay: Kirigami.Units.toolTipDelay
+                                        }
+                                    }
+                                }
+                                Kirigami.SearchField {
+                                    objectName: "fileNameFilter"
+                                    Layout.fillWidth: true
+                                    Layout.margins: Kirigami.Units.smallSpacing
+                                    visible: root.sidebarTab === 0
+                                    text: root.fileNameQuery
+                                    placeholderText: "Filter names…"
+                                    onTextEdited: { root.selectedResultIndex = -1; root.fileNameQuery = text }
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.margins: Kirigami.Units.smallSpacing
+                                    visible: root.sidebarTab === 1
+                                    Kirigami.SearchField {
+                                        Layout.fillWidth: true
+                                        text: root.controller.search_query
+                                        placeholderText: "Search in files…"
+                                        onTextEdited: { root.selectedResultIndex = -1; root.controller.search_files(text) }
+                                    }
+                                    BusyIndicator {
+                                        running: root.controller.search_in_progress
+                                        visible: running
+                                        Layout.preferredWidth: Kirigami.Units.iconSizes.smallMedium
+                                        Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
+                                    }
+                                }
+                            }
+                            Item {
+                                anchors.top: sidebarHeader.bottom
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                visible: root.sidebarTab >= 2
+                                Kirigami.PlaceholderMessage {
                                     anchors.centerIn: parent
-                                    anchors.verticalCenterOffset: -10
-                                    width: Math.min(implicitWidth, 58)
-                                    horizontalAlignment: Text.AlignHCenter
-                                    elide: Text.ElideRight
-                                    rotation: -90
-                                    text: tabButton.text
-                                    font.pixelSize: 10
-                                }
-                                onClicked: {
-                                    root.sidebarTab = index
-                                    root.selectedResultIndex = -1
+                                    width: parent.width - Kirigami.Units.largeSpacing * 2
+                                    text: root.sidebarSections[root.sidebarTab]?.title ?? ""
+                                    icon.name: root.sidebarSections[root.sidebarTab]?.icon ?? ""
+                                    explanation: root.sidebarSections[root.sidebarTab]?.explanation ?? ""
                                 }
                             }
-                        }
-                    }
-                    Rectangle {
-                        anchors.top: parent.top
-                        anchors.bottom: parent.bottom
-                        anchors.left: sidebarTabs.right
-                        anchors.right: parent.right
-                        color: palette.base
-                        border.color: palette.mid
-                        border.width: 1
-                    }
-                    RowLayout {
-                        id: textSearchRow
-                        anchors.top: parent.top
-                        anchors.left: sidebarTabs.right
-                        anchors.right: parent.right
-                        anchors.margins: 6
-                        visible: root.sidebarTab === 1
-                        TextField {
-                            Layout.fillWidth: true
-                            text: root.controller.search_query
-                            placeholderText: "Search in files"
-                            onTextEdited: {
-                                root.selectedResultIndex = -1
-                                root.controller.search_files(text)
-                            }
-                        }
-                        BusyIndicator {
-                            running: root.controller.search_in_progress
-                            visible: running
-                            Layout.preferredWidth: 18
-                            Layout.preferredHeight: 18
-                        }
-                    }
-                    TreeView {
-                        id: fileTree
-                        objectName: "fileTree"
-                        anchors.top: parent.top
-                        anchors.left: sidebarTabs.right
-                        anchors.right: parent.right
-                        anchors.bottom: workspaceDropTarget.top
-                        anchors.bottomMargin: 6
-                        visible: root.sidebarTab === 0
-                        clip: true
-                        model: fileTreeModel
-                        columnWidthProvider: function() { return width }
-                        rowHeightProvider: function() { return 28 }
-                        onWidthChanged: forceLayout()
-                        onExpanded: function(row) {
-                            if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
-                            var entry = fileTreeModel.getRow(fileTree.index(row, 0))
-                            if (entry && root.collapsedDirectories[entry.path] !== false)
-                                root.toggleDirectory(entry.path)
-                        }
-                        onCollapsed: function(row) {
-                            if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
-                            var entry = fileTreeModel.getRow(fileTree.index(row, 0))
-                            if (entry && root.collapsedDirectories[entry.path] === false)
-                                root.toggleDirectory(entry.path)
-                        }
-                        Label {
-                            anchors.centerIn: parent
-                            visible: root.visibleSidebarEntries.length === 0
-                            text: root.fileNameQuery.length > 0 ? "No matching names" : "No files"
-                        }
-                        // Native macOS controls reject custom contentItem. This
-                        // delegate supports our icon, rename field and overlays.
-                        delegate: Basic.TreeViewDelegate {
-                            id: treeRow
-                            topPadding: 2
-                            bottomPadding: 2
-                            indicator.height: 28
-                            property alias renameEditor: renameField
-                            property bool pooled: false
-                            TableView.onPooled: pooled = true
-                            TableView.onReused: pooled = false
-                            // Expanding changes the mapping of view rows even
-                            // when a reused delegate keeps the same row number.
-                            property var entry: row < fileTree.rows && model.display !== undefined
-                                ? root.treeEntry(fileTree.index(row, 0)) : null
-                            onEntryChanged: if (root.renamePath.length > 0) Qt.callLater(root.focusInlineRename)
-                            property bool pendingMove: entry && root.isPendingMove(entry.path)
-                            text: entry ? entry.name : ""
-                            ToolTip.visible: hovered && pendingMove
-                            ToolTip.text: "Moving… Waiting for confirmation"
-                            // TreeViewDelegate styles can provide a text-only
-                            // contentItem, so draw the bundled icon explicitly.
-                            contentItem: RowLayout {
-                                spacing: 4
-                                Image {
-                                    objectName: "fileTreeIcon"
-                                    opacity: treeRow.pendingMove ? 0.5 : 1
-                                    source: treeRow.entry ? (treeRow.entry.directory
-                                        ? root.controller.folder_icon(treeRow.entry.path, treeRow.expanded)
-                                        : root.controller.file_icon(treeRow.entry.path)) : ""
-                                    sourceSize.width: 32
-                                    sourceSize.height: 32
-                                    fillMode: Image.PreserveAspectFit
-                                    Layout.preferredWidth: 16
-                                    Layout.preferredHeight: 16
-                                    Layout.minimumWidth: 16
-                                    Layout.maximumWidth: 16
-                                    Layout.minimumHeight: 16
-                                    Layout.maximumHeight: 16
-                                    Layout.alignment: Qt.AlignVCenter
-                                }
-                                Label {
-                                    objectName: "sidebarEntryLabel"
-                                    opacity: treeRow.pendingMove ? 0.5 : 1
-                                    verticalAlignment: Text.AlignVCenter
-                                    Layout.fillHeight: true
-                                    visible: !renameField.visible
-                                    text: treeRow.text
-                                    font: treeRow.font
-                                    color: treeRow.highlighted ? treeRow.palette.highlightedText : treeRow.palette.text
-                                    elide: Text.ElideRight
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: 0
-                                    Layout.alignment: Qt.AlignVCenter
-                                }
-                                BusyIndicator {
-                                    objectName: "pendingMoveIndicator"
-                                    visible: treeRow.pendingMove
-                                    running: visible && !treeRow.pooled
-                                    Layout.preferredWidth: 16
-                                    Layout.preferredHeight: 16
-                                    Accessible.name: "Moving… Waiting for confirmation"
-                                }
-                                Basic.TextField {
-                                    id: renameField
-                                    objectName: "sidebarRenameField"
-                                    visible: !treeRow.pooled && treeRow.entry && root.renamePath === treeRow.entry.path
-                                    Layout.fillWidth: true
-                                    Layout.minimumWidth: 0
-                                    Layout.minimumHeight: 24
-                                    Layout.preferredHeight: 24
-                                    Layout.maximumHeight: 24
-                                    Layout.alignment: Qt.AlignVCenter
-                                    font: treeRow.font
-                                    padding: 2
-                                    leftPadding: 4
-                                    rightPadding: 4
-                                    clip: true
-                                    text: visible ? root.renameName : ""
-                                    onTextEdited: root.renameName = text
-                                    onAccepted: root.commitRename()
-                                    onActiveFocusChanged: if (!activeFocus && root.activeRenameEditor === renameField && visible)
-                                        root.renamePath = ""
-                                    Keys.onEscapePressed: root.renamePath = ""
-                                    ToolTip.visible: activeFocus && root.controller.error_message.length > 0
-                                    ToolTip.text: root.controller.error_message
-                                }
-                            }
-                            TapHandler {
-                                acceptedButtons: Qt.RightButton
-                                onTapped: if (treeRow.entry) {
-                                    entryMenu.path = treeRow.entry.path
-                                    entryMenu.popup()
-                                }
-                            }
-                            Menu {
-                                id: entryMenu
-                                property string path: ""
-                                MenuItem {
-                                    text: "Rename…"
-                                    onTriggered: root.beginRename(entryMenu.path)
-                                }
-                            }
-                            Keys.onPressed: function(event) {
-                                if (event.key === Qt.Key_F2 && entry) {
+                            TreeView {
+                                id: fileTree
+                                objectName: "fileTree"
+                                anchors.top: sidebarHeader.bottom
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: workspaceDropTarget.top
+                                anchors.bottomMargin: Kirigami.Units.smallSpacing
+                                visible: root.sidebarTab === 0
+                                clip: true
+                                model: nativeTreeModel
+                                selectionModel: ItemSelectionModel { model: nativeTreeModel }
+                                selectionBehavior: TableView.SelectRows
+                                selectionMode: TableView.SingleSelection
+                                editTriggers: TableView.EditKeyPressed
+                                Keys.onPressed: function(event) {
+                                    if (event.key !== Qt.Key_F2) return
+                                    var entry = root.treeEntry(selectionModel.currentIndex)
+                                    if (!entry) return
                                     root.beginRename(entry.path)
                                     event.accepted = true
                                 }
+                                ScrollBar.vertical: ScrollBar { }
+                                columnWidthProvider: function() { return width }
+                                onWidthChanged: forceLayout()
+                                onExpanded: function(row) {
+                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                                    var entry = root.treeEntry(fileTree.index(row, 0))
+                                    if (entry && root.collapsedDirectories[entry.path] !== false)
+                                        root.toggleDirectory(entry.path)
+                                }
+                                onCollapsed: function(row) {
+                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileNameQuery.trim().length > 0) return
+                                    var entry = root.treeEntry(fileTree.index(row, 0))
+                                    if (entry && root.collapsedDirectories[entry.path] === false)
+                                        root.toggleDirectory(entry.path)
+                                }
+                                Kirigami.PlaceholderMessage {
+                                    anchors.centerIn: parent
+                                    width: parent.width - Kirigami.Units.largeSpacing * 2
+                                    visible: root.visibleSidebarEntries.length === 0
+                                    icon.name: "folder"
+                                    text: root.fileNameQuery.length > 0 ? "No matching names" : "No files"
+                                }
+                                delegate: TreeViewDelegate {
+                                    id: treeRow
+                                    text: model.display
+                                    icon.source: entry ? root.entryIcon(entry.path, entry.directory, expanded) : ""
+                                    icon.color: "transparent"
+                                    icon.width: Kirigami.Units.iconSizes.small
+                                    icon.height: Kirigami.Units.iconSizes.small
+                                    contentItem: Kirigami.IconTitleSubtitle {
+                                        title: treeRow.text
+                                        icon: icon.fromControlsIcon(treeRow.icon)
+                                        font: treeRow.font
+                                        selected: treeRow.highlighted
+                                        visible: !treeRow.editing
+                                    }
+                                    // Qt's fallback style reads QQuickPalette instead of
+                                    // Kirigami.Theme. Bridge the view's theme roles so a
+                                    // different macOS appearance cannot hide file names.
+                                    palette {
+                                        windowText: treeRow.highlighted ? systemColors.highlightedText : treeRow.Kirigami.Theme.textColor
+                                        text: treeRow.Kirigami.Theme.textColor
+                                        base: treeRow.Kirigami.Theme.backgroundColor
+                                        alternateBase: treeRow.Kirigami.Theme.alternateBackgroundColor
+                                        accent: systemColors.accent
+                                        highlight: systemColors.accent
+                                        highlightedText: systemColors.highlightedText
+                                        inactive.highlight: systemColors.accent
+                                        inactive.highlightedText: systemColors.highlightedText
+                                    }
+                                    property bool pooled: false
+                                    TableView.onPooled: pooled = true
+                                    TableView.onReused: pooled = false
+                                    // Expanding changes the mapping of view rows even
+                                    // when a reused delegate keeps the same row number.
+                                    property var entry: row < fileTree.rows && model.display !== undefined
+                                        ? root.treeEntry(fileTree.index(row, 0)) : null
+                                    property bool pendingMove: entry && root.isPendingMove(entry.path)
+                                    property string editingPath: ""
+                                    enabled: !pendingMove
+                                    onEditingChanged: {
+                                        if (editing && entry) {
+                                            editingPath = entry.path
+                                            root.renamePath = entry.path
+                                            root.renameName = entry.name
+                                            Qt.callLater(root.focusInlineRename)
+                                        } else if (root.renamePath === editingPath) {
+                                            root.renamePath = ""
+                                            root.activeRenameEditor = null
+                                            editingPath = ""
+                                        }
+                                    }
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: entry ? (pendingMove ? "Moving… Waiting for confirmation" : entry.path) : ""
+                                    TapHandler {
+                                        acceptedButtons: Qt.RightButton
+                                        onTapped: if (treeRow.entry) {
+                                            entryMenu.path = treeRow.entry.path
+                                            entryMenu.popup()
+                                        }
+                                    }
+                                    Menu {
+                                        id: entryMenu
+                                        property string path: ""
+                                        MenuItem {
+                                            text: "Rename…"
+                                            onTriggered: root.beginRename(entryMenu.path)
+                                        }
+                                    }
+                                    DragHandler {
+                                        id: rowDrag
+                                        target: null
+                                        enabled: treeRow.entry && !treeRow.pendingMove && root.renamePath.length === 0
+                                        acceptedButtons: Qt.LeftButton
+                                        cursorShape: root.hoveringDrop && !root.validDrop ? Qt.ForbiddenCursor : Qt.ClosedHandCursor
+                                        onActiveChanged: {
+                                            if (active) root.startEntryDrag(treeRow.entry.path,
+                                                root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y))
+                                            else root.finishEntryDrag(false)
+                                        }
+                                        onCentroidChanged: if (active) {
+                                            var point = root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y)
+                                            dragGhost.x = point.x + Kirigami.Units.smallSpacing
+                                            dragGhost.y = point.y + Kirigami.Units.smallSpacing
+                                        }
+                                    }
+                                    DropArea {
+                                        anchors.fill: parent
+                                        keys: ["native-workspace-entry"]
+                                        property string directory: treeRow.entry ? (treeRow.entry.directory
+                                            ? treeRow.entry.path : root.parentDirectory(treeRow.entry.path)) : ""
+                                        onEntered: function(drag) {
+                                            if (drag.source !== dragGhost) { drag.accepted = false; return }
+                                            root.hoverDrop(directory)
+                                        }
+                                        onPositionChanged: function(drag) {
+                                            if (drag.source === dragGhost) root.hoverDrop(directory)
+                                        }
+                                        onExited: root.leaveDrop(directory)
+                                        onDropped: function(drop) {
+                                            if (drop.source === dragGhost && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
+                                        }
+                                    }
+                                    onClicked: if (entry) {
+                                        if (entry.directory) root.selectedDirectoryPath = entry.path
+                                        else root.clickSidebarEntry(entry.path, false)
+                                    }
+                                }
                             }
-                            DragHandler {
-                                id: rowDrag
-                                target: null
-                                enabled: treeRow.entry && !treeRow.pendingMove && root.renamePath.length === 0
-                                acceptedButtons: Qt.LeftButton
-                                cursorShape: root.hoveringDrop && !root.validDrop ? Qt.ForbiddenCursor : Qt.ClosedHandCursor
-                                onActiveChanged: {
-                                    if (active) root.startEntryDrag(treeRow.entry.path,
-                                        root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y))
-                                    else root.finishEntryDrag(false)
-                                }
-                                onCentroidChanged: if (active) {
-                                    var point = root.mapFromItem(null, centroid.scenePosition.x, centroid.scenePosition.y)
-                                    dragGhost.x = point.x + 12
-                                    dragGhost.y = point.y + 12
-                                }
-                            }
-                            DropArea {
-                                anchors.fill: parent
-                                keys: ["native-workspace-entry"]
-                                property string directory: treeRow.entry ? (treeRow.entry.directory
-                                    ? treeRow.entry.path : root.parentDirectory(treeRow.entry.path)) : ""
-                                onEntered: function(drag) {
-                                    if (drag.source !== dragGhost) { drag.accepted = false; return }
-                                    root.hoverDrop(directory)
-                                }
-                                onPositionChanged: function(drag) {
-                                    if (drag.source === dragGhost) root.hoverDrop(directory)
-                                }
-                                onExited: root.leaveDrop(directory)
-                                onDropped: function(drop) {
-                                    if (drop.source === dragGhost && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
-                                }
-                            }
-                            Rectangle {
-                                anchors.fill: parent
-                                z: 2
-                                color: root.validDrop ? Qt.rgba(palette.highlight.r, palette.highlight.g, palette.highlight.b, 0.14)
-                                    : "#18d64545"
-                                border.width: 2
-                                border.color: root.validDrop ? palette.highlight : "#d64545"
-                                visible: root.draggingPath.length > 0 && root.hoveringDrop && treeRow.entry && treeRow.entry.directory
-                                    && root.hoverDirectory === treeRow.entry.path
-                            }
-                            rightPadding: 38
-                            highlighted: entry && (entry.directory ? root.selectedDirectoryPath === entry.path
-                                : root.selectedDirectoryPath.length === 0 && root.selectedResultIndex < 0 && root.controller.active_document_id === entry.path)
-                            onClicked: if (entry) root.clickSidebarEntry(entry.path, entry.directory)
-                            Row {
+                            Kirigami.AbstractCard {
+                                id: workspaceDropTarget
+                                objectName: "workspaceDropTarget"
+                                anchors.left: parent.left
                                 anchors.right: parent.right
-                                anchors.rightMargin: 8
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: 4
-                                Label {
-                                    text: "⚠"
-                                    visible: treeRow.entry && !treeRow.entry.directory
-                                        && root.controller.conflicted_document_ids.indexOf(treeRow.entry.path) !== -1
-                                    color: palette.highlight
+                                anchors.bottom: parent.bottom
+                                height: visible ? implicitHeight : 0
+                                visible: root.sidebarTab === 0 && root.draggingPath.length > 0
+                                text: root.hoveringDrop && !root.validDrop ? "This folder cannot receive the item" : "Move to workspace root"
+                                contentItem: Kirigami.IconTitleSubtitle {
+                                    title: workspaceDropTarget.text
+                                    icon.name: root.hoveringDrop && !root.validDrop ? "dialog-warning" : "go-up"
                                 }
-                                Label {
-                                    text: "●"
-                                    visible: treeRow.entry && !treeRow.entry.directory
-                                        && root.controller.dirty_document_ids.indexOf(treeRow.entry.path) !== -1
-                                }
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: workspaceDropTarget
-                        objectName: "workspaceDropTarget"
-                        anchors.left: sidebarTabs.right
-                        anchors.right: parent.right
-                        anchors.bottom: searchRow.top
-                        anchors.bottomMargin: 6
-                        height: visible ? 32 : 0
-                        z: 5
-                        visible: root.sidebarTab === 0 && root.draggingPath.length > 0
-                        color: root.hoveringDrop && root.hoverDirectory === ""
-                            ? Qt.rgba(sidebarPalette.highlight.r, sidebarPalette.highlight.g, sidebarPalette.highlight.b, 0.14)
-                            : sidebarPalette.base
-                        border.width: root.hoveringDrop && root.hoverDirectory === "" ? 2 : 1
-                        border.color: root.hoveringDrop && root.hoverDirectory === "" && !root.validDrop
-                            ? "#d64545" : sidebarPalette.highlight
-                        Label {
-                            anchors.centerIn: parent
-                            text: "Move to workspace root"
-                        }
-                        DropArea {
-                            anchors.fill: parent
-                            keys: ["native-workspace-entry"]
-                            onEntered: function(drag) {
-                                if (drag.source === dragGhost) root.hoverDrop("")
-                                else drag.accepted = false
-                            }
-                            onExited: root.leaveDrop("")
-                            onDropped: function(drop) {
-                                if (drop.source === dragGhost && root.dropEntry("")) drop.accept(Qt.MoveAction)
-                            }
-                        }
-                    }
-                    ListView {
-                        id: fileList
-                        objectName: "searchResults"
-                        anchors.top: textSearchRow.bottom
-                        anchors.left: sidebarTabs.right
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        visible: root.sidebarTab === 1
-                        clip: true
-                        model: sidebarModel
-                        reuseItems: true
-                        Label {
-                            anchors.centerIn: parent
-                            text: root.sidebarTab === 1 ? "No text matches" : (root.fileNameQuery.length > 0 ? "No matching names" : "No files")
-                            visible: root.sidebarTab < 2 && root.controller.workspace_name.length > 0 && root.visibleSidebarEntries.length === 0 && !root.controller.search_in_progress
-                        }
-                        delegate: Column {
-                            id: fileGroup
-                            width: ListView.view.width
-                            property string fileId: model.path
-                            property bool isDirectory: model.directory
-                            property int depth: fileId.split("/").length - 1
-                            ItemDelegate {
-                                objectName: "sidebarSearchFile:" + fileGroup.fileId
-                                width: parent.width
-                                height: 28
-                                text: root.renamePath === fileGroup.fileId ? "" : fileGroup.fileId.split("/").pop()
-                                icon.name: fileGroup.isDirectory
-                                    ? (root.sidebarTab === 1 || root.fileNameQuery.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false ? "folder-open" : "folder")
-                                    : root.documentThemeIcon(fileGroup.fileId)
-                                icon.source: fileGroup.isDirectory
-                                    ? root.controller.folder_icon(fileGroup.fileId, root.sidebarTab === 1 || root.fileNameQuery.length > 0 || root.collapsedDirectories[fileGroup.fileId] === false)
-                                    : root.controller.file_icon(fileGroup.fileId)
-                                icon.color: "transparent"
-                                icon.width: 16
-                                icon.height: 16
-                                leftPadding: 28 + fileGroup.depth * 16
-                                rightPadding: 38
-                                highlighted: fileGroup.isDirectory ? root.selectedDirectoryPath === fileGroup.fileId
-                                    : root.selectedDirectoryPath.length === 0 && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
-                                onClicked: root.clickSidebarEntry(fileGroup.fileId, fileGroup.isDirectory)
-                                TapHandler {
-                                    acceptedButtons: Qt.RightButton
-                                    onTapped: searchEntryMenu.popup()
-                                }
-                                Menu {
-                                    id: searchEntryMenu
-                                    MenuItem {
-                                        text: "Rename…"
-                                        onTriggered: root.beginRename(fileGroup.fileId)
+                                DropArea {
+                                    anchors.fill: parent
+                                    keys: ["native-workspace-entry"]
+                                    onEntered: function(drag) {
+                                        if (drag.source === dragGhost) root.hoverDrop("")
+                                        else drag.accepted = false
                                     }
-                                }
-                                Basic.TextField {
-                                    id: searchRenameField
-                                    objectName: "sidebarRenameField"
-                                    visible: root.renamePath === fileGroup.fileId
-                                    anchors.left: parent.left
-                                    anchors.leftMargin: parent.leftPadding + parent.icon.width + parent.spacing
-                                    anchors.right: parent.right
-                                    anchors.rightMargin: parent.rightPadding
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    height: 24
-                                    text: visible ? root.renameName : ""
-                                    onVisibleChanged: if (visible) {
-                                        root.activeRenameEditor = searchRenameField
-                                        Qt.callLater(root.focusInlineRename)
-                                    }
-                                    onTextEdited: root.renameName = text
-                                    onAccepted: root.commitRename()
-                                    onActiveFocusChanged: if (!activeFocus && root.activeRenameEditor === searchRenameField && visible)
-                                        root.renamePath = ""
-                                    Keys.onEscapePressed: root.renamePath = ""
-                                }
-                                Label {
-                                    x: 10 + fileGroup.depth * 16
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    visible: fileGroup.isDirectory
-                                    text: root.sidebarTab === 0 && root.fileNameQuery.length === 0 && root.collapsedDirectories[fileGroup.fileId] !== false ? "▸" : "▾"
-                                }
-                                Row {
-                                    anchors.right: parent.right
-                                    anchors.rightMargin: 8
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    spacing: 4
-                                    Label {
-                                        text: "⚠"
-                                        visible: !fileGroup.isDirectory && root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
-                                        color: palette.highlight
-                                    }
-                                    Label {
-                                        text: "●"
-                                        visible: !fileGroup.isDirectory && root.controller.dirty_document_ids.indexOf(fileGroup.fileId) !== -1
+                                    onExited: root.leaveDrop("")
+                                    onDropped: function(drop) {
+                                        if (drop.source === dragGhost && root.dropEntry("")) drop.accept(Qt.MoveAction)
                                     }
                                 }
                             }
-                            Repeater {
-                                model: fileGroup.isDirectory || root.controller.search_query.length === 0
-                                    ? [] : root.matchIndicesForFile(fileGroup.fileId)
-                                delegate: Basic.ItemDelegate {
-                                    property int resultIndex: modelData
-                                    width: fileGroup.width
-                                    height: 23
-                                    topPadding: 2
-                                    bottomPadding: 2
-                                    leftPadding: 32 + fileGroup.depth * 16
-                                    highlighted: root.selectedResultIndex === resultIndex
-                                    onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)
-                                    contentItem: Label {
-                                        text: "↳ " + root.controller.search_result_lines[resultIndex] + ":" + root.controller.search_result_columns[resultIndex] + "  " + (root.controller.search_result_snippets[resultIndex] || "")
-                                        font.pointSize: 9
-                                        elide: Text.ElideRight
-                                    }
+                            ListView {
+                                id: fileList
+                                objectName: "searchResults"
+                                anchors.top: sidebarHeader.bottom
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                visible: root.sidebarTab === 1
+                                clip: true
+                                model: sidebarModel
+                                reuseItems: true
+                                ScrollBar.vertical: ScrollBar { }
+                                Kirigami.PlaceholderMessage {
+                                    anchors.centerIn: parent
+                                    width: parent.width - Kirigami.Units.largeSpacing * 2
+                                    text: root.controller.search_query.length > 0 ? "No text matches" : "Search in Files"
+                                    explanation: root.controller.search_query.length > 0 ? "Try a different search." : "Enter text to search this workspace."
+                                    icon.name: "edit-find"
+                                    visible: root.visibleSidebarEntries.length === 0 && !root.controller.search_in_progress
                                 }
-                            }
-                        }
-                    }
-                    RowLayout {
-                        id: searchRow
-                        visible: root.sidebarTab === 0
-                        anchors.left: sidebarTabs.right
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        anchors.leftMargin: 6
-                        anchors.rightMargin: 6
-                        anchors.bottomMargin: 6
-                        height: 26
-                        spacing: 6
-                        ToolButton {
-                            text: "+"
-                            font.pixelSize: 20
-                            font.weight: Font.Medium
-                            Layout.preferredWidth: 26
-                            Layout.preferredHeight: 26
-                            ToolTip.visible: hovered
-                            ToolTip.text: "Add file or folder"
-                            onClicked: addMenu.open()
-                            Menu {
-                                id: addMenu
-                                MenuItem {
-                                    text: "New File"
-                                    onTriggered: {
-                                        root.creatingDirectory = false
-                                        createEntryDialog.open()
-                                    }
-                                }
-                                MenuItem {
-                                    text: "New Folder"
-                                    onTriggered: {
-                                        root.creatingDirectory = true
-                                        createEntryDialog.open()
-                                    }
-                                }
-                            }
-                        }
-                        TextField {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 26
-                            font.pixelSize: 12
-                            text: root.fileNameQuery
-                            placeholderText: "Filter names"
-                            onTextEdited: {
-                                root.selectedResultIndex = -1
-                                root.fileNameQuery = text
-                            }
-                        }
-                    }
-                }
-            }
-            ColumnLayout {
-                SplitView.fillWidth: true
-                SplitView.fillHeight: true
-                spacing: 0
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    color: palette.base
-                    border.color: palette.mid
-                    border.width: 1
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: 1
-                        spacing: 0
-                        FontMetrics { id: editorMetrics; font: editor.font }
-                        FontInfo { id: resolvedEditorFont; font: editor.font }
-                        Canvas {
-                            id: lineNumbers
-                            objectName: "editorLineNumbers"
-                            Layout.preferredWidth: 48
-                            Layout.fillHeight: true
-                            property var lineStarts: {
-                                var starts = [0]
-                                var source = editor.text
-                                for (var offset = source.indexOf("\n"); offset >= 0;
-                                     offset = source.indexOf("\n", offset + 1))
-                                    starts.push(offset + 1)
-                                return starts
-                            }
-                            function numberBaseline(line) {
-                                var rect = editor.positionToRectangle(lineStarts[line])
-                                return rect.y - editorScroll.contentItem.contentY
-                                    + (rect.height - editorMetrics.height) / 2 + editorMetrics.ascent
-                            }
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.clearRect(0, 0, width, height)
-                                if (editor.enabled) {
-                                    ctx.fillStyle = editor.activeLineColor
-                                    ctx.fillRect(0, editor.cursorRectangle.y - editorScroll.contentItem.contentY,
-                                                 width, editor.cursorRectangle.height)
-                                }
-                                ctx.fillStyle = "#808080"
-                                ctx.font = resolvedEditorFont.pixelSize + 'px "' + resolvedEditorFont.family + '"'
-                                ctx.textAlign = "right"
-                                var scrollY = editorScroll.contentItem.contentY
-                                var position = editor.positionAt(editor.leftPadding, scrollY)
-                                var low = 0
-                                var high = lineStarts.length
-                                while (low + 1 < high) {
-                                    var middle = Math.floor((low + high) / 2)
-                                    if (lineStarts[middle] <= position) low = middle
-                                    else high = middle
-                                }
-                                for (var line = Math.max(0, low - 1); line < lineStarts.length; ++line) {
-                                    var rect = editor.positionToRectangle(lineStarts[line])
-                                    if (rect.y - scrollY >= height) break
-                                    if (rect.y + rect.height - scrollY <= 0) continue
-                                    ctx.fillText(String(line + 1), width - 8, numberBaseline(line))
-                                }
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                enabled: editor.enabled
-                                onPressed: function(mouse) {
-                                    editor.forceActiveFocus()
-                                    editor.cursorPosition = editor.positionAt(editor.leftPadding,
-                                        mouse.y + editorScroll.contentItem.contentY)
-                                }
-                            }
-                        }
-                        ScrollView {
-                            id: editorScroll
-                            objectName: "editorScroll"
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Basic.TextArea {
-                                id: editor
-                                objectName: "documentEditor"
-                                width: Math.max(editorScroll.availableWidth, implicitWidth)
-                                height: Math.max(editorScroll.availableHeight, implicitHeight)
-                                property color activeLineColor: Qt.rgba(palette.highlight.r,
-                                    palette.highlight.g, palette.highlight.b, 0.10)
-                                background: Rectangle {
-                                    color: "transparent"
-                                    clip: true
-                                    Rectangle {
-                                        objectName: "editorActiveLine"
-                                        // TextArea keeps its background fixed to the scroll viewport.
-                                        y: editor.cursorRectangle.y - editorScroll.contentItem.contentY
+                                delegate: Column {
+                                    id: fileGroup
+                                    width: ListView.view.width
+                                    property string fileId: model.path
+                                    property bool isDirectory: model.directory
+                                    Kirigami.SubtitleDelegate {
+                                        id: searchFileDelegate
+                                        objectName: "sidebarSearchFile:" + fileGroup.fileId
                                         width: parent.width
-                                        height: editor.cursorRectangle.height
-                                        color: editor.activeLineColor
-                                        visible: editor.enabled
-                                    }
-                                }
-                                font: EditorFonts.fixedFont
-                                textFormat: TextEdit.PlainText
-                                wrapMode: TextEdit.NoWrap
-                                EditorSyntaxHighlighter {
-                                    id: syntaxHighlighter
-                                    textDocument: editor.textDocument
-                                }
-                                enabled: root.controller.active_document_id.length > 0
-                                placeholderText: "Select a document"
-                                onCursorRectangleChanged: lineNumbers.requestPaint()
-                                onActiveLineColorChanged: lineNumbers.requestPaint()
-                                onEnabledChanged: lineNumbers.requestPaint()
-                                onFontChanged: lineNumbers.requestPaint()
-                                onTextChanged: {
-                                    root.updateHighlight()
-                                    lineNumbers.requestPaint()
-                                    if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
-                                        root.selectedResultIndex = -1
-                                        root.controller.change_document(text)
-                                    }
-                                }
-                            }
-                        }
-                        Canvas {
-                            id: minimap
-                            Layout.preferredWidth: 100
-                            Layout.fillHeight: true
-                            clip: true
-                            property real contentHeight: root.minimapLines.length * 2
-                            property real viewportTop: editorScroll.contentItem.contentY
-                                / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
-                            property real viewportHeight: editorScroll.contentItem.height
-                                / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
-                            property int mapOffset: Math.floor(Math.max(0,
-                                Math.min(contentHeight - height, viewportTop - (height - viewportHeight) / 2)))
-                            onMapOffsetChanged: requestPaint()
-                            onHeightChanged: requestPaint()
-                            onPaint: {
-                                var ctx = getContext("2d")
-                                ctx.clearRect(0, 0, width, height)
-                                var lines = root.minimapLines
-                                var palette = ["#9ba4ae", "#aa70d3", "#d88b44", "#5eb569", "#858e97", "#569ae0"]
-                                var first = Math.max(0, Math.floor(mapOffset / 2))
-                                var last = Math.min(lines.length, Math.ceil((mapOffset + height) / 2))
-                                for (var line = first; line < last; ++line) {
-                                    var offset = root.minimapOffsets[line]
-                                    var y = line * 2 - mapOffset
-                                    var x = 4
-                                    var source = lines[line]
-                                    for (var column = 0; column < source.length && x < width - 4; ++column) {
-                                        var code = source.charCodeAt(column)
-                                        if (code === 9) {
-                                            x += 4 - (x - 4) % 4
-                                        } else {
-                                            if (code > 32) {
-                                                ctx.fillStyle = palette[root.minimapKinds[offset + column] || 0]
-                                                var glyphIndex = (code >= 32 && code <= 126 ? code - 32 : 95) * 2
-                                                var top = root.minimapGlyphs[glyphIndex] || 0
-                                                var bottom = root.minimapGlyphs[glyphIndex + 1] || 0
-                                                if (top > 0) {
-                                                    ctx.globalAlpha = Math.min(1, top / 128)
-                                                    ctx.fillRect(x, y, 1, 1)
-                                                }
-                                                if (bottom > 0) {
-                                                    ctx.globalAlpha = Math.min(1, bottom / 128)
-                                                    ctx.fillRect(x, y + 1, 1, 1)
-                                                }
-                                                ctx.globalAlpha = 1
+                                        text: root.renamePath === fileGroup.fileId ? "" : fileGroup.fileId.split("/").pop()
+                                        subtitle: root.parentDirectory(fileGroup.fileId)
+                                        icon.source: root.entryIcon(fileGroup.fileId, fileGroup.isDirectory, true)
+                                        icon.color: "transparent"
+                                        rightPadding: searchStatus.implicitWidth + Kirigami.Units.smallSpacing
+                                        highlighted: fileGroup.isDirectory ? root.selectedDirectoryPath === fileGroup.fileId
+                                            : root.selectedDirectoryPath.length === 0 && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
+                                        onClicked: root.clickSidebarEntry(fileGroup.fileId, fileGroup.isDirectory)
+                                        Row {
+                                            id: searchStatus
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: Kirigami.Units.smallSpacing
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            spacing: Kirigami.Units.smallSpacing
+                                            Kirigami.Icon {
+                                                source: "dialog-warning"
+                                                visible: !fileGroup.isDirectory && root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
+                                                width: Kirigami.Units.iconSizes.small
+                                                height: width
+                                                Accessible.name: "File changed on disk"
                                             }
-                                            ++x
+                                            Kirigami.Icon {
+                                                source: "document-edit"
+                                                visible: !fileGroup.isDirectory && root.controller.dirty_document_ids.indexOf(fileGroup.fileId) !== -1
+                                                width: Kirigami.Units.iconSizes.small
+                                                height: width
+                                                Accessible.name: "Unsaved changes"
+                                            }
+                                        }
+                                        TapHandler {
+                                            acceptedButtons: Qt.RightButton
+                                            onTapped: searchEntryMenu.popup()
+                                        }
+                                        Menu {
+                                            id: searchEntryMenu
+                                            MenuItem {
+                                                text: "Rename…"
+                                                icon.name: "edit-rename"
+                                                onTriggered: root.beginRename(fileGroup.fileId)
+                                            }
+                                        }
+                                        TextField {
+                                            id: searchRenameField
+                                            objectName: "sidebarRenameField"
+                                            visible: root.renamePath === fileGroup.fileId
+                                            anchors.left: parent.left
+                                            anchors.leftMargin: parent.leftPadding + parent.icon.width + parent.spacing
+                                            anchors.right: parent.right
+                                            anchors.rightMargin: parent.rightPadding
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            text: visible ? root.renameName : ""
+                                            onVisibleChanged: if (visible) {
+                                                root.activeRenameEditor = searchRenameField
+                                                Qt.callLater(root.focusInlineRename)
+                                            }
+                                            onTextEdited: root.renameName = text
+                                            onAccepted: root.commitRename()
+                                            onActiveFocusChanged: if (!activeFocus && root.activeRenameEditor === searchRenameField && visible)
+                                                root.renamePath = ""
+                                            Keys.onEscapePressed: root.renamePath = ""
+                                        }
+                                    }
+                                    Repeater {
+                                        model: fileGroup.isDirectory || root.controller.search_query.length === 0
+                                            ? [] : root.matchIndicesForFile(fileGroup.fileId)
+                                        delegate: Kirigami.SubtitleDelegate {
+                                            property int resultIndex: modelData
+                                            width: fileGroup.width
+                                            text: root.controller.search_result_snippets[resultIndex] || ""
+                                            subtitle: "Line " + root.controller.search_result_lines[resultIndex] + ", Column " + root.controller.search_result_columns[resultIndex]
+                                            icon.name: "go-jump"
+                                            highlighted: root.selectedResultIndex === resultIndex
+                                            onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)
                                         }
                                     }
                                 }
                             }
-                            Rectangle {
-                                width: minimap.width
-                                y: minimap.viewportTop - minimap.mapOffset
-                                height: Math.max(8, minimap.viewportHeight)
-                                color: Qt.rgba(0.5, 0.5, 0.5, 0.2)
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                property real dragOffset: 0
-                                onPressed: {
-                                    dragOffset = minimap.mapOffset
-                                    moveTo(mouseY, dragOffset)
-                                }
-                                onPositionChanged: if (pressed) moveTo(mouseY, dragOffset)
-                                onWheel: function(wheel) {
-                                    var flick = editorScroll.contentItem
-                                    flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
-                                        flick.contentY - wheel.angleDelta.y / 120 * editorMetrics.height * 3))
-                                    wheel.accepted = true
-                                }
-                                function moveTo(y, offset) {
-                                    var flick = editorScroll.contentItem
-                                    flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
-                                        (y + offset) / Math.max(1, minimap.contentHeight)
-                                            * flick.contentHeight - flick.height / 2))
-                                }
-                            }
-                        }
-                        Connections {
-                            target: editorScroll.contentItem
-                            function onContentYChanged() {
-                                lineNumbers.requestPaint()
-                            }
                         }
                     }
                 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.leftMargin: 8
-                    Layout.rightMargin: 8
-                    visible: root.controller.active_document_external_change
-                    Label {
-                        text: "This file changed on disk"
+            }
+            initialPage: Kirigami.Page {
+                id: editorPage
+                objectName: "workspaceEditorPage"
+                title: root.controller.workspace_name
+                actions: root.pageActions
+                padding: 0
+                ColumnLayout {
+                    anchors.fill: parent
+                    spacing: Kirigami.Units.smallSpacing
+                    Pane {
                         Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        padding: 0
+                        Kirigami.Theme.colorSet: Kirigami.Theme.View
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 0
+                            FontMetrics { id: editorMetrics; font: editor.font }
+                            FontInfo { id: resolvedEditorFont; font: editor.font }
+                            Canvas {
+                                id: lineNumbers
+                                objectName: "editorLineNumbers"
+                                Layout.preferredWidth: editorMetrics.averageCharacterWidth * Math.max(3, String(lineStarts.length).length) + Kirigami.Units.largeSpacing * 2
+                                Layout.fillHeight: true
+                                property var lineStarts: {
+                                    var starts = [0]
+                                    var source = editor.text
+                                    for (var offset = source.indexOf("\n"); offset >= 0;
+                                         offset = source.indexOf("\n", offset + 1))
+                                        starts.push(offset + 1)
+                                    return starts
+                                }
+                                function numberBaseline(line) {
+                                    var rect = editor.positionToRectangle(lineStarts[line])
+                                    return rect.y - editorScroll.contentItem.contentY
+                                        + (rect.height - editorMetrics.height) / 2 + editorMetrics.ascent
+                                }
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.clearRect(0, 0, width, height)
+                                    if (editor.enabled) {
+                                        ctx.fillStyle = editor.activeLineColor
+                                        ctx.fillRect(0, editor.cursorRectangle.y - editorScroll.contentItem.contentY,
+                                                     width, editor.cursorRectangle.height)
+                                    }
+                                    ctx.fillStyle = Kirigami.Theme.disabledTextColor
+                                    ctx.font = resolvedEditorFont.pixelSize + 'px "' + resolvedEditorFont.family + '"'
+                                    ctx.textAlign = "right"
+                                    var scrollY = editorScroll.contentItem.contentY
+                                    var position = editor.positionAt(editor.leftPadding, scrollY)
+                                    var low = 0
+                                    var high = lineStarts.length
+                                    while (low + 1 < high) {
+                                        var middle = Math.floor((low + high) / 2)
+                                        if (lineStarts[middle] <= position) low = middle
+                                        else high = middle
+                                    }
+                                    for (var line = Math.max(0, low - 1); line < lineStarts.length; ++line) {
+                                        var rect = editor.positionToRectangle(lineStarts[line])
+                                        if (rect.y - scrollY >= height) break
+                                        if (rect.y + rect.height - scrollY <= 0) continue
+                                        ctx.fillText(String(line + 1), width - Kirigami.Units.largeSpacing, numberBaseline(line))
+                                    }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: editor.enabled
+                                    cursorShape: Qt.IBeamCursor
+                                    onPressed: function(mouse) {
+                                        editor.forceActiveFocus()
+                                        editor.cursorPosition = editor.positionAt(editor.leftPadding,
+                                            mouse.y + editorScroll.contentItem.contentY)
+                                    }
+                                }
+                            }
+                            ScrollView {
+                                id: editorScroll
+                                objectName: "editorScroll"
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                TextArea {
+                                    id: editor
+                                    objectName: "documentEditor"
+                                    width: Math.max(editorScroll.availableWidth, implicitWidth)
+                                    height: Math.max(editorScroll.availableHeight, implicitHeight)
+                                    readonly property color activeLineColor: Qt.rgba(systemColors.accent.r,
+                                        systemColors.accent.g, systemColors.accent.b, 0.15)
+                                    // Code navigation annotation; keep the style's TextArea background.
+                                    Item {
+                                        parent: editor.background
+                                        anchors.fill: parent
+                                        clip: true
+                                        Rectangle {
+                                            id: activeLine
+                                            objectName: "editorActiveLine"
+                                            y: editor.cursorRectangle.y - editorScroll.contentItem.contentY
+                                            width: editor.width
+                                            height: editor.cursorRectangle.height
+                                            color: editor.activeLineColor
+                                            visible: editor.enabled
+                                        }
+                                    }
+                                    font: EditorFonts.fixedFont
+                                    textFormat: TextEdit.PlainText
+                                    wrapMode: TextEdit.NoWrap
+                                    EditorSyntaxHighlighter {
+                                        id: syntaxHighlighter
+                                        textDocument: editor.textDocument
+                                        colors: root.syntaxColors
+                                    }
+                                    enabled: root.controller.active_document_id.length > 0
+                                    onCursorRectangleChanged: lineNumbers.requestPaint()
+                                    onActiveLineColorChanged: lineNumbers.requestPaint()
+                                    onEnabledChanged: lineNumbers.requestPaint()
+                                    onFontChanged: lineNumbers.requestPaint()
+                                    onTextChanged: {
+                                        root.updateHighlight()
+                                        lineNumbers.requestPaint()
+                                        if (!root.syncingEditor && root.controller.active_document_id.length > 0 && text !== root.controller.active_document_text) {
+                                            root.selectedResultIndex = -1
+                                            root.controller.change_document(text)
+                                        }
+                                    }
+                                }
+                            }
+                            Canvas {
+                                id: minimap
+                                objectName: "editorMinimap"
+                                Layout.preferredWidth: Kirigami.Units.gridUnit * 5
+                                Layout.fillHeight: true
+                                clip: true
+                                property real contentHeight: root.minimapLines.length * 2
+                                property real viewportTop: editorScroll.contentItem.contentY
+                                    / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                                property real viewportHeight: editorScroll.contentItem.height
+                                    / Math.max(1, editorScroll.contentItem.contentHeight) * contentHeight
+                                property int mapOffset: Math.floor(Math.max(0,
+                                    Math.min(contentHeight - height, viewportTop - (height - viewportHeight) / 2)))
+                                onMapOffsetChanged: requestPaint()
+                                onHeightChanged: requestPaint()
+                                onPaint: {
+                                    var ctx = getContext("2d")
+                                    ctx.clearRect(0, 0, width, height)
+                                    var lines = root.minimapLines
+                                    var palette = root.syntaxColors
+                                    var first = Math.max(0, Math.floor(mapOffset / 2))
+                                    var last = Math.min(lines.length, Math.ceil((mapOffset + height) / 2))
+                                    for (var line = first; line < last; ++line) {
+                                        var offset = root.minimapOffsets[line]
+                                        var y = line * 2 - mapOffset
+                                        var x = 4
+                                        var source = lines[line]
+                                        for (var column = 0; column < source.length && x < width - 4; ++column) {
+                                            var code = source.charCodeAt(column)
+                                            if (code === 9) {
+                                                x += 4 - (x - 4) % 4
+                                            } else {
+                                                if (code > 32) {
+                                                    ctx.fillStyle = palette[root.minimapKinds[offset + column] || 0]
+                                                    var glyphIndex = (code >= 32 && code <= 126 ? code - 32 : 95) * 2
+                                                    var top = root.minimapGlyphs[glyphIndex] || 0
+                                                    var bottom = root.minimapGlyphs[glyphIndex + 1] || 0
+                                                    if (top > 0) {
+                                                        ctx.globalAlpha = Math.min(1, top / 128)
+                                                        ctx.fillRect(x, y, 1, 1)
+                                                    }
+                                                    if (bottom > 0) {
+                                                        ctx.globalAlpha = Math.min(1, bottom / 128)
+                                                        ctx.fillRect(x, y + 1, 1, 1)
+                                                    }
+                                                    ctx.globalAlpha = 1
+                                                }
+                                                ++x
+                                            }
+                                        }
+                                    }
+                                }
+                                Rectangle {
+                                    width: minimap.width
+                                    y: minimap.viewportTop - minimap.mapOffset
+                                    height: Math.max(8, minimap.viewportHeight)
+                                    color: "transparent"
+                                    border.color: Kirigami.Theme.highlightColor
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+                                    property real dragOffset: 0
+                                    onPressed: {
+                                        dragOffset = minimap.mapOffset
+                                        moveTo(mouseY, dragOffset)
+                                    }
+                                    onPositionChanged: if (pressed) moveTo(mouseY, dragOffset)
+                                    onWheel: function(wheel) {
+                                        var flick = editorScroll.contentItem
+                                        flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                            flick.contentY - wheel.angleDelta.y / 120 * editorMetrics.height * 3))
+                                        wheel.accepted = true
+                                    }
+                                    function moveTo(y, offset) {
+                                        var flick = editorScroll.contentItem
+                                        flick.contentY = Math.max(0, Math.min(flick.contentHeight - flick.height,
+                                            (y + offset) / Math.max(1, minimap.contentHeight)
+                                                * flick.contentHeight - flick.height / 2))
+                                    }
+                                }
+                            }
+                            Connections {
+                                target: editorScroll.contentItem
+                                function onContentYChanged() {
+                                    lineNumbers.requestPaint()
+                                }
+                            }
+                        }
+                        Kirigami.PlaceholderMessage {
+                            anchors.centerIn: parent
+                            visible: root.controller.active_document_id.length === 0
+                            icon.name: "document-edit"
+                            text: "No Document Open"
+                            explanation: "Choose a file from the sidebar."
+                        }
                     }
-                    Button {
-                        text: "Reload (discard edits)"
-                        onClicked: root.controller.reload_document()
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: root.controller.active_document_external_change
+                        text: "This file changed on disk. Reload it or save your edits over the disk version."
+                        type: Kirigami.MessageType.Warning
+                        actions: [
+                            Kirigami.Action {
+                                text: "Reload (discard edits)"
+                                icon.name: "view-refresh"
+                                onTriggered: root.controller.reload_document()
+                            },
+                            Kirigami.Action {
+                                text: "Overwrite Disk"
+                                icon.name: "document-save"
+                                onTriggered: if (root.flushEditor()) root.controller.overwrite_document()
+                            }
+                        ]
                     }
-                    Button {
-                        text: "Overwrite disk"
-                        onClicked: if (root.flushEditor()) root.controller.overwrite_document()
+                    Kirigami.InlineMessage {
+                        Layout.fillWidth: true
+                        visible: root.controller.error_message.length > 0
+                        text: root.controller.error_message
+                        type: Kirigami.MessageType.Error
                     }
                 }
             }
         }
-        Rectangle {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 1
-            color: palette.mid
-        }
+        Kirigami.Separator { Layout.fillWidth: true }
         RowLayout {
             Layout.fillWidth: true
-            Layout.margins: 8
-            Label { text: root.controller.active_document_id || "No document" }
+            Layout.margins: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.largeSpacing
+            BusyIndicator {
+                objectName: "pendingMoveIndicator"
+                visible: root.controller.pending_move_target.length > 0
+                running: visible
+                Layout.preferredWidth: Kirigami.Units.iconSizes.small
+                Layout.preferredHeight: Kirigami.Units.iconSizes.small
+                Accessible.name: "Moving… Waiting for confirmation"
+            }
             Label {
-                text: root.controller.error_message || (root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved"))
+                text: root.controller.active_document_id || "No document"
+                elide: Text.ElideMiddle
                 Layout.fillWidth: true
-                horizontalAlignment: Text.AlignRight
-                elide: Text.ElideRight
+            }
+            Label {
+                text: root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved")
             }
         }
     }
 
     Connections {
         target: root.controller
-        function onActive_document_idChanged() { Qt.callLater(root.updateHighlight) }
+        function onActive_document_idChanged() {
+            Qt.callLater(root.updateHighlight)
+            Qt.callLater(root.restoreFileTreeSelection)
+        }
         function onActive_document_textChanged() {
             if (editor.text !== root.controller.active_document_text) {
                 root.selectedResultIndex = -1

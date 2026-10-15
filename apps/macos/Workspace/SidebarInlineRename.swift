@@ -15,9 +15,6 @@ struct SidebarInlineRename: NSViewRepresentable {
         field.font = .systemFont(ofSize: NSFont.systemFontSize)
         field.focusRingType = .exterior
         field.delegate = context.coordinator
-        field.cancelOnOutsideClick = { [weak coordinator = context.coordinator] in
-            coordinator?.parent.cancel()
-        }
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setAccessibilityLabel("Rename")
         let full = name as NSString
@@ -31,33 +28,11 @@ struct SidebarInlineRename: NSViewRepresentable {
         if field.stringValue != name { field.stringValue = name }
     }
 
-    static func dismantleNSView(_ field: NSTextField, coordinator: Coordinator) {
-        (field as? RenameTextField)?.stopClickMonitor()
-    }
-
     final class RenameTextField: NSTextField {
         var selectLength = 0
-        var cancelOnOutsideClick: (() -> Void)?
-        private var clickMonitor: Any?
-
-        func stopClickMonitor() {
-            if let clickMonitor { NSEvent.removeMonitor(clickMonitor) }
-            clickMonitor = nil
-        }
-
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
-            stopClickMonitor()
             guard window != nil else { return }
-            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
-                guard let self else { return event }
-                if event.window === self.window {
-                    let point = self.convert(event.locationInWindow, from: nil)
-                    if self.bounds.contains(point) { return event }
-                }
-                self.cancelOnOutsideClick?()
-                return nil
-            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, let window = self.window else { return }
                 window.makeFirstResponder(self)

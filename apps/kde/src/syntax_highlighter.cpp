@@ -1,6 +1,8 @@
 #include "syntax_highlighter.h"
 
 #include <QSyntaxHighlighter>
+#include <QGuiApplication>
+#include <QPalette>
 #include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextDocument>
@@ -20,6 +22,11 @@ public:
         rehighlight();
     }
 
+    void setColors(const QList<QColor>& colors) {
+        colors_ = colors;
+        rehighlight();
+    }
+
 protected:
     void highlightBlock(const QString&) override {
         const int blockStart = currentBlock().position();
@@ -29,13 +36,8 @@ protected:
             const int to = qMin(span.end, blockEnd);
             if (from >= to) continue;
             QTextCharFormat format;
-            switch (span.kind) {
-            case 1: format.setForeground(QColor("#9141ac")); break;
-            case 2: format.setForeground(QColor("#c64600")); break;
-            case 3: format.setForeground(QColor("#2e9f55")); break;
-            case 4: format.setForeground(QColor("#808080")); break;
-            default: format.setForeground(QColor("#3584e4")); break;
-            }
+            format.setForeground(span.kind >= 0 && span.kind < colors_.size()
+                ? colors_[span.kind] : QGuiApplication::palette().color(QPalette::Text));
             setFormat(from - blockStart, to - from, format);
         }
     }
@@ -43,6 +45,7 @@ protected:
 private:
     struct Span { int start; int end; int kind; };
     QList<Span> spans_;
+    QList<QColor> colors_;
 };
 
 EditorSyntaxHighlighter::EditorSyntaxHighlighter(QObject* parent) : QObject(parent) {}
@@ -52,13 +55,22 @@ void EditorSyntaxHighlighter::setTextDocument(QQuickTextDocument* document) {
     delete highlighter_;
     document_ = document;
     highlighter_ = document ? new CodeHighlighter(document->textDocument()) : nullptr;
-    if (highlighter_) static_cast<CodeHighlighter*>(highlighter_)->setSpans(spans_);
+    if (highlighter_) {
+        static_cast<CodeHighlighter*>(highlighter_)->setColors(colors_);
+        static_cast<CodeHighlighter*>(highlighter_)->setSpans(spans_);
+    }
 }
 
 void EditorSyntaxHighlighter::setSpans(const QStringList& spans) {
     if (spans_ == spans) return;
     spans_ = spans;
     if (highlighter_) static_cast<CodeHighlighter*>(highlighter_)->setSpans(spans_);
+}
+
+void EditorSyntaxHighlighter::setColors(const QList<QColor>& colors) {
+    if (colors_ == colors) return;
+    colors_ = colors;
+    if (highlighter_) static_cast<CodeHighlighter*>(highlighter_)->setColors(colors_);
 }
 
 extern "C" void register_editor_syntax_highlighter() {
