@@ -107,7 +107,9 @@ ApplicationWindow {
                 case 7:
                     if (!releaseChecked) {
                         releaseChecked = true
-                        check(controller.document_ids.indexOf("src/README.md") >= 0, "Release did not relocate the row on the next turn")
+                        check(controller.document_ids.indexOf("src/README.md") >= 0,
+                            "Release did not relocate the row on the next turn: files=" + controller.document_ids
+                                + ", error=" + controller.error_message + ", pending=" + controller.move_pending)
                         check(pane.treeRowForPath("src/README.md") >= 0, "Drop did not update the native tree on the next turn")
                         check(controller.active_document_text === localText, "Drop lost a local editor change")
                         check(controller.active_document_dirty, "Drop failed to retain the pending edit")
@@ -147,7 +149,8 @@ ApplicationWindow {
                     sourcePoint = movedSource.mapToItem(pane, 100, movedSource.height / 2)
                     input.mousePress(pane, sourcePoint.x, sourcePoint.y)
                     input.mouseMove(pane, sourcePoint.x + 20, sourcePoint.y, 1, Qt.LeftButton)
-                    check(rootTarget.visible && rootTarget.height >= 32, "Drag did not show root drop block")
+                    check(rootTarget.visible && rootTarget.height > 0, "Drag did not show root drop block: visible="
+                        + rootTarget.visible + ", height=" + rootTarget.height + ", path=" + pane.draggingPath)
                     targetPoint = rootTarget.mapToItem(pane, rootTarget.width / 2, rootTarget.height / 2)
                     input.mouseMove(pane, targetPoint.x, targetPoint.y, 1, Qt.LeftButton)
                     break

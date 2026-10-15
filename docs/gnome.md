@@ -9,3 +9,5 @@ The app uses a compact, virtualized GTK ListView inside AdwOverlaySplitView. Eac
 On the macOS bootstrap host, Homebrew GTK4 4.24.1 and libadwaita 1.10.0 built and ran the app. Linux CI builds and checks diagnostic and document edit/save paths under Xvfb.
 
 Files and Search keep separate sidebar models and scroll containers. Switching tabs reuses those views without rebuilding the file tree or rehighlighting the editor. Changes to documents, directories, search results, or the name filter invalidate the affected model so hidden views refresh when selected.
+
+Inline renaming uses GTK Entry activation, Escape and a local EventControllerFocus. Moving focus out cancels the draft; no gesture on the application window captures outside clicks for rename cancellation.

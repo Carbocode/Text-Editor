@@ -52,43 +52,6 @@ struct PendingDrop {
 const DROP_COMMIT_FALLBACK: Duration = Duration::from_secs(1);
 
 impl Interactions {
-    pub fn cancel_rename(&self) {
-        let Some(path) = self.editing.take() else {
-            return;
-        };
-        if let Some(entry) = self.editor(&path)
-            && let Some(stack) = entry
-                .parent()
-                .and_then(|widget| widget.downcast::<gtk::Stack>().ok())
-        {
-            stack.set_visible_child_name("label");
-        }
-    }
-
-    pub fn attach_cancel_on_outside_click(self: &Rc<Self>, widget: &impl IsA<gtk::Widget>) {
-        let gesture = gtk::GestureClick::new();
-        gesture.set_name(Some("sidebar-rename-outside-click"));
-        gesture.set_button(0);
-        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let state = self.clone();
-        let root = widget.upcast_ref::<gtk::Widget>().downgrade();
-        gesture.connect_pressed(move |gesture, _, x, y| {
-            let Some(path) = state.editing.borrow().clone() else {
-                return;
-            };
-            let inside = root
-                .upgrade()
-                .and_then(|root| root.pick(x, y, gtk::PickFlags::DEFAULT))
-                .zip(state.editor(&path))
-                .is_some_and(|(target, entry)| target == entry || target.is_ancestor(&entry));
-            if !inside {
-                gesture.set_state(gtk::EventSequenceState::Claimed);
-                state.cancel_rename();
-            }
-        });
-        widget.add_controller(gesture);
-    }
-
     pub fn editor(&self, path: &str) -> Option<gtk::Entry> {
         self.editors
             .borrow()

@@ -1,5 +1,7 @@
 import QtQuick
 import QtQuick.Controls
+import QtTest
+import org.kde.kirigami as Kirigami
 import org.nativeworkspace.Diagnostic
 import "../qml"
 
@@ -14,6 +16,7 @@ ApplicationWindow {
         anchors.fill: parent
         controller: controller
     }
+    TestCase { id: input; when: false }
     FontMetrics { id: editorFontMetrics; font: pane.editorFont }
     FontInfo { id: resolvedEditorFont; font: pane.editorFont }
 
@@ -27,6 +30,9 @@ ApplicationWindow {
     property string expandedPath: "src/main.rs"
     property real switchedAt: 0
     property bool waitingMoveSave: false
+    property bool nativeEscapeChecked: false
+    property bool screenshotPending: false
+    property bool screenshotCaptured: false
 
     function check(condition, message) {
         if (!condition) throw new Error(message)
@@ -39,6 +45,7 @@ ApplicationWindow {
         if (item.objectName === name && (name !== "sidebarRenameField" || item.visible)) return item
         var candidates = [...(item.children || []), ...(item.resources || [])]
         if (item.contentItem) candidates.push(item.contentItem)
+        if (item.background) candidates.push(item.background)
         for (var child of candidates) {
             var found = findItem(child, name, visited)
             if (found) return found
@@ -59,29 +66,25 @@ ApplicationWindow {
         }
     }
 
-    function checkIcons() {
-        var icons = []
-        function collect(item) {
-            if (item.objectName === "fileTreeIcon") icons.push(item)
-            for (var child of item.children || []) collect(child)
+    function checkFileRows() {
+        for (var path of ["src", expandedPath]) {
+            var row = tree.itemAtCell(Qt.point(0, pane.treeRowForPath(path)))
+            check(row && row.contentItem && row.contentItem.title === path.split("/").pop(),
+                "Native file row did not show its name: " + path)
+            var expectedIcon = path === "src" ? controller.folder_icon(path, row.expanded) : controller.file_icon(path)
+            check(row.icon.source.toString() === expectedIcon
+                && row.contentItem.icon.source.toString() === expectedIcon,
+                "File row did not use its Material icon: " + path)
+            check(row.palette.base.toString() === row.Kirigami.Theme.backgroundColor.toString()
+                && row.palette.alternateBase.toString() === row.Kirigami.Theme.alternateBackgroundColor.toString(),
+                "Native file row did not use the Kirigami view palette: " + path)
+            check(row.contentItem.color.toString() !== row.background.color.toString(),
+                "Native file name is invisible: " + path)
+            check(row.height >= row.contentItem.implicitHeight,
+                "Native row clipped its label: " + path)
+            check(row.height <= row.contentItem.implicitHeight + Kirigami.Units.largeSpacing * 2,
+                "Desktop file rows are too tall: " + row.height)
         }
-        collect(tree)
-        check(icons.length > 0, "Files tree has no icon items")
-        for (var icon of icons) {
-            check(icon.status === Image.Ready, "Icon did not load: " + icon.source)
-            check(icon.visible && icon.width === 16 && icon.height === 16,
-                "Icon has no visible 16px area")
-            var row = icon.parent.parent
-            check(Math.abs(icon.mapToItem(row, 0, icon.height / 2).y - row.height / 2) < 0.5,
-                "Sidebar icon is not centered inside its row")
-            var label = findItem(row, "sidebarEntryLabel")
-            check(label && Math.abs(label.mapToItem(row, 0, label.height / 2).y - row.height / 2) < 0.5,
-                "Sidebar text is not centered inside its row: y=" + (label ? label.mapToItem(row, 0, label.height / 2).y : "missing") + ", row=" + row.height + ", label=" + (label ? label.height : 0))
-        }
-        check(icons.some(icon => String(icon.source).endsWith("rust.png")),
-            "Rust file did not use its bundled icon: " + icons.map(icon => String(icon.source)).join(", "))
-        check(icons.some(icon => String(icon.source).endsWith("folder-src-open.png")),
-            "Expanded folder did not use its open icon")
     }
 
     Component.onCompleted: {
@@ -104,6 +107,7 @@ ApplicationWindow {
         repeat: true
         running: true
         onTriggered: {
+            if (screenshotPending) return
             try {
                 switch (step++) {
                 case 0:
@@ -115,7 +119,18 @@ ApplicationWindow {
                     break
                 case 1:
                     check(pane.treeRowForPath(expandedPath) >= 0, "Folder did not expand")
-                    checkIcons()
+                    checkFileRows()
+                    var capture = Qt.application.arguments.find(argument => argument.startsWith("--smoke-screenshot="))
+                    if (capture && !screenshotCaptured) {
+                        screenshotPending = true
+                        pane.grabToImage(function(result) {
+                            screenshotCaptured = result.saveToFile(capture.substring("--smoke-screenshot=".length))
+                            screenshotPending = false
+                            if (!screenshotCaptured) Qt.exit(1)
+                        })
+                        --step
+                        break
+                    }
                     filesCache = pane.sidebarCaches[0]
                     initialTreeResets = treeResets
                     pane.sidebarTab = 1
@@ -151,7 +166,7 @@ ApplicationWindow {
                 case 3:
                     check(pane.treeRowForPath(expandedPath) >= 0, "Tab switch lost folder expansion")
                     check(pane.treeMatchesSidebarEntries(), "Cached tree and sidebar disagree")
-                    checkIcons()
+                    checkFileRows()
                     // Search updates while Files is active must not reset its tree.
                     controller.search_files("no-such-content")
                     check(pane.sidebarCaches[0] === filesCache, "Search invalidated Files cache")
@@ -186,14 +201,14 @@ ApplicationWindow {
                     break
                 case 7:
                     check(pane.treeRowForPath(expandedPath) === -1, "Tab switch lost collapsed state")
-                    console.log("KDE sidebar tab/cache/icon smoke test passed")
+                    console.log("KDE sidebar tab/cache/native row smoke test passed")
                     controller.open_document("src/new.rs")
                     pane.editorText = "first\nsecond\n"
                     break
                 case 8:
                     var editor = findItem(pane, "documentEditor")
                     var scroll = findItem(pane, "editorScroll")
-                    var activeLine = findItem(pane, "editorActiveLine")
+                    var activeLine = pane.editorActiveLine
                     check(editor.width >= scroll.availableWidth, "Short text does not fill editor width")
                     check(editor.height >= scroll.availableHeight, "Short text does not fill editor height")
                     var lastY = editor.positionToRectangle(editor.length).y
@@ -227,7 +242,7 @@ ApplicationWindow {
                 case 11:
                     var editor = findItem(pane, "documentEditor")
                     var scroll = findItem(pane, "editorScroll")
-                    var activeLine = findItem(pane, "editorActiveLine")
+                    var activeLine = pane.editorActiveLine
                     var gutter = findItem(pane, "editorLineNumbers")
                     check(scroll.contentItem.contentY > 0, "Editor did not scroll")
                     checkNumberAlignment([20, 40, 100])
@@ -239,7 +254,7 @@ ApplicationWindow {
                 case 12:
                     var editor = findItem(pane, "documentEditor")
                     var scroll = findItem(pane, "editorScroll")
-                    var activeLine = findItem(pane, "editorActiveLine")
+                    var activeLine = pane.editorActiveLine
                     var gutter = findItem(pane, "editorLineNumbers")
                     check(Math.abs(activeLine.mapToItem(gutter, 0, 0).y
                         - (editor.cursorRectangle.y - scroll.contentItem.contentY)) < 1,
@@ -262,7 +277,7 @@ ApplicationWindow {
                     var renameField = pane.activeRenameEditor
                     check(renameField && renameField.visible, "Inline rename field is missing: path=" + pane.renamePath + ", treeRows=" + tree.rows)
                     check(renameField.selectedText === "src", "Folder name was not selected: text=" + renameField.text + ", selected=" + renameField.selectedText + ", focus=" + renameField.activeFocus)
-                    var renameRow = renameField.parent.parent
+                    var renameRow = tree.itemAtCell(Qt.point(0, pane.treeRowForPath("src")))
                     var renameTopLeft = renameField.mapToItem(renameRow, 0, 0)
                     check(renameTopLeft.y >= 0 && renameTopLeft.y + renameField.height <= renameRow.height,
                         "Inline rename extends outside its row vertically")
@@ -271,8 +286,7 @@ ApplicationWindow {
                     check(Math.abs(renameTopLeft.y + renameField.height / 2 - renameRow.height / 2) < 0.5,
                         "Inline rename is not centered inside its row")
                     renameField.text = "renamed"
-                    pane.renameName = renameField.text
-                    pane.commitRename()
+                    input.keyClick(Qt.Key_Return)
                     break
                 case 14:
                     check(controller.error_message.length === 0, "Folder rename failed")
@@ -331,20 +345,32 @@ ApplicationWindow {
                         tree.forceLayout()
                         var fileRow = pane.treeRowForPath("new.rs")
                         var fileDelegate = tree.itemAtCell(Qt.point(0, fileRow))
-                        check(fileDelegate, "File row is missing for selected-click rename")
+                        check(fileDelegate, "File row is missing for native rename")
                         pane.selectedDirectoryPath = "destination"
-                        fileDelegate.clicked()
+                        input.mouseClick(fileDelegate, fileDelegate.width / 2, fileDelegate.height / 2)
                         check(pane.renamePath.length === 0, "First file click must only select/open it")
-                        fileDelegate.clicked()
-                        check(pane.renamePath === "new.rs", "Selected file click did not start renaming")
+                        input.mouseClick(fileDelegate, fileDelegate.width / 2, fileDelegate.height / 2)
+                        check(pane.renamePath.length === 0, "Clicking an open file must not start renaming")
+                        input.keyClick(Qt.Key_F2)
+                        check(pane.renamePath === "new.rs", "F2 did not open the native edit delegate: focus="
+                            + activeFocusItem + ", row=" + tree.currentRow + ", index=" + tree.selectionModel.currentIndex)
                         --step
                         break
                     }
                     var fileRename = pane.activeRenameEditor
-                    check(fileRename && fileRename.selectedText === "new", "File rename should select its stem: field=" + fileRename + (fileRename ? ", text=" + fileRename.text + ", selected=" + fileRename.selectedText + ", focus=" + fileRename.activeFocus + ", path=" + fileRename.parent.parent.entry.path : ""))
+                    check(fileRename && fileRename.selectedText === "new", "File rename should select its stem: field=" + fileRename + (fileRename ? ", text=" + fileRename.text + ", selected=" + fileRename.selectedText + ", focus=" + fileRename.activeFocus : ""))
+                    if (!nativeEscapeChecked) {
+                        fileRename.text = "discarded.rs"
+                        input.keyClick(Qt.Key_Escape)
+                        check(pane.renamePath.length === 0 && controller.active_document_id === "new.rs",
+                            "Escape did not cancel the native rename")
+                        nativeEscapeChecked = true
+                        input.keyClick(Qt.Key_F2)
+                        --step
+                        break
+                    }
                     fileRename.text = "renamed.rs"
-                    pane.renameName = fileRename.text
-                    pane.commitRename()
+                    input.keyClick(Qt.Key_Return)
                     break
                 case 18:
                     check(controller.active_document_id === "renamed.rs", "Inline file rename failed")
@@ -380,28 +406,26 @@ ApplicationWindow {
                     if (!searchFile && Date.now() - switchedAt < 3000) { --step; break }
                     check(searchFile, "Search file row is missing for selected-click rename")
                     searchFile.clicked()
-                    check(pane.renamePath === "renamed.rs", "Selected search file click did not start renaming")
+                    check(pane.renamePath.length === 0, "Clicking a search file must not start renaming")
+                    pane.beginRename("renamed.rs")
                     break
                 case 22:
                     var searchRename = pane.activeRenameEditor
                     check(searchRename && searchRename.visible && searchRename.activeFocus,
                         "Selected search file click did not focus the inline rename editor")
                     check(searchRename.selectedText === "renamed", "Search rename should select the file stem")
-                    var outsideClick = findItem(pane, "renameOutsideClick")
-                    check(outsideClick && outsideClick.acceptedButtons === Qt.AllButtons,
-                        "Outside rename clicks must accept all mouse buttons")
-                    var insideInput = searchRename.mapToItem(outsideClick, searchRename.width / 2, searchRename.height / 2)
-                    check(!pane.cancelRenameForClick(outsideClick, insideInput.x, insideInput.y)
-                        && pane.renamePath === "renamed.rs", "Click inside the input cancelled rename")
+                    input.mouseClick(searchRename, searchRename.width / 2, searchRename.height / 2)
+                    check(pane.renamePath === "renamed.rs", "Click inside the input cancelled rename")
                     searchRename.text = "discarded.rs"
                     pane.renameName = searchRename.text
-                    check(pane.cancelRenameForClick(outsideClick, pane.width - 4, pane.height - 4),
-                        "Outside click was not accepted")
-                    check(pane.renamePath.length === 0, "Outside click did not cancel rename")
+                    var documentEditor = findItem(pane, "documentEditor")
+                    input.mouseClick(documentEditor, documentEditor.leftPadding + 10, documentEditor.topPadding + 5)
+                    check(documentEditor.activeFocus, "Click outside the rename field did not reach the editor")
+                    check(pane.renamePath.length === 0, "Native focus loss did not cancel rename")
                     check(controller.document_ids.indexOf("renamed.rs") !== -1
                         && controller.document_ids.indexOf("discarded.rs") === -1,
                         "Outside click applied the drafted file name")
-                    console.log("KDE Files/Search selected-click rename/stem selection smoke test passed")
+                    console.log("KDE Files/Search native rename/stem selection smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {

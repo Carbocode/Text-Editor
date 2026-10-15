@@ -1724,9 +1724,6 @@ fn build_window(app: &adw::Application) {
             }
         });
         sidebar.files.add_controller(keys);
-        sidebar
-            .interactions
-            .attach_cancel_on_outside_click(&ui.window);
     }
     for (button, directory) in [(new_file, false), (new_folder, true)] {
         let ui = ui.clone();
@@ -2375,46 +2372,19 @@ fn build_window(app: &adw::Application) {
             selected_click.emit_by_name::<()>("pressed", &[&1i32, &24f64, &0f64]);
             assert_eq!(file_stack.visible_child_name().as_deref(), Some("edit"));
             assert_eq!(file_entry.selection_bounds(), Some((0, 4)));
-            let controllers = ui.window.observe_controllers();
-            let outside_clicks: Vec<_> = (0..controllers.n_items())
-                .filter_map(|index| controllers.item(index))
-                .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
-                .filter(|gesture| gesture.name().as_deref() == Some("sidebar-rename-outside-click"))
-                .collect();
-            assert!(!outside_clicks.is_empty());
-            assert!(outside_clicks.iter().all(|gesture| gesture.button() == 0));
             for _ in 0..40 {
                 glib::MainContext::default().iteration(false);
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            let inside = file_entry
-                .compute_point(
-                    &ui.window,
-                    &gtk::graphene::Point::new(
-                        file_entry.width() as f32 / 2.0,
-                        file_entry.height() as f32 / 2.0,
-                    ),
-                )
-                .unwrap();
-            for gesture in &outside_clicks {
-                gesture.emit_by_name::<()>(
-                    "pressed",
-                    &[&1i32, &f64::from(inside.x()), &f64::from(inside.y())],
-                );
-            }
-            assert_eq!(file_stack.visible_child_name().as_deref(), Some("edit"));
             file_entry.set_text("discarded.md");
-            for gesture in &outside_clicks {
-                gesture.emit_by_name::<()>("pressed", &[&1i32, &0f64, &0f64]);
-            }
-            assert_eq!(file_stack.visible_child_name().as_deref(), Some("label"));
-            assert!(workspace_path.join("notes/todo.md").is_file());
-            assert!(!workspace_path.join("notes/discarded.md").exists());
-            println!("GTK outside click cancels draft; clicking inside keeps rename active");
             ui.editor.grab_focus();
             for _ in 0..20 {
                 glib::MainContext::default().iteration(false);
             }
+            assert_eq!(file_stack.visible_child_name().as_deref(), Some("label"));
+            assert!(workspace_path.join("notes/todo.md").is_file());
+            assert!(!workspace_path.join("notes/discarded.md").exists());
+            println!("GTK native focus loss cancels the rename draft");
             println!("GTK selected file click/rename/stem selection smoke test passed");
             let folder_index = ui.sidebars[0]
                 .sidebar_rows

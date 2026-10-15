@@ -12,9 +12,15 @@ struct SidebarInteractionSmoke {
         let binding = Binding<String>(get: { value }, set: { value = $0 })
         let field = SidebarInlineRename(name: binding, directory: false,
                                         submit: { submitted += 1 }, cancel: { cancelled += 1 })
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 50),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 280, height: 100),
                               styleMask: [.titled], backing: .buffered, defer: false)
-        window.contentView = NSHostingView(rootView: field.padding(8))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 100))
+        let host = NSHostingView(rootView: field.padding(8))
+        host.frame = NSRect(x: 0, y: 50, width: 280, height: 50)
+        let clickTarget = RenameClickTarget(frame: NSRect(x: 0, y: 0, width: 280, height: 40))
+        content.addSubview(host)
+        content.addSubview(clickTarget)
+        window.contentView = content
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))
@@ -28,10 +34,10 @@ struct SidebarInteractionSmoke {
         precondition(submitted == 1, "Return did not submit rename")
         editor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
         precondition(cancelled == 1, "Escape did not cancel rename")
-        let insideUp = NSEvent.mouseEvent(with: .leftMouseUp, location: NSPoint(x: 140, y: 25), modifierFlags: [],
+        let insideUp = NSEvent.mouseEvent(with: .leftMouseUp, location: NSPoint(x: 140, y: 75), modifierFlags: [],
                                           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                           context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
-        let insideDown = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 140, y: 25), modifierFlags: [],
+        let insideDown = NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 140, y: 75), modifierFlags: [],
                                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                             context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
         app.postEvent(insideUp, atStart: false)
@@ -40,8 +46,7 @@ struct SidebarInteractionSmoke {
                                      inMode: .default, dequeue: true) { app.sendEvent(event) }
         precondition(cancelled == 1, "Clicking inside the input cancelled rename")
         for type in [NSEvent.EventType.leftMouseDown, .rightMouseDown, .otherMouseDown] {
-            let previousCancelled = cancelled
-            let click = NSEvent.mouseEvent(with: type, location: NSPoint(x: 2, y: 2), modifierFlags: [],
+            let click = NSEvent.mouseEvent(with: type, location: NSPoint(x: 140, y: 20), modifierFlags: [],
                                           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
                                           context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
             app.postEvent(click, atStart: true)
@@ -49,10 +54,12 @@ struct SidebarInteractionSmoke {
                                          until: Date().addingTimeInterval(0.1), inMode: .default, dequeue: true) {
                 app.sendEvent(event)
             }
-            precondition(cancelled == previousCancelled + 1, "Outside click did not cancel rename")
+            precondition(clickTarget.received.last == type, "Rename swallowed a click intended for another view")
             precondition(submitted == 1, "Outside click submitted a rename")
         }
-        print("macOS outside left/right/other click cancels rename without submitting")
+        precondition(window.firstResponder === clickTarget, "Outside click did not focus its native target")
+        precondition(cancelled == 2, "Native focus loss did not cancel rename")
+        print("macOS rename uses native focus loss and preserves outside mouse events")
         let drag = SidebarDragState(isDragging: { true })
         let renders = RenderCounter()
         window.contentView = NSHostingView(rootView: DragRenderHarness(drag: drag, renders: renders))
@@ -133,6 +140,18 @@ struct SidebarInteractionSmoke {
         print("macOS drag hover isolates decoration updates from the parent view")
         print("macOS inline rename focus/stem/Return/Escape smoke test passed")
     }
+}
+
+@MainActor private final class RenameClickTarget: NSView {
+    var received: [NSEvent.EventType] = []
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        received.append(event.type)
+        window?.makeFirstResponder(self)
+    }
+    override func rightMouseDown(with event: NSEvent) { received.append(event.type) }
+    override func otherMouseDown(with event: NSEvent) { received.append(event.type) }
 }
 
 @MainActor private final class RenderCounter { var count = 0 }
