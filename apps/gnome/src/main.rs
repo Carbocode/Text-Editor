@@ -79,12 +79,15 @@ struct SidebarView {
     scroll: gtk::ScrolledWindow,
     dirty: Rc<Cell<bool>>,
     pending_rows: Rc<RefCell<Vec<PendingRow>>>,
+    open_documents: Rc<RefCell<std::collections::HashSet<String>>>,
 }
 
 struct PendingRow {
     path: String,
     row: glib::WeakRef<gtk::Box>,
     spinner: glib::WeakRef<gtk::Spinner>,
+    open_indicator: glib::WeakRef<gtk::Image>,
+    is_file: bool,
 }
 
 fn update_pending_row(row: &gtk::Box, spinner: &gtk::Spinner, path: &str, target: Option<&str>) {
@@ -514,6 +517,21 @@ impl Ui {
         let diagnostic_operation = snapshot.diagnostic_operation;
         let diagnostic_revision = snapshot.revision;
         self.updating.set(true);
+        if self.snapshot.borrow().open_documents != snapshot.open_documents {
+            let open: std::collections::HashSet<_> = snapshot
+                .open_documents
+                .iter()
+                .map(|id| id.as_str().to_owned())
+                .collect();
+            for sidebar in &self.sidebars {
+                for row in sidebar.pending_rows.borrow().iter() {
+                    if let Some(indicator) = row.open_indicator.upgrade() {
+                        indicator.set_visible(row.is_file && open.contains(&row.path));
+                    }
+                }
+            }
+            self.sidebars[0].open_documents.replace(open);
+        }
         {
             let previous = self.snapshot.borrow();
             if previous.workspace_root != snapshot.workspace_root
@@ -1438,6 +1456,7 @@ fn build_sidebar(
     file_query: &Rc<RefCell<String>>,
     text_mode: bool,
     pending_move_target: &Rc<RefCell<Option<String>>>,
+    open_documents: &Rc<RefCell<std::collections::HashSet<String>>>,
 ) -> SidebarView {
     let pending_rows = Rc::new(RefCell::new(Vec::<PendingRow>::new()));
     let visible_entries: Rc<RefCell<Vec<SidebarEntry>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1454,6 +1473,7 @@ fn build_sidebar(
         let interactions = interactions.clone();
         let pending_move_target = pending_move_target.clone();
         let pending_rows = pending_rows.clone();
+        let open_documents = open_documents.clone();
         factory.connect_bind(move |_, item| {
             let item = item
                 .downcast_ref::<gtk::ListItem>()
@@ -1463,6 +1483,14 @@ fn build_sidebar(
                     if !text_mode && file_query.borrow().trim().is_empty()
                         && collapsed_directories.borrow().contains(path));
                 let widget = sidebar_entry_widget(entry, collapsed);
+                let is_file = matches!(&entry.row, SidebarRow::File(_));
+                let open_indicator = gtk::Image::from_icon_name("view-reveal-symbolic");
+                open_indicator.set_pixel_size(12);
+                open_indicator.set_widget_name("sidebar-open-indicator");
+                open_indicator.set_tooltip_text(Some("Open in editor"));
+                open_indicator
+                    .set_visible(is_file && open_documents.borrow().contains(&entry.path));
+                widget.append(&open_indicator);
                 let spinner = gtk::Spinner::new();
                 spinner.set_size_request(14, 14);
                 widget.append(&spinner);
@@ -1479,6 +1507,8 @@ fn build_sidebar(
                     path: entry.path.clone(),
                     row: widget.downgrade(),
                     spinner: spinner.downgrade(),
+                    open_indicator: open_indicator.downgrade(),
+                    is_file,
                 });
                 let row_area = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 widget.set_hexpand(true);
@@ -1534,6 +1564,7 @@ fn build_sidebar(
         all_entries: Rc::new(RefCell::new(Vec::new())),
         dirty: Rc::new(Cell::new(true)),
         pending_rows,
+        open_documents: open_documents.clone(),
     }
 }
 
@@ -1556,6 +1587,68 @@ fn main() {
         .build();
     app.connect_activate(build_window);
     app.run();
+}
+
+fn icon_button(label: &str, icon_name: &str) -> gtk::Button {
+    let button = gtk::Button::new();
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    content.append(&gtk::Image::from_icon_name(icon_name));
+    let text = gtk::Label::new(Some(label));
+    text.set_xalign(0.0);
+    content.append(&text);
+    button.set_child(Some(&content));
+    button
+}
+
+fn editor_font_points(editor: &gtk::TextView) -> f64 {
+    editor
+        .pango_context()
+        .font_description()
+        .map(|font| {
+            let size = f64::from(font.size()) / f64::from(gtk::pango::SCALE);
+            if font.is_size_absolute() {
+                let dpi = f64::from(editor.settings().gtk_xft_dpi()) / 1024.0;
+                size * 72.0 / if dpi > 0.0 { dpi } else { 96.0 }
+            } else {
+                size
+            }
+        })
+        .filter(|size| *size > 0.0)
+        .unwrap_or(12.0)
+}
+
+fn application_menu(devtools_available: bool) -> gtk::MenuButton {
+    let button = gtk::MenuButton::new();
+    button.set_icon_name("open-menu-symbolic");
+    button.set_tooltip_text(Some("Main Menu"));
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    content.set_margin_top(6);
+    content.set_margin_bottom(6);
+    content.set_margin_start(6);
+    content.set_margin_end(6);
+    let popover = gtk::Popover::new();
+    for (label, icon, action) in [
+        ("Home", "user-home-symbolic", "app.home"),
+        ("Developer Tools", "system-run-symbolic", "app.devtools"),
+        ("Open Folder…", "document-open-symbolic", "app.open"),
+        ("Quit", "native-workspace-quit-symbolic", "app.quit"),
+    ] {
+        if action == "app.devtools" && !devtools_available {
+            continue;
+        }
+        if action == "app.quit" {
+            content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+        let item = icon_button(label, icon);
+        item.add_css_class("flat");
+        item.set_action_name(Some(action));
+        let popover = popover.clone();
+        item.connect_clicked(move |_| popover.popdown());
+        content.append(&item);
+    }
+    popover.set_child(Some(&content));
+    button.set_popover(Some(&popover));
+    button
 }
 
 fn build_window(app: &adw::Application) {
@@ -1601,14 +1694,10 @@ fn build_window(app: &adw::Application) {
     if devtools_available {
         let devtools_action = gio::SimpleAction::new("devtools", None);
         app.add_action(&devtools_action);
-        let devtools = gtk::Button::with_label("Developer Tools");
-        devtools.set_action_name(Some("app.devtools"));
-        content_header.pack_end(&devtools);
     }
-    let open = gtk::Button::with_label("Open Folder…");
-    let home_button = gtk::Button::from_icon_name("user-home-symbolic");
-    home_button.set_tooltip_text(Some("Home"));
-    content_header.pack_end(&home_button);
+    let open = icon_button("Open Folder…", "document-open-symbolic");
+    open.set_action_name(Some("app.open"));
+    content_header.pack_end(&application_menu(devtools_available));
     let recent_list = gtk::Box::new(gtk::Orientation::Vertical, 8);
     recent_list.set_margin_top(6);
     recent_list.set_margin_bottom(6);
@@ -1623,18 +1712,21 @@ fn build_window(app: &adw::Application) {
     let file_filter = Rc::new(RefCell::new(PathFilterResult::default()));
     let collapsed_directories = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let pending_move_target = Rc::new(RefCell::new(None));
+    let open_documents = Rc::new(RefCell::new(std::collections::HashSet::new()));
     let sidebars = [
         build_sidebar(
             &collapsed_directories,
             &file_query,
             false,
             &pending_move_target,
+            &open_documents,
         ),
         build_sidebar(
             &collapsed_directories,
             &file_query,
             true,
             &pending_move_target,
+            &open_documents,
         ),
     ];
     let files_scroll = sidebars[0].scroll.clone();
@@ -1716,8 +1808,10 @@ fn build_window(app: &adw::Application) {
     add_button.set_icon_name("list-add-symbolic");
     add_button.set_tooltip_text(Some("Add file or folder"));
     let add_menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    let new_file = gtk::Button::with_label("New File");
-    let new_folder = gtk::Button::with_label("New Folder");
+    let new_file = icon_button("New File", "native-workspace-new-file-symbolic");
+    let new_folder = icon_button("New Folder", "folder-new-symbolic");
+    new_file.add_css_class("flat");
+    new_folder.add_css_class("flat");
     add_menu.append(&new_file);
     add_menu.append(&new_folder);
     let add_popover = gtk::Popover::new();
@@ -1743,6 +1837,15 @@ fn build_window(app: &adw::Application) {
     );
     let editor = gtk::TextView::new();
     editor.set_monospace(true);
+    editor.add_css_class("workspace-editor-text");
+    let editor_font_size = Rc::new(Cell::new(None::<f64>));
+    let editor_base_font_size = Rc::new(Cell::new(None::<f64>));
+    let editor_font_style = gtk::CssProvider::new();
+    gtk::style_context_add_provider_for_display(
+        &gtk::gdk::Display::default().expect("GTK display"),
+        &editor_font_style,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
     editor.set_editable(false);
     editor.set_wrap_mode(gtk::WrapMode::None);
     editor.set_top_margin(16);
@@ -1767,8 +1870,8 @@ fn build_window(app: &adw::Application) {
     conflict_label.set_hexpand(true);
     conflict_label.set_xalign(0.0);
     conflict_banner.append(&conflict_label);
-    let reload = gtk::Button::with_label("Reload (discard edits)");
-    let overwrite = gtk::Button::with_label("Overwrite disk");
+    let reload = icon_button("Reload (discard edits)", "view-refresh-symbolic");
+    let overwrite = icon_button("Overwrite disk", "document-save-symbolic");
     conflict_banner.append(&reload);
     conflict_banner.append(&overwrite);
     conflict_banner.set_visible(false);
@@ -1783,9 +1886,29 @@ fn build_window(app: &adw::Application) {
     tab_bar.set_autohide(false);
     let document_tab_scroll =
         document_tab_scroll::TouchpadScroll::install(&tab_bar, &document_tabs);
-    let save_all = gtk::Button::with_label("Save All");
+    let save_all = gtk::Button::from_icon_name("native-workspace-save-all-symbolic");
+    save_all.set_tooltip_text(Some("Save All"));
     save_all.set_action_name(Some("app.save-all"));
     content_header.pack_end(&save_all);
+    let save = gtk::Button::from_icon_name("document-save-symbolic");
+    save.set_tooltip_text(Some("Save"));
+    save.set_action_name(Some("app.save"));
+    content_header.pack_end(&save);
+    let decrease_text_size = gtk::Button::from_icon_name("zoom-out-symbolic");
+    decrease_text_size.set_tooltip_text(Some("Decrease Text Size"));
+    let increase_text_size = gtk::Button::from_icon_name("zoom-in-symbolic");
+    increase_text_size.set_tooltip_text(Some("Increase Text Size"));
+    let text_zoom = gtk::Label::new(Some("100%"));
+    text_zoom.set_width_chars(4);
+    text_zoom.set_margin_start(6);
+    text_zoom.set_margin_end(6);
+    text_zoom.set_tooltip_text(Some("Text Zoom"));
+    let text_size_controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    text_size_controls.add_css_class("linked");
+    text_size_controls.append(&decrease_text_size);
+    text_size_controls.append(&text_zoom);
+    text_size_controls.append(&increase_text_size);
+    content_header.pack_end(&text_size_controls);
     // Share libadwaita's header surface and backdrop colors with the header bar.
     content_view.add_top_bar(&tab_bar);
     let editor_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1826,7 +1949,7 @@ fn build_window(app: &adw::Application) {
     }
     let status = gtk::Label::new(Some("Select a document"));
     let counter = gtk::Label::new(Some("Counter: 0"));
-    let diagnostic = gtk::Button::with_label("Increment");
+    let diagnostic = icon_button("Increment", "list-add-symbolic");
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     footer.set_margin_top(8);
     footer.set_margin_bottom(8);
@@ -1848,6 +1971,7 @@ fn build_window(app: &adw::Application) {
         .build();
     let home_header = adw::HeaderBar::new();
     home_header.set_decoration_layout(Some("menu:minimize,maximize,close"));
+    home_header.pack_end(&application_menu(devtools_available));
     let home_view = adw::ToolbarView::new();
     home_view.add_top_bar(&home_header);
     let home = gtk::Box::new(gtk::Orientation::Vertical, 20);
@@ -1866,7 +1990,7 @@ fn build_window(app: &adw::Application) {
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     open.add_css_class("suggested-action");
     actions.append(&open);
-    let resume = gtk::Button::with_label("Resume Workspace");
+    let resume = icon_button("Resume Workspace", "go-next-symbolic");
     actions.append(&resume);
     home.append(&actions);
     let recent_title = gtk::Label::new(Some("Recent Workspaces"));
@@ -1939,6 +2063,31 @@ fn build_window(app: &adw::Application) {
         collapsed_directories,
     };
     ui.render(snapshot);
+    for (button, delta) in [(&decrease_text_size, -1.0), (&increase_text_size, 1.0)] {
+        let ui = ui.clone();
+        let size = editor_font_size.clone();
+        let base_size = editor_base_font_size.clone();
+        let text_zoom = text_zoom.clone();
+        let style = editor_font_style.clone();
+        let decrease = decrease_text_size.clone();
+        let increase = increase_text_size.clone();
+        button.connect_clicked(move |_| {
+            let base = base_size
+                .get()
+                .unwrap_or_else(|| editor_font_points(&ui.editor));
+            base_size.set(Some(base));
+            let next = (size.get().unwrap_or(base) + delta).clamp(8.0, 40.0);
+            size.set(Some(next));
+            text_zoom.set_label(&format!("{:.0}%", next / base * 100.0));
+            style.load_from_data(&format!(
+                "textview.workspace-editor-text {{ font-size: {next}pt; }}"
+            ));
+            decrease.set_sensitive(next > 8.0);
+            increase.set_sensitive(next < 40.0);
+            ui.editor_chrome.font_size_changed(&ui.editor);
+            ui.editor.grab_focus();
+        });
+    }
     if let Some(action) = app
         .lookup_action("devtools")
         .and_then(|action| action.downcast::<gio::SimpleAction>().ok())
@@ -2181,10 +2330,12 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
-        home_button.connect_clicked(move |_| {
+        let action = gio::SimpleAction::new("home", None);
+        action.connect_activate(move |_, _| {
             ui.home_window.present();
             ui.window.set_visible(false);
         });
+        app.add_action(&action);
     }
     {
         let ui = ui.clone();
@@ -2207,6 +2358,13 @@ fn build_window(app: &adw::Application) {
             app.quit();
             glib::Propagation::Proceed
         });
+    }
+    {
+        let application = app.clone();
+        let action = gio::SimpleAction::new("quit", None);
+        action.connect_activate(move |_, _| application.quit());
+        app.add_action(&action);
+        app.set_accels_for_action("app.quit", &["<Primary>q"]);
     }
     {
         let ui = ui.clone();
@@ -2298,11 +2456,13 @@ fn build_window(app: &adw::Application) {
     }
     {
         let ui = ui.clone();
-        let window = home_window.clone();
-        open.connect_clicked(move |_| {
+        let application = app.clone();
+        let action = gio::SimpleAction::new("open", None);
+        action.connect_activate(move |_, _| {
+            let window = application.active_window();
             let dialog = gtk::FileChooserNative::new(
                 Some("Open Workspace"),
-                Some(&window),
+                window.as_ref(),
                 gtk::FileChooserAction::SelectFolder,
                 Some("Open"),
                 Some("Cancel"),
@@ -2318,6 +2478,8 @@ fn build_window(app: &adw::Application) {
             });
             dialog.show();
         });
+        app.add_action(&action);
+        app.set_accels_for_action("app.open", &["<Primary>o"]);
     }
     {
         let ui = ui.clone();
@@ -2481,6 +2643,12 @@ fn build_window(app: &adw::Application) {
         assert!(icons.has_icon(sidebar_icon));
         for icon in [
             "user-home-symbolic",
+            "open-menu-symbolic",
+            "native-workspace-save-all-symbolic",
+            "native-workspace-new-file-symbolic",
+            "folder-new-symbolic",
+            "system-run-symbolic",
+            "native-workspace-quit-symbolic",
             "folder-symbolic",
             "edit-find-symbolic",
             "native-workspace-branch-symbolic",
@@ -2521,7 +2689,7 @@ fn build_window(app: &adw::Application) {
         assert!(ui.window != ui.home_window);
         assert_eq!(ui.home_window.default_width(), 640);
         assert_eq!(ui.window.default_width(), 900);
-        home_button.emit_clicked();
+        app.activate_action("home", None);
         assert!(ui.home_window.is_visible());
         assert!(!ui.window.is_visible());
         resume.emit_clicked();
@@ -2720,7 +2888,7 @@ fn build_window(app: &adw::Application) {
                 "GTK Phase 1 smoke content\n{}💡 Another Phase 1 match",
                 "filler\n".repeat(80)
             ));
-            app.activate_action("save", None);
+            save.emit_clicked();
             assert_eq!(ui.status.text(), "Saved");
             // Name filters arrive from a worker after the entry's debounce.
             let filter_names = |query: &str| {
@@ -2861,7 +3029,7 @@ fn build_window(app: &adw::Application) {
             );
             assert!(!ui.conflict_banner.is_visible());
             ui.buffer.set_text("local edit");
-            home_button.emit_clicked();
+            app.activate_action("home", None);
             resume.emit_clicked();
             assert_eq!(
                 ui.buffer
@@ -3167,6 +3335,77 @@ fn build_window(app: &adw::Application) {
                 "Rename cleared the current document's undo history"
             );
             println!("GTK document tab undo isolation/rename smoke test passed");
+            let settle = || {
+                let until = std::time::Instant::now() + std::time::Duration::from_millis(80);
+                while std::time::Instant::now() < until {
+                    glib::MainContext::default().iteration(false);
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+            };
+            let font_before = ui.editor.pango_context().font_description().unwrap().size();
+            let content_before =
+                ui.buffer
+                    .text(&ui.buffer.start_iter(), &ui.buffer.end_iter(), false);
+            ui.buffer
+                .select_range(&ui.buffer.iter_at_offset(1), &ui.buffer.iter_at_offset(3));
+            let selection_before = ui
+                .buffer
+                .selection_bounds()
+                .map(|(start, end)| (start.offset(), end.offset()));
+            increase_text_size.emit_clicked();
+            settle();
+            assert!(
+                ui.editor.pango_context().font_description().unwrap().size() > font_before,
+                "Increase Text Size did not change the editor font"
+            );
+            assert_eq!(
+                ui.buffer
+                    .text(&ui.buffer.start_iter(), &ui.buffer.end_iter(), false),
+                content_before
+            );
+            assert_eq!(
+                ui.buffer
+                    .selection_bounds()
+                    .map(|(start, end)| (start.offset(), end.offset())),
+                selection_before
+            );
+            assert!(ui.buffer.can_undo(), "Changing text size cleared undo");
+            decrease_text_size.emit_clicked();
+            settle();
+            assert!(
+                (ui.editor.pango_context().font_description().unwrap().size() - font_before).abs()
+                    <= 1,
+                "Decrease Text Size did not restore the editor font"
+            );
+            println!("GTK text size/content/selection/undo smoke test passed");
+            let active_id = ui
+                .snapshot
+                .borrow()
+                .active_document
+                .as_ref()
+                .unwrap()
+                .id
+                .clone();
+            let readme = DocumentId::parse("README.md").unwrap();
+            ui.dispatch(AppCommand::OpenDocument(readme.clone()));
+            ui.dispatch(AppCommand::OpenDocument(active_id));
+            let readme_indicator = ui.sidebars[0]
+                .pending_rows
+                .borrow()
+                .iter()
+                .filter(|row| row.path == "README.md")
+                .find_map(|row| row.open_indicator.upgrade())
+                .expect("visible README sidebar row");
+            assert!(
+                readme_indicator.is_visible(),
+                "Inactive open file is missing its editor indicator"
+            );
+            ui.dispatch(AppCommand::CloseDocument(readme));
+            assert!(
+                !readme_indicator.is_visible(),
+                "Closed file retained its editor indicator"
+            );
+            println!("GTK sidebar open/closed file indicator smoke test passed");
             if std::env::var_os("NATIVE_WORKSPACE_SMOKE_TAB_SCROLL").is_some() {
                 for index in 0..20 {
                     let id = DocumentId::parse(format!("scroll-tab-{index:02}.rs")).unwrap();

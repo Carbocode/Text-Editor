@@ -59,6 +59,9 @@ Item {
     property alias documentTabBar: documentTabBar
     property alias editorText: editor.text
     property alias editorFont: editor.font
+    readonly property real editorBaseFontPointSize: EditorFonts.fixedFont.pointSize > 0 ? EditorFonts.fixedFont.pointSize : 12
+    property real editorFontPointSize: editorBaseFontPointSize
+    readonly property int editorZoomPercent: Math.round(editorFontPointSize / editorBaseFontPointSize * 100)
     property alias editorSelectedText: editor.selectedText
     property alias editorActiveLine: activeLine
     property real editorScrollY: editorScroll.contentItem.contentY
@@ -92,6 +95,7 @@ Item {
     signal browseRequested()
 
     ListModel { id: sidebarModel }
+    ListModel { id: documentTabsModel }
     TreeModel {
         id: fileTreeModel
         TableModelColumn { display: "name"; edit: "name" }
@@ -143,6 +147,7 @@ Item {
     }
 
     Component.onCompleted: {
+        syncDocumentTabs()
         scheduleSidebarUpdate()
         var encoded = root.controller ? root.controller.minimap_glyphs() : ""
         var glyphs = []
@@ -231,9 +236,49 @@ Item {
     }
 
     function syncDocumentTabs() {
+        if (!controller || controller.snapshot_updating) return
         synchronizingDocumentTabs = true
-        documentTabBar.setCurrentIndex(root.controller.open_document_ids.indexOf(root.controller.active_document_id))
+        var paths = controller.open_document_ids
+        var previous = []
+        for (var i = 0; i < documentTabsModel.count; i++) previous.push(documentTabsModel.get(i).path)
+        // Relocations retain the same tab object and its position.
+        if (previous.length === paths.length) {
+            for (var i = 0; i < paths.length; i++) {
+                if (paths.indexOf(previous[i]) === -1 && previous.indexOf(paths[i]) === -1)
+                    documentTabsModel.setProperty(i, "path", paths[i])
+            }
+        }
+        var existing = []
+        for (var i = 0; i < documentTabsModel.count; i++) existing.push(documentTabsModel.get(i).path)
+        for (var path of paths) {
+            if (existing.indexOf(path) === -1) {
+                documentTabsModel.append({path: path})
+                existing.push(path)
+            }
+        }
+        // Select the final destination before removing an active old tab, so
+        // TabBar never needs to choose a temporary first-tab fallback.
+        documentTabBar.setCurrentIndex(existing.indexOf(controller.active_document_id))
+        for (var i = documentTabsModel.count - 1; i >= 0; i--) {
+            if (paths.indexOf(documentTabsModel.get(i).path) === -1) documentTabsModel.remove(i)
+        }
+        for (var i = 0; i < paths.length; i++) {
+            if (documentTabsModel.get(i).path === paths[i]) continue
+            for (var j = i + 1; j < documentTabsModel.count; j++) {
+                if (documentTabsModel.get(j).path === paths[i]) {
+                    documentTabsModel.move(j, i, 1)
+                    break
+                }
+            }
+        }
+        documentTabBar.setCurrentIndex(paths.indexOf(controller.active_document_id))
         synchronizingDocumentTabs = false
+    }
+
+    function selectDocumentTab(path) {
+        if (!controller.snapshot_updating && !synchronizingDocumentTabs && flushEditor())
+            controller.open_document(path)
+        syncDocumentTabs()
     }
 
     function saveActive() {
@@ -1054,7 +1099,7 @@ Item {
 
 
     readonly property list<Action> applicationActions: [homeAction, openAction, developerAction, quitAction]
-    readonly property list<Action> pageActions: [saveAction, saveAllAction, newFileAction, newFolderAction]
+    readonly property list<Action> pageActions: [textZoomAction, saveAction, saveAllAction]
     readonly property var syntaxColors: [Kirigami.Theme.textColor, Kirigami.Theme.linkColor,
         Kirigami.Theme.neutralTextColor, Kirigami.Theme.positiveTextColor,
         Kirigami.Theme.disabledTextColor, Kirigami.Theme.activeTextColor]
@@ -1063,6 +1108,51 @@ Item {
         minimap.requestPaint()
     })
 
+    Kirigami.Action {
+        id: textZoomAction
+        text: "Text Zoom"
+        icon.name: "zoom-original"
+        displayComponent: RowLayout {
+            spacing: 0
+            ToolButton {
+                action: decreaseTextSizeAction
+                display: AbstractButton.IconOnly
+                ToolTip.visible: hovered
+                ToolTip.text: text
+            }
+            Label {
+                objectName: "editorZoomPercent"
+                text: root.editorZoomPercent + "%"
+                Layout.minimumWidth: Kirigami.Units.gridUnit * 3
+                horizontalAlignment: Text.AlignHCenter
+                Accessible.name: "Text Zoom " + text
+            }
+            ToolButton {
+                action: increaseTextSizeAction
+                display: AbstractButton.IconOnly
+                ToolTip.visible: hovered
+                ToolTip.text: text
+            }
+        }
+    }
+    Kirigami.Action {
+        id: decreaseTextSizeAction
+        objectName: "decreaseTextSizeAction"
+        text: "Decrease Text Size"
+        icon.name: "zoom-out"
+        displayHint: Kirigami.DisplayHint.IconOnly
+        enabled: root.editorFontPointSize > 8
+        onTriggered: root.editorFontPointSize = Math.max(8, root.editorFontPointSize - 1)
+    }
+    Kirigami.Action {
+        id: increaseTextSizeAction
+        objectName: "increaseTextSizeAction"
+        text: "Increase Text Size"
+        icon.name: "zoom-in"
+        displayHint: Kirigami.DisplayHint.IconOnly
+        enabled: root.editorFontPointSize < 40
+        onTriggered: root.editorFontPointSize = Math.min(40, root.editorFontPointSize + 1)
+    }
     Kirigami.Action {
         id: homeAction
         text: "Home"
@@ -1204,6 +1294,8 @@ Item {
                         contentItem: TabBar {
                             id: sidebarTabs
                             objectName: "sidebarTabs"
+                            background: null
+                            bottomPadding: 0
                             implicitHeight: root.documentTabHeight
                             contentHeight: availableHeight
                             currentIndex: root.sidebarTab
@@ -1253,6 +1345,26 @@ Item {
                                     Layout.leftMargin: Kirigami.Units.smallSpacing
                                     Layout.rightMargin: Kirigami.Units.smallSpacing
                                     visible: root.sidebarTab === 0
+                                    ToolButton {
+                                        id: addEntryButton
+                                        objectName: "addEntryButton"
+                                        Layout.fillHeight: true
+                                        Layout.preferredWidth: root.documentTabHeight
+                                        text: "Add file or folder"
+                                        icon.name: "list-add"
+                                        display: AbstractButton.IconOnly
+                                        ToolTip.visible: hovered
+                                        ToolTip.text: text
+                                        ToolTip.delay: Kirigami.Units.toolTipDelay
+                                        onClicked: createEntryMenu.open()
+                                        Menu {
+                                            id: createEntryMenu
+                                            objectName: "createEntryMenu"
+                                            y: addEntryButton.height
+                                            MenuItem { action: newFileAction }
+                                            MenuItem { action: newFolderAction }
+                                        }
+                                    }
                                     Kirigami.SearchField {
                                         id: fileNameFilter
                                         objectName: "fileNameFilter"
@@ -1370,6 +1482,40 @@ Item {
                                     icon.color: "transparent"
                                     icon.width: Kirigami.Units.iconSizes.small
                                     icon.height: Kirigami.Units.iconSizes.small
+                                    rightPadding: Math.max(Kirigami.Units.mediumSpacing, treeStatus.implicitWidth + Kirigami.Units.smallSpacing)
+                                    Row {
+                                        id: treeStatus
+                                        anchors.right: parent.right
+                                        anchors.rightMargin: Kirigami.Units.smallSpacing
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: Kirigami.Units.smallSpacing
+                                        visible: !treeRow.editing && !treeRow.pooled
+                                        Kirigami.Icon {
+                                            objectName: "sidebarOpen:" + (treeRow.entry ? treeRow.entry.path : "")
+                                            source: "view-visible"
+                                            visible: treeRow.entry && !treeRow.entry.directory && root.controller.open_document_ids.indexOf(treeRow.entry.path) !== -1
+                                            width: Kirigami.Units.iconSizes.small
+                                            height: width
+                                            Accessible.name: "Open in editor"
+                                        }
+                                        Kirigami.Icon {
+                                            source: "dialog-warning"
+                                            visible: treeRow.entry && !treeRow.entry.directory && root.controller.conflicted_document_ids.indexOf(treeRow.entry.path) !== -1
+                                            width: Kirigami.Units.iconSizes.small
+                                            height: width
+                                            Accessible.name: "File changed on disk"
+                                        }
+                                        Rectangle {
+                                            objectName: "sidebarDirty:" + (treeRow.entry ? treeRow.entry.path : "")
+                                            visible: treeRow.entry && !treeRow.entry.directory && root.controller.dirty_document_ids.indexOf(treeRow.entry.path) !== -1
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            width: 6
+                                            height: 6
+                                            radius: width / 2
+                                            color: treeRow.highlighted ? systemColors.highlightedText : treeRow.Kirigami.Theme.textColor
+                                            Accessible.name: "Unsaved changes"
+                                        }
+                                    }
                                     contentItem: Kirigami.IconTitleSubtitle {
                                         title: treeRow.text
                                         icon: icon.fromControlsIcon(treeRow.icon)
@@ -1547,6 +1693,14 @@ Item {
                                             anchors.verticalCenter: parent.verticalCenter
                                             spacing: Kirigami.Units.smallSpacing
                                             Kirigami.Icon {
+                                                objectName: "sidebarSearchOpen:" + fileGroup.fileId
+                                                source: "view-visible"
+                                                visible: !fileGroup.isDirectory && root.controller.open_document_ids.indexOf(fileGroup.fileId) !== -1
+                                                width: Kirigami.Units.iconSizes.small
+                                                height: width
+                                                Accessible.name: "Open in editor"
+                                            }
+                                            Kirigami.Icon {
                                                 source: "dialog-warning"
                                                 visible: !fileGroup.isDirectory && root.controller.conflicted_document_ids.indexOf(fileGroup.fileId) !== -1
                                                 width: Kirigami.Units.iconSizes.small
@@ -1633,39 +1787,36 @@ Item {
                         TabBar {
                             id: documentTabBar
                             objectName: "documentTabBar"
+                            onCurrentIndexChanged: {
+                                if (currentItem && !root.synchronizingDocumentTabs && !root.controller.snapshot_updating)
+                                    root.selectDocumentTab(currentItem.path)
+                            }
                             implicitHeight: root.documentTabHeight
                             contentHeight: availableHeight
                             Layout.fillWidth: true
                             Layout.minimumHeight: root.documentTabHeight
                             Layout.preferredHeight: root.documentTabHeight
                             Layout.maximumHeight: root.documentTabHeight
-                            onCurrentIndexChanged: {
-                                if (root.synchronizingDocumentTabs || root.controller.snapshot_updating) return
-                                var path = root.controller.open_document_ids[currentIndex]
-                                if (path && path !== root.controller.active_document_id && root.flushEditor())
-                                    root.controller.open_document(path)
-                                root.syncDocumentTabs()
-                            }
                             Repeater {
-                                model: root.controller.open_document_ids
+                                model: documentTabsModel
                                 delegate: TabButton {
-                                    required property string modelData
-                                    objectName: "documentTab:" + modelData
+                                    required property string path
+                                    objectName: "documentTab:" + path
                                     width: implicitWidth
                                     height: documentTabBar.availableHeight
                                     icon.width: Kirigami.Units.iconSizes.smallMedium
                                     icon.height: Kirigami.Units.iconSizes.smallMedium
-                                    icon.source: root.entryIcon(modelData, false, false)
+                                    icon.source: root.entryIcon(path, false, false)
                                     icon.color: "transparent"
-                                    text: modelData.split("/").pop()
-                                    Accessible.description: root.controller.dirty_document_ids.indexOf(modelData) !== -1 ? "Unsaved changes" : ""
+                                    text: path.split("/").pop()
+                                    Accessible.description: root.controller.dirty_document_ids.indexOf(path) !== -1 ? "Unsaved changes" : ""
                                     leftPadding: documentDirtyIndicator.width + Kirigami.Units.smallSpacing * 2
                                     rightPadding: closeDocumentTab.width + Kirigami.Units.smallSpacing
-                                    ToolTip.text: modelData
+                                    ToolTip.text: path
                                     ToolTip.visible: hovered
                                     Rectangle {
                                         id: documentDirtyIndicator
-                                        objectName: "dirtyDocumentTab:" + modelData
+                                        objectName: "dirtyDocumentTab:" + path
                                         anchors.left: parent.left
                                         anchors.leftMargin: Kirigami.Units.smallSpacing
                                         anchors.verticalCenter: parent.verticalCenter
@@ -1673,11 +1824,11 @@ Item {
                                         height: 5
                                         radius: width / 2
                                         color: Kirigami.Theme.textColor
-                                        visible: root.controller.dirty_document_ids.indexOf(modelData) !== -1
+                                        visible: root.controller.dirty_document_ids.indexOf(path) !== -1
                                     }
                                     ToolButton {
                                         id: closeDocumentTab
-                                        objectName: "closeDocumentTab:" + modelData
+                                        objectName: "closeDocumentTab:" + path
                                         anchors.right: parent.right
                                         anchors.verticalCenter: parent.verticalCenter
                                         width: height
@@ -1687,9 +1838,9 @@ Item {
                                         icon.height: Kirigami.Units.iconSizes.small
                                         icon.name: "window-close"
                                         display: AbstractButton.IconOnly
-                                        text: "Close " + modelData
+                                        text: "Close " + path
                                         Accessible.name: text
-                                        onClicked: root.requestCloseDocument(modelData)
+                                        onClicked: root.requestCloseDocument(path)
                                     }
                                 }
                             }
@@ -1791,7 +1942,7 @@ Item {
                                             visible: editor.enabled
                                         }
                                     }
-                                    font: EditorFonts.fixedFont
+                                    font: Qt.font({ family: EditorFonts.fixedFont.family, pointSize: root.editorFontPointSize })
                                     textFormat: TextEdit.PlainText
                                     wrapMode: TextEdit.NoWrap
                                     EditorSyntaxHighlighter {
@@ -1965,19 +2116,18 @@ Item {
     Connections {
         target: root.controller
         function onSnapshot_updatingChanged() {
-            if (!root.controller.snapshot_updating) Qt.callLater(root.syncDocumentTabs)
+            if (root.controller.snapshot_updating) root.synchronizingDocumentTabs = true
+            else root.syncDocumentTabs()
         }
         function onOpen_document_idsChanged() {
-            root.synchronizingDocumentTabs = true
-            Qt.callLater(root.syncDocumentTabs)
+            if (!root.controller.snapshot_updating) root.syncDocumentTabs()
         }
         function onDocument_switched() {
             syntaxHighlighter.clearUndoHistory()
             editor.deselect()
         }
         function onActive_document_idChanged() {
-            root.synchronizingDocumentTabs = true
-            Qt.callLater(root.syncDocumentTabs)
+            if (!root.controller.snapshot_updating) root.syncDocumentTabs()
             root.selectedResultIndex = -1
             Qt.callLater(root.updateHighlight)
             Qt.callLater(root.restoreFileTreeSelection)

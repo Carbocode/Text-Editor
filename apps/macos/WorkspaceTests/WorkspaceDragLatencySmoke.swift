@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import Darwin
 import Foundation
 import SwiftUI
@@ -53,6 +54,7 @@ struct WorkspaceDragLatencySmoke {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("workspace-drag-latency-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appendingPathComponent("src"), withIntermediateDirectories: true)
         try "source\n".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "notes\n".write(to: root.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
         try "fn main() {}\n".write(to: root.appendingPathComponent("src/main.rs"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: root) }
         let queue = DispatchQueue(label: "workspace.drag-latency.backend")
@@ -155,12 +157,25 @@ struct WorkspaceDragLatencySmoke {
         precondition(!store.openDocuments.contains("README.md"), "Tab close button did not close its document")
         store.openDocument("README.md")
         pump(until: { editorReady("README.md") }, timeout: 3)
+        store.openDocument("notes.md")
+        pump(until: { editorReady("notes.md") }, timeout: 3)
+        store.openDocument("README.md")
+        pump(until: { editorReady("README.md") }, timeout: 3)
         print("macOS document tab selection/close/editor identity/rename smoke test passed")
-        if let capture = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_SMOKE_SCREENSHOT"],
-           let content = window.contentView,
-           let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
-            content.cacheDisplay(in: content.bounds, to: bitmap)
-            try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: capture))
+        if let capture = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_SMOKE_SCREENSHOT"] {
+            pump(until: { false }, timeout: 0.3)
+            if CGPreflightScreenCaptureAccess() {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                task.arguments = ["-x", "-l", String(window.windowNumber), capture]
+                try task.run()
+                task.waitUntilExit()
+                precondition(task.terminationStatus == 0, "Could not capture the smoke window")
+            } else if let content = window.contentView,
+                      let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: capture))
+            }
         }
         let destinationPoint = destination.convert(NSPoint(x: min(100, destination.bounds.width / 2), y: destination.bounds.midY), to: nil)
         var pendingAt: TimeInterval?

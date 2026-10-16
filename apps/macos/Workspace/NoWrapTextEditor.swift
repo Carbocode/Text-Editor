@@ -9,13 +9,14 @@ struct NoWrapTextEditor: NSViewRepresentable {
     @Binding var text: String
     let searchRange: NSRange?
     let searchNavigationRevision: UInt64
+    var fontSize: CGFloat = NSFont.systemFontSize
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
 
     func makeNSView(context: Context) -> EditorContainer {
-        let scrollView = Self.makeScrollView(text: text)
+        let scrollView = Self.makeScrollView(text: text, fontSize: fontSize)
         let container = EditorContainer(scrollView: scrollView, fileName: documentID)
         context.coordinator.container = container
         (scrollView.documentView as? NSTextView)?.delegate = context.coordinator
@@ -27,7 +28,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
         return container
     }
 
-    static func makeScrollView(text: String) -> NSScrollView {
+    static func makeScrollView(text: String, fontSize: CGFloat = NSFont.systemFontSize) -> NSScrollView {
         let scrollView = NSScrollView()
         scrollView.borderType = .noBorder
         scrollView.hasHorizontalScroller = true
@@ -37,7 +38,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
         let textView = EditorTextView(frame: NSRect(origin: .zero, size: scrollView.contentSize))
         textView.isRichText = false
         textView.allowsUndo = true
-        textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.textContainerInset = NSSize(width: 12, height: 12)
         textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
         let unlimited = CGFloat(Float.greatestFiniteMagnitude)
@@ -55,6 +56,7 @@ struct NoWrapTextEditor: NSViewRepresentable {
     func updateNSView(_ container: EditorContainer, context: Context) {
         let scrollView = container.scrollView
         guard let textView = scrollView.documentView as? NSTextView else { return }
+        container.setFontSize(fontSize)
         textView.isEditable = isEnabled
         context.coordinator.parent = self
         let pathChanged = context.coordinator.documentID != documentID
@@ -270,9 +272,12 @@ final class EditorContainer: NSView {
 
     override func layout() {
         super.layout()
-        gutter.frame = NSRect(x: 0, y: 0, width: 48, height: bounds.height)
-        scrollView.frame = NSRect(x: 48, y: 0, width: max(0, bounds.width - 148), height: bounds.height)
-        minimap.frame = NSRect(x: max(48, bounds.width - 100), y: 0, width: 100, height: bounds.height)
+        let numberFont = NSFont.monospacedSystemFont(ofSize: max(8, (textView?.font?.pointSize ?? NSFont.systemFontSize) - 2), weight: .regular)
+        let digits = String(repeating: "0", count: max(3, String(gutter.lineCount).count)) as NSString
+        let gutterWidth = max(48, ceil(digits.size(withAttributes: [.font: numberFont]).width) + 16)
+        gutter.frame = NSRect(x: 0, y: 0, width: gutterWidth, height: bounds.height)
+        scrollView.frame = NSRect(x: gutterWidth, y: 0, width: max(0, bounds.width - gutterWidth - 100), height: bounds.height)
+        minimap.frame = NSRect(x: max(gutterWidth, bounds.width - 100), y: 0, width: 100, height: bounds.height)
         if let textView {
             textView.minSize = scrollView.contentSize
             textView.setFrameSize(textView.frame.size)
@@ -334,6 +339,20 @@ final class EditorContainer: NSView {
         minimap.needsDisplay = true
     }
 
+    func setFontSize(_ size: CGFloat) {
+        guard let textView, textView.font?.pointSize != size else { return }
+        let undo = textView.undoManager
+        let recordsUndo = undo?.isUndoRegistrationEnabled == true
+        if recordsUndo { undo?.disableUndoRegistration() }
+        let font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
+        textView.font = font
+        textView.typingAttributes[.font] = font
+        if recordsUndo { undo?.enableUndoRegistration() }
+        needsLayout = true
+        SyntaxHighlighting.apply(to: textView, fileName: fileName)
+        refreshChrome()
+    }
+
     var textView: NSTextView? { scrollView.documentView as? NSTextView }
     var displayedLineCount: Int { gutter.lineCount }
     var lineHeight: CGFloat {
@@ -363,7 +382,7 @@ private final class EditorGutter: NSView {
         let first = min(count, max(0, Int((scrollY - textView.textContainerInset.height) / lineHeight)))
         let last = min(count, first + Int(ceil(bounds.height / lineHeight)) + 3)
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+            .font: NSFont.monospacedSystemFont(ofSize: max(8, (textView.font?.pointSize ?? NSFont.systemFontSize) - 2), weight: .regular),
             .foregroundColor: NSColor.secondaryLabelColor
         ]
         for line in first..<last {

@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
     @State private var choosingWorkspace = false
-    @Environment(\.openWindow) private var openWindow
+    @State private var editorFontSize = NSFont.systemFontSize
     @State private var resolvingExternalChange = false
     @State private var deletePath = ""
     @State private var confirmingDelete = false
@@ -286,6 +286,14 @@ struct ContentView: View {
                     entryName(group.id).opacity(isPendingMove(group.id) ? 0.5 : 1)
                     Spacer(minLength: 0)
                     pendingMoveIndicator(group.id)
+                    if store.openDocuments.contains(where: { store.presentationPath($0) == group.id }) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Open in editor")
+                            .accessibilityIdentifier("sidebarOpen:" + group.id)
+                            .help("Open in editor")
+                    }
                     if store.externalChangeIDs.contains(where: { store.presentationPath($0) == group.id }) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
@@ -687,13 +695,39 @@ struct ContentView: View {
         } detail: {
             editorDetail
                 .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
+                    ToolbarItem(placement: .principal) {
+                        Text(store.workspaceName ?? "Native Workspace")
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                    ToolbarSpacer(.flexible, placement: .primaryAction)
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button("Decrease Text Size", systemImage: "textformat.size.smaller") { editorFontSize -= 1 }
+                            .disabled(editorFontSize <= 8)
+                            .help("Decrease Text Size")
+                        Text("\(Int((editorFontSize / NSFont.systemFontSize * 100).rounded()))%")
+                            .monospacedDigit()
+                            .frame(minWidth: 44)
+                            .accessibilityLabel("Text Zoom")
+                        Button("Increase Text Size", systemImage: "textformat.size.larger") { editorFontSize += 1 }
+                            .disabled(editorFontSize >= 40)
+                            .help("Increase Text Size")
+                    }
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button("Save", systemImage: "square.and.arrow.down") { store.saveDocument() }
+                            .disabled(!store.hasDirtyActiveDocument)
+                            .accessibilityIdentifier("saveDocument")
                         Button("Save All", systemImage: "square.and.arrow.down.on.square") { store.saveAllDocuments() }
                     }
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
                     ToolbarItem(placement: .primaryAction) {
-                        Button("Home", systemImage: "house") { openWindow(id: "home") }
+                        ApplicationMenu(store: store, openFolder: { choosingWorkspace = true })
                     }
                 }
+                .toolbar(removing: .title)
         }
         }
         }
@@ -771,7 +805,8 @@ struct ContentView: View {
                     get: { store.editorText },
                     set: { store.changeDocument($0) }
                 ), searchRange: store.selectedSearchRange,
-                   searchNavigationRevision: store.searchNavigationRevision)
+                   searchNavigationRevision: store.searchNavigationRevision,
+                   fontSize: editorFontSize)
             } else {
                 VStack(spacing: 16) {
                     ContentUnavailableView(

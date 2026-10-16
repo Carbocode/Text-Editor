@@ -179,6 +179,20 @@ struct EditorLayoutSmoke {
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         precondition(tabEditor.undoManager?.canUndo == true, "A rename must preserve the document's undo history")
         precondition(tabEditor.selectedRange() == NSRange(location: 1, length: 2), "A rename must preserve selection")
+        let contentBeforeZoom = tabEditor.string
+        host.rootView = NoWrapTextEditor(documentID: "renamed-b.txt", documentIdentity: 2,
+            textRevision: 3, text: .constant(contentBeforeZoom), searchRange: nil, searchNavigationRevision: 0,
+            fontSize: 24)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        precondition(findEditor(host) === tabEditor && tabEditor.font?.pointSize == 24,
+                     "Changing text size must resize the existing editor")
+        precondition(tabEditor.string == contentBeforeZoom && tabEditor.selectedRange() == NSRange(location: 1, length: 2),
+                     "Changing text size altered content or selection")
+        precondition(tabEditor.undoManager?.canUndo == true, "Changing text size cleared undo")
+        tabEditor.undoManager?.undo()
+        precondition(tabEditor.string == "first edited", "Font size changes added a text undo operation")
+        print("AppKit text size/content/selection/undo smoke test passed")
         host.rootView = NoWrapTextEditor(documentID: "c.txt", documentIdentity: 3,
             textRevision: 4, text: .constant("third document"), searchRange: nil, searchNavigationRevision: 0)
         host.layoutSubtreeIfNeeded()

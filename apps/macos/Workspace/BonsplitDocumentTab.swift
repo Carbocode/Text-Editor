@@ -23,6 +23,44 @@ struct BonsplitTabItemView: View {
     @State private var isCloseHovered = false
 
     var body: some View {
+        selectionButton
+            .buttonBorderShape(.roundedRectangle(radius: BonsplitTabBarMetrics.tabCornerRadius))
+            .buttonSizing(.flexible)
+            .frame(minWidth: BonsplitTabBarMetrics.tabMinWidth, maxWidth: BonsplitTabBarMetrics.tabMaxWidth)
+            .frame(height: BonsplitTabBarMetrics.tabHeight)
+            .overlay(alignment: .trailing) {
+                closeButton.padding(.trailing, BonsplitTabBarMetrics.tabHorizontalPadding)
+            }
+            .overlay(alignment: .leading) {
+                if tab.isDirty {
+                    Circle()
+                        .fill(isSelected ? BonsplitTabBarColors.activeText : BonsplitTabBarColors.inactiveText)
+                        .frame(width: BonsplitTabBarMetrics.dirtyIndicatorSize,
+                               height: BonsplitTabBarMetrics.dirtyIndicatorSize)
+                        .padding(.leading, 4)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+            .onHover { isHovered = $0 }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(tab.title)
+            .accessibilityValue(tab.isDirty ? "Modified" : "")
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    @ViewBuilder private var selectionButton: some View {
+        if isSelected {
+            Button(action: onSelect) { tabLabel }
+                .buttonStyle(.glassProminent)
+                .tint(.accentColor)
+        } else {
+            Button(action: onSelect) { tabLabel }
+                .buttonStyle(.glass)
+        }
+    }
+
+    private var tabLabel: some View {
         HStack(spacing: BonsplitTabBarMetrics.contentSpacing) {
             // Icon
             if let fileImage {
@@ -44,50 +82,10 @@ struct BonsplitTabItemView: View {
                 .foregroundStyle(isSelected ? BonsplitTabBarColors.activeText : BonsplitTabBarColors.inactiveText)
 
             Spacer(minLength: 4)
-            closeButton
+            Color.clear
+                .frame(width: BonsplitTabBarMetrics.closeButtonSize, height: BonsplitTabBarMetrics.closeButtonSize)
+                .accessibilityHidden(true)
         }
-        .padding(.horizontal, BonsplitTabBarMetrics.tabHorizontalPadding)
-        .frame(
-            minWidth: BonsplitTabBarMetrics.tabMinWidth,
-            maxWidth: BonsplitTabBarMetrics.tabMaxWidth,
-            minHeight: BonsplitTabBarMetrics.tabHeight,
-            maxHeight: BonsplitTabBarMetrics.tabHeight
-        )
-        // Keep foreground glyphs out of the glass render group. Rebuilding an
-        // interactive glass subtree on hover can temporarily drop text/images.
-        .background {
-            if isSelected {
-                tabShape.fill(Color.accentColor)
-            } else {
-                tabShape.fill(.clear)
-                    .glassEffect(.regular, in: tabShape)
-            }
-        }
-        .overlay(alignment: .leading) {
-            if tab.isDirty {
-                Circle()
-                    .fill(isSelected ? BonsplitTabBarColors.activeText : BonsplitTabBarColors.inactiveText)
-                    .frame(width: BonsplitTabBarMetrics.dirtyIndicatorSize,
-                           height: BonsplitTabBarMetrics.dirtyIndicatorSize)
-                    .padding(.leading, 4)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
-        }
-        .contentShape(tabShape)
-        .onTapGesture {
-            onSelect()
-        }
-        .onHover { isHovered = $0 }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(tab.title)
-        .accessibilityAction { onSelect() }
-        .accessibilityValue(tab.isDirty ? "Modified" : "")
-        .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-    }
-
-    private var tabShape: RoundedRectangle {
-        RoundedRectangle(cornerRadius: BonsplitTabBarMetrics.tabCornerRadius, style: .continuous)
     }
 
     private var closeButton: some View {
@@ -113,7 +111,7 @@ struct BonsplitTabItemView: View {
 /// Foreground colors for solid accent selection and system glass.
 enum BonsplitTabBarColors {
     static var activeText: Color { Color(nsColor: .selectedMenuItemTextColor) }
-    static var inactiveText: Color { .primary }
+    static var inactiveText: Color { Color(nsColor: .labelColor) }
 }
 
 /// Shared row sizing keeps the sidebar and document controls vertically centered.

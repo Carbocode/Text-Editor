@@ -16,25 +16,23 @@ struct DocumentTabs<Content: View>: View {
             if !documents.isEmpty {
                 ScrollViewReader { proxy in
                     ScrollView(.horizontal, showsIndicators: false) {
-                        GlassEffectContainer(spacing: BonsplitTabBarMetrics.tabSpacing / 2) {
-                            HStack(spacing: BonsplitTabBarMetrics.tabSpacing) {
-                                ForEach(documents, id: \.self) { id in
-                                    BonsplitTabItemView(
-                                        tab: BonsplitTabItem(title: (id as NSString).lastPathComponent,
-                                                            isDirty: dirtyDocuments.contains(id)),
-                                        isSelected: selectedDocument == id,
-                                        fileImage: WorkspaceIcons.image(for: id),
-                                        accessibilityID: id,
-                                        onSelect: { _ = select(id) },
-                                        onClose: { close(id) })
-                                    .help(id)
-                                    .accessibilityIdentifier("documentTab:" + id)
-                                    .id(id)
-                                }
+                        HStack(spacing: BonsplitTabBarMetrics.tabSpacing) {
+                            ForEach(documents, id: \.self) { id in
+                                BonsplitTabItemView(
+                                    tab: BonsplitTabItem(title: (id as NSString).lastPathComponent,
+                                                        isDirty: dirtyDocuments.contains(id)),
+                                    isSelected: selectedDocument == id,
+                                    fileImage: WorkspaceIcons.image(for: id),
+                                    accessibilityID: id,
+                                    onSelect: { _ = select(id) },
+                                    onClose: { close(id) })
+                                .help(id)
+                                .accessibilityIdentifier("documentTab:" + id)
+                                .id(id)
                             }
-                            .padding(.horizontal, BonsplitTabBarMetrics.barPadding)
-                            .frame(height: BonsplitTabBarMetrics.barHeight)
                         }
+                        .padding(.horizontal, BonsplitTabBarMetrics.barPadding)
+                        .frame(height: BonsplitTabBarMetrics.barHeight)
                     }
                     .onAppear { if let selectedDocument { proxy.scrollTo(selectedDocument) } }
                     .onChange(of: selectedDocument) { _, id in

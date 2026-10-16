@@ -6,6 +6,9 @@ fn main() {
     println!("cargo:rerun-if-changed=icons/native-workspace-bookmark-symbolic.svg");
 
     println!("cargo:rerun-if-changed=icons/native-workspace-modified-symbolic.svg");
+    println!("cargo:rerun-if-changed=icons/native-workspace-save-all-symbolic.svg");
+    println!("cargo:rerun-if-changed=icons/native-workspace-new-file-symbolic.svg");
+    println!("cargo:rerun-if-changed=icons/native-workspace-quit-symbolic.svg");
 
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"))
         .join("icons.gresource");

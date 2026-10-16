@@ -21,6 +21,17 @@ Kirigami.ApplicationWindow {
     property int step: 0
     property real initialWidth: 0
     property real initialDocumentTabWidth: 0
+    property real initialEditorFontSize: 0
+    property bool trackingTabSelection: false
+    property var tabSelections: []
+    property var retainedTab: null
+    Connections {
+        target: pane.documentTabBar
+        function onCurrentItemChanged() {
+            if (window.trackingTabSelection && pane.documentTabBar.currentItem)
+                window.tabSelections.push(pane.documentTabBar.currentItem.path)
+        }
+    }
     property string localText: "// unsaved resize check\n"
 
     function check(condition, message) { if (!condition) throw new Error(message) }
@@ -87,10 +98,24 @@ Kirigami.ApplicationWindow {
                         "Sidebar is not a resizable native desktop drawer")
                     initialDocumentTabWidth = pane.documentTabBar.currentItem.width
                     controller.change_document(localText)
+                    var editor = input.findChild(pane, "documentEditor")
+                    editor.insert(editor.length, "x")
+                    editor.remove(editor.length - 1, editor.length)
+                    editor.select(0, 2)
+                    initialEditorFontSize = pane.editorFont.pointSize
+                    input.findChild(pane, "increaseTextSizeAction").trigger()
                     initialWidth = pane.sidebar.width
                     resizeSidebarTo(initialWidth + Kirigami.Units.gridUnit * 4)
                     break
                 case 2:
+                    var editor = input.findChild(pane, "documentEditor")
+                    check(pane.editorFont.pointSize > initialEditorFontSize, "Increase Text Size did not resize the editor")
+                    check(editor.selectedText === localText.substring(0, 2) && editor.canUndo,
+                        "Changing text size altered selection or cleared undo")
+                    check(editor.text === localText, "Changing text size altered the document")
+                    input.findChild(pane, "decreaseTextSizeAction").trigger()
+                    check(pane.editorFont.pointSize === initialEditorFontSize, "Decrease Text Size did not restore the editor font")
+                    console.log("KDE text size/content/selection/undo smoke test passed")
                     check(Math.abs(pane.documentTabBar.currentItem.width - initialDocumentTabWidth) <= 0.1,
                         "Dirty indicator changed the document tab width")
                     var tab = pane.documentTabBar.currentItem
@@ -122,6 +147,35 @@ Kirigami.ApplicationWindow {
                     check(controller.active_document_text === localText && controller.active_document_dirty,
                         "Resizing lost the unsaved editor buffer")
                     console.log("KDE native sidebar resize/header alignment smoke test passed")
+                    controller.save_all_documents()
+                    controller.create_entry("stable-a.txt", false)
+                    controller.create_entry("stable-b.txt", false)
+                    controller.open_document("stable-a.txt")
+                    controller.open_document("stable-b.txt")
+                    break
+                case 6:
+                    controller.open_document("stable-a.txt")
+                    retainedTab = pane.documentTabBar.currentItem
+                    trackingTabSelection = true
+                    controller.create_entry("stable-c.txt", false)
+                    controller.open_document("stable-c.txt")
+                    controller.close_document("stable-c.txt")
+                    controller.close_document("src/main.rs")
+                    break
+                case 7:
+                    trackingTabSelection = false
+                    check(tabSelections.length > 0 && tabSelections.every(path => path === "stable-c.txt" || path === "stable-b.txt"),
+                        "Native tab selection visited an unrelated first tab: " + tabSelections)
+                    check(pane.documentTabBar.itemAt(controller.open_document_ids.indexOf("stable-a.txt")) === retainedTab,
+                        "Opening or closing tabs recreated an existing native tab")
+                    input.mouseClick(retainedTab, retainedTab.width / 2, retainedTab.height / 2)
+                    check(controller.active_document_id === "stable-a.txt", "Clicking the retained native tab did not select it")
+                    controller.change_document("unsaved marker check")
+                    console.log("KDE stable document tab selection/retained delegates smoke test passed")
+                    break
+                case 8:
+                    check(pane.documentTabBar.currentItem === retainedTab && retainedTab.checked,
+                        "Native tab highlight did not follow the active document")
                     running = false
                     var capture = Qt.application.arguments.find(value => value.startsWith("--smoke-screenshot="))
                     if (!capture) { Qt.quit(); return }
