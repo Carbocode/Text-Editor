@@ -104,6 +104,64 @@ struct WorkspaceDragLatencySmoke {
         let editorHeight = editorContainer(in: window.contentView)!.bounds.height
         precondition(editorHeight > window.contentView!.bounds.height * 0.7,
             "Document tabs consume editor space: editor height \(editorHeight), window height \(window.contentView!.bounds.height)")
+        let originalEditor = editorContainer(in: window.contentView)!
+        func editorReady(_ path: String) -> Bool {
+            originalEditor.fileName == path
+                && (originalEditor.textView?.delegate as? NoWrapTextEditor.Coordinator)?.documentIdentity == store.editorDocumentIdentity
+        }
+        func tabPoint(_ index: Int, close: Bool = false) -> NSPoint {
+            let editorFrame = originalEditor.convert(originalEditor.bounds, to: nil)
+            return NSPoint(x: editorFrame.minX + BonsplitTabBarMetrics.barPadding
+                + CGFloat(index) * (BonsplitTabBarMetrics.tabMinWidth + BonsplitTabBarMetrics.tabSpacing)
+                + (close ? BonsplitTabBarMetrics.tabMinWidth - 12 : 40),
+                y: editorFrame.maxY + BonsplitTabBarMetrics.barHeight / 2)
+        }
+        func click(_ point: NSPoint) {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!
+                window.sendEvent(event)
+            }
+        }
+        store.openDocument("src/main.rs")
+        pump(until: { editorReady("src/main.rs") }, timeout: 3)
+        pump(until: { false }, timeout: 0.15)
+        precondition(editorContainer(in: window.contentView) === originalEditor, "Switching tabs replaced the editor")
+        click(tabPoint(0))
+        pump(until: { store.activeDocument?.id == "README.md" && editorReady("README.md") }, timeout: 3)
+        precondition(store.activeDocument?.id == "README.md", "Tab click did not open its document")
+        click(tabPoint(1))
+        pump(until: { store.activeDocument?.id == "src/main.rs" && editorReady("src/main.rs") }, timeout: 3)
+        precondition(store.activeDocument?.id == "src/main.rs", "Second tab click did not open its document")
+        let tabText = originalEditor.textView!
+        window.makeFirstResponder(tabText)
+        tabText.insertText("// edited", replacementRange: NSRange(location: 0, length: 0))
+        tabText.breakUndoCoalescing()
+        tabText.setSelectedRange(NSRange(location: 0, length: 2))
+        precondition(tabText.undoManager?.canUndo == true)
+        let identityBeforeRename = store.editorDocumentIdentity
+        precondition(store.renameEntry("src/main.rs", newName: "renamed.rs"))
+        pump(until: { !store.backendBusy && originalEditor.fileName == "src/renamed.rs" }, timeout: 3)
+        precondition(editorContainer(in: window.contentView) === originalEditor, "Native rename replaced the editor")
+        precondition(tabText.selectedRange() == NSRange(location: 0, length: 2) && tabText.undoManager?.canUndo == true,
+            "Native tabs lost selection or undo history during rename: selection=\(tabText.selectedRange()), undo=\(String(describing: tabText.undoManager?.canUndo)), identity=\(identityBeforeRename)→\(store.editorDocumentIdentity)")
+        store.saveDocument()
+        store.openDocument("README.md")
+        pump(until: { editorReady("README.md") }, timeout: 3)
+        pump(until: { false }, timeout: 0.15)
+        click(tabPoint(0, close: true))
+        pump(until: { !store.openDocuments.contains("README.md") }, timeout: 3)
+        precondition(!store.openDocuments.contains("README.md"), "Tab close button did not close its document")
+        store.openDocument("README.md")
+        pump(until: { editorReady("README.md") }, timeout: 3)
+        print("macOS document tab selection/close/editor identity/rename smoke test passed")
+        if let capture = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_SMOKE_SCREENSHOT"],
+           let content = window.contentView,
+           let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+            content.cacheDisplay(in: content.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: capture))
+        }
         let destinationPoint = destination.convert(NSPoint(x: min(100, destination.bounds.width / 2), y: destination.bounds.midY), to: nil)
         var pendingAt: TimeInterval?
         let subscription = store.$pendingRelocation.sink { relocation in

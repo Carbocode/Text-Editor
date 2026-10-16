@@ -37,6 +37,7 @@ pub mod qobject {
         #[qproperty(QStringList, file_filter_files)]
         #[qproperty(QStringList, file_filter_directories)]
         #[qproperty(bool, file_filter_in_progress)]
+        #[qproperty(bool, snapshot_updating)]
         #[qproperty(QStringList, open_document_ids)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, directory_ids)]
@@ -151,6 +152,7 @@ pub struct AppControllerRust {
     file_filter_files: QStringList,
     file_filter_directories: QStringList,
     file_filter_in_progress: bool,
+    snapshot_updating: bool,
     open_document_ids: QStringList,
     document_ids: QStringList,
     directory_ids: QStringList,
@@ -304,6 +306,7 @@ impl qobject::AppController {
     }
 
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
+        self.as_mut().set_snapshot_updating(true);
         self.as_mut().sync_pending_move();
         let previous_id = self.rust().active_document_id.to_string();
         let next_id = snapshot
@@ -524,6 +527,7 @@ impl qobject::AppController {
                 self.as_mut().set_active_document_external_change(false);
             }
         }
+        self.as_mut().set_snapshot_updating(false);
         if let Some(started) = diagnostic_started {
             self.rust().application.diagnostic_snapshot_applied(
                 diagnostic_operation,

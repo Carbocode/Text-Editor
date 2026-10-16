@@ -50,8 +50,13 @@ Item {
     property var minimapGlyphs: []
     property string minimapSource: ""
     property var minimapSpans: []
+    readonly property real documentTabHeight: Math.max(fileNameFilter.implicitHeight, textSearchField.implicitHeight, Kirigami.Units.iconSizes.smallMedium + Kirigami.Units.smallSpacing * 2)
+    property bool synchronizingDocumentTabs: true
     property int selectedResultIndex: -1
     property string selectedDirectoryPath: ""
+    readonly property var activeSidebarSearchRow: sidebarTab === 0 ? fileSearchRow : textSearchRow
+    property alias sidebarTabBar: sidebarTabs
+    property alias documentTabBar: documentTabBar
     property alias editorText: editor.text
     property alias editorFont: editor.font
     property alias editorSelectedText: editor.selectedText
@@ -223,6 +228,12 @@ Item {
     Shortcut {
         sequence: "Ctrl+Shift+S"
         onActivated: if (root.flushEditor()) root.controller.save_all_documents()
+    }
+
+    function syncDocumentTabs() {
+        synchronizingDocumentTabs = true
+        documentTabBar.setCurrentIndex(root.controller.open_document_ids.indexOf(root.controller.active_document_id))
+        synchronizingDocumentTabs = false
     }
 
     function saveActive() {
@@ -1043,7 +1054,7 @@ Item {
 
 
     readonly property list<Action> applicationActions: [homeAction, openAction, developerAction, quitAction]
-    readonly property list<Action> pageActions: [saveAction, newFileAction, newFolderAction]
+    readonly property list<Action> pageActions: [saveAction, saveAllAction, newFileAction, newFolderAction]
     readonly property var syntaxColors: [Kirigami.Theme.textColor, Kirigami.Theme.linkColor,
         Kirigami.Theme.neutralTextColor, Kirigami.Theme.positiveTextColor,
         Kirigami.Theme.disabledTextColor, Kirigami.Theme.activeTextColor]
@@ -1071,6 +1082,13 @@ Item {
         icon.name: "go-next"
         visible: root.controller.workspace_root.length > 0
         onTriggered: root.showingHome = false
+    }
+    Kirigami.Action {
+        id: saveAllAction
+        objectName: "saveAllAction"
+        text: "Save All"
+        icon.name: "document-save-all"
+        onTriggered: if (root.flushEditor()) root.controller.save_all_documents()
     }
     Kirigami.Action {
         id: saveAction
@@ -1183,10 +1201,33 @@ Item {
                         objectName: "sidebarTopBar"
                         Layout.fillWidth: true
                         Layout.preferredHeight: workspacePages.globalToolBar.preferredHeight
-                        contentItem: Kirigami.Heading {
-                            text: root.sidebarSections[root.sidebarTab].title
-                            level: 2
-                            elide: Text.ElideRight
+                        contentItem: TabBar {
+                            id: sidebarTabs
+                            objectName: "sidebarTabs"
+                            implicitHeight: root.documentTabHeight
+                            contentHeight: availableHeight
+                            currentIndex: root.sidebarTab
+                            onCurrentIndexChanged: if (currentIndex >= 0) {
+                                root.sidebarTab = currentIndex
+                                root.selectedResultIndex = -1
+                            }
+                            Repeater {
+                                model: root.sidebarSections
+                                delegate: Kirigami.NavigationTabButton {
+                                    required property int index
+                                    required property var modelData
+                                    height: sidebarTabs.availableHeight
+                                    text: modelData.title
+                                    icon.name: modelData.icon
+                                    icon.width: Kirigami.Units.iconSizes.smallMedium
+                                    icon.height: Kirigami.Units.iconSizes.smallMedium
+                                    display: AbstractButton.IconOnly
+                                    checked: root.sidebarTab === index
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: text
+                                    ToolTip.delay: Kirigami.Units.toolTipDelay
+                                }
+                            }
                         }
                     }
                     Pane {
@@ -1203,36 +1244,19 @@ Item {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 spacing: Kirigami.Units.smallSpacing
-                                TabBar {
-                                    id: sidebarTabs
-                                    objectName: "sidebarTabs"
-                                    Layout.fillWidth: true
-                                    currentIndex: root.sidebarTab
-                                    onCurrentIndexChanged: if (currentIndex >= 0) {
-                                        root.sidebarTab = currentIndex
-                                        root.selectedResultIndex = -1
-                                    }
-                                    Repeater {
-                                        model: root.sidebarSections
-                                        delegate: Kirigami.NavigationTabButton {
-                                            required property int index
-                                            required property var modelData
-                                            text: modelData.title
-                                            icon.name: modelData.icon
-                                            display: AbstractButton.IconOnly
-                                            checked: root.sidebarTab === index
-                                            ToolTip.visible: hovered
-                                            ToolTip.text: text
-                                            ToolTip.delay: Kirigami.Units.toolTipDelay
-                                        }
-                                    }
-                                }
                                 RowLayout {
+                                    id: fileSearchRow
                                     Layout.fillWidth: true
-                                    Layout.margins: Kirigami.Units.smallSpacing
+                                    Layout.minimumHeight: root.documentTabHeight
+                                    Layout.preferredHeight: root.documentTabHeight
+                                    Layout.maximumHeight: root.documentTabHeight
+                                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                                    Layout.rightMargin: Kirigami.Units.smallSpacing
                                     visible: root.sidebarTab === 0
                                     Kirigami.SearchField {
+                                        id: fileNameFilter
                                         objectName: "fileNameFilter"
+                                        Layout.fillHeight: true
                                         Layout.fillWidth: true
                                         text: root.fileNameQuery
                                         placeholderText: "Filter names…"
@@ -1246,11 +1270,18 @@ Item {
                                     }
                                 }
                                 RowLayout {
+                                    id: textSearchRow
                                     Layout.fillWidth: true
-                                    Layout.margins: Kirigami.Units.smallSpacing
+                                    Layout.minimumHeight: root.documentTabHeight
+                                    Layout.preferredHeight: root.documentTabHeight
+                                    Layout.maximumHeight: root.documentTabHeight
+                                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                                    Layout.rightMargin: Kirigami.Units.smallSpacing
                                     visible: root.sidebarTab === 1
                                     Kirigami.SearchField {
+                                        id: textSearchField
                                         Layout.fillWidth: true
+                                        Layout.fillHeight: true
                                         text: root.controller.search_query
                                         placeholderText: "Search in files…"
                                         onTextEdited: { root.selectedResultIndex = -1; root.controller.search_files(text) }
@@ -1599,30 +1630,70 @@ Item {
                     spacing: Kirigami.Units.smallSpacing
                     RowLayout {
                         Layout.fillWidth: true
-                        ScrollView {
+                        TabBar {
+                            id: documentTabBar
+                            objectName: "documentTabBar"
+                            implicitHeight: root.documentTabHeight
+                            contentHeight: availableHeight
                             Layout.fillWidth: true
-                            implicitHeight: 40
-                            Row {
-                                Repeater {
-                                    model: root.controller.open_document_ids
-                                    delegate: Row {
-                                        Button {
-                                            text: modelData.split("/").pop() + (root.controller.dirty_document_ids.indexOf(modelData) !== -1 ? " •" : "")
-                                            highlighted: root.controller.active_document_id === modelData
-                                            onClicked: { if (root.flushEditor()) root.controller.open_document(modelData) }
-                                            ToolTip.text: modelData
-                                            ToolTip.visible: hovered
-                                        }
-                                        ToolButton {
-                                            text: "×"
-                                            Accessible.name: "Close " + modelData
-                                            onClicked: { root.requestCloseDocument(modelData) }
-                                        }
+                            Layout.minimumHeight: root.documentTabHeight
+                            Layout.preferredHeight: root.documentTabHeight
+                            Layout.maximumHeight: root.documentTabHeight
+                            onCurrentIndexChanged: {
+                                if (root.synchronizingDocumentTabs || root.controller.snapshot_updating) return
+                                var path = root.controller.open_document_ids[currentIndex]
+                                if (path && path !== root.controller.active_document_id && root.flushEditor())
+                                    root.controller.open_document(path)
+                                root.syncDocumentTabs()
+                            }
+                            Repeater {
+                                model: root.controller.open_document_ids
+                                delegate: TabButton {
+                                    required property string modelData
+                                    objectName: "documentTab:" + modelData
+                                    width: implicitWidth
+                                    height: documentTabBar.availableHeight
+                                    icon.width: Kirigami.Units.iconSizes.smallMedium
+                                    icon.height: Kirigami.Units.iconSizes.smallMedium
+                                    icon.source: root.entryIcon(modelData, false, false)
+                                    icon.color: "transparent"
+                                    text: modelData.split("/").pop()
+                                    Accessible.description: root.controller.dirty_document_ids.indexOf(modelData) !== -1 ? "Unsaved changes" : ""
+                                    leftPadding: documentDirtyIndicator.width + Kirigami.Units.smallSpacing * 2
+                                    rightPadding: closeDocumentTab.width + Kirigami.Units.smallSpacing
+                                    ToolTip.text: modelData
+                                    ToolTip.visible: hovered
+                                    Rectangle {
+                                        id: documentDirtyIndicator
+                                        objectName: "dirtyDocumentTab:" + modelData
+                                        anchors.left: parent.left
+                                        anchors.leftMargin: Kirigami.Units.smallSpacing
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 5
+                                        height: 5
+                                        radius: width / 2
+                                        color: Kirigami.Theme.textColor
+                                        visible: root.controller.dirty_document_ids.indexOf(modelData) !== -1
+                                    }
+                                    ToolButton {
+                                        id: closeDocumentTab
+                                        objectName: "closeDocumentTab:" + modelData
+                                        anchors.right: parent.right
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: height
+                                        height: parent.availableHeight
+                                        padding: Math.min(Kirigami.Units.smallSpacing, height / 4)
+                                        icon.width: Kirigami.Units.iconSizes.small
+                                        icon.height: Kirigami.Units.iconSizes.small
+                                        icon.name: "window-close"
+                                        display: AbstractButton.IconOnly
+                                        text: "Close " + modelData
+                                        Accessible.name: text
+                                        onClicked: root.requestCloseDocument(modelData)
                                     }
                                 }
                             }
                         }
-                        Button { text: "Save All"; onClicked: { if (root.flushEditor()) root.controller.save_all_documents() } }
                     }
                     Pane {
                         Layout.fillWidth: true
@@ -1893,11 +1964,20 @@ Item {
 
     Connections {
         target: root.controller
+        function onSnapshot_updatingChanged() {
+            if (!root.controller.snapshot_updating) Qt.callLater(root.syncDocumentTabs)
+        }
+        function onOpen_document_idsChanged() {
+            root.synchronizingDocumentTabs = true
+            Qt.callLater(root.syncDocumentTabs)
+        }
         function onDocument_switched() {
             syntaxHighlighter.clearUndoHistory()
             editor.deselect()
         }
         function onActive_document_idChanged() {
+            root.synchronizingDocumentTabs = true
+            Qt.callLater(root.syncDocumentTabs)
             root.selectedResultIndex = -1
             Qt.callLater(root.updateHighlight)
             Qt.callLater(root.restoreFileTreeSelection)

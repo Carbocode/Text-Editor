@@ -145,3 +145,40 @@ fn native_adapter_publishes_completed_saves_when_save_all_fails() {
     );
     assert_eq!(snapshot.open_documents, [id("b"), id("a"), id("c")]);
 }
+
+#[test]
+fn moving_native_tabs_keeps_buffers_and_selects_the_visual_neighbor_on_close() {
+    let (_dir, mut app) = fixture();
+    app.dispatch(AppCommand::ChangeDocument {
+        id: id("a"),
+        content: "unsaved a".into(),
+    })
+    .unwrap();
+    let before = app.snapshot();
+    let moved = app
+        .dispatch_with_events(AppCommand::MoveDocumentTab {
+            id: id("c"),
+            index: 0,
+        })
+        .unwrap();
+    assert_eq!(
+        moved.events,
+        [AppEvent::DocumentTabMoved {
+            id: id("c"),
+            index: 0
+        }]
+    );
+    assert_eq!(moved.snapshot.open_documents, [id("c"), id("b"), id("a")]);
+    assert!(Arc::ptr_eq(&before.documents, &moved.snapshot.documents));
+    assert_eq!(moved.snapshot.active_document.unwrap().id, id("c"));
+    let closed = app.dispatch(AppCommand::CloseDocument(id("c"))).unwrap();
+    assert_eq!(closed.active_document.unwrap().id, id("b"));
+    assert!(
+        closed
+            .documents
+            .iter()
+            .find(|doc| doc.id == id("a"))
+            .unwrap()
+            .dirty
+    );
+}

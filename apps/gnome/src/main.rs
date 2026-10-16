@@ -1,3 +1,4 @@
+mod document_tab_scroll;
 mod editor_chrome;
 mod material_icons;
 mod sidebar_interactions;
@@ -40,7 +41,12 @@ struct Ui {
     search_truncated: gtk::Label,
     watching_search: Rc<Cell<bool>>,
     conflict_banner: gtk::Box,
-    document_tabs: gtk::Box,
+    document_tabs: adw::TabView,
+    document_tab_scroll: Rc<document_tab_scroll::TouchpadScroll>,
+    document_pages: Rc<RefCell<Vec<(DocumentId, adw::TabPage)>>>,
+    editor_panel: gtk::Box,
+    editor_stack: gtk::Stack,
+    empty_editor_page: gtk::Box,
     editor: gtk::TextView,
     editor_chrome: editor_chrome::EditorChrome,
     buffer: gtk::TextBuffer,
@@ -413,6 +419,91 @@ impl Ui {
         }
     }
 
+    fn render_document_tabs(&self, snapshot: &AppSnapshot) {
+        let mut pages = self.document_pages.borrow_mut();
+        // Retain native pages across renames and moves, including their order.
+        if pages.len() == snapshot.open_documents.len() {
+            let old_ids: std::collections::HashSet<_> =
+                pages.iter().map(|(id, _)| id.clone()).collect();
+            for ((old, _), new) in pages.iter_mut().zip(&snapshot.open_documents) {
+                if !snapshot.open_documents.contains(old) && !old_ids.contains(new) {
+                    *old = new.clone();
+                }
+            }
+        }
+        pages.retain(|(id, page)| {
+            if snapshot.open_documents.contains(id) {
+                true
+            } else {
+                self.document_tabs.close_page(page);
+                false
+            }
+        });
+        for (position, id) in snapshot.open_documents.iter().enumerate() {
+            let page = if let Some((_, page)) = pages.iter().find(|(open, _)| open == id) {
+                page.clone()
+            } else {
+                let child = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                let page = self.document_tabs.append(&child);
+                pages.push((id.clone(), page.clone()));
+                page
+            };
+            if self.document_tabs.page_position(&page) != position as i32 {
+                self.document_tabs.reorder_page(&page, position as i32);
+            }
+            let dirty = snapshot
+                .documents
+                .binary_search_by(|doc| doc.id.cmp(id))
+                .ok()
+                .is_some_and(|index| snapshot.documents[index].dirty);
+            let title = id.as_str().rsplit('/').next().unwrap();
+            let indicator = document_tab_indicator_icon(dirty);
+            if page.indicator_icon().as_ref() != Some(&indicator) {
+                page.set_indicator_icon(Some(&indicator));
+                page.set_indicator_tooltip(if dirty { "Unsaved changes" } else { "" });
+            }
+            if page.title() != title {
+                page.set_title(title);
+            }
+            let tooltip = glib::markup_escape_text(id.as_str());
+            if page.tooltip().as_ref() != Some(&tooltip) {
+                page.set_tooltip(&tooltip);
+            }
+            let icon = document_tab_icon(id.as_str());
+            if page.icon().as_ref() != Some(&icon) {
+                page.set_icon(Some(&icon));
+            }
+            if snapshot
+                .active_document
+                .as_ref()
+                .is_some_and(|doc| &doc.id == id)
+                && self.document_tabs.selected_page().as_ref() != Some(&page)
+            {
+                self.document_tabs.set_selected_page(&page);
+            }
+        }
+        // Keep the lookup in visual order for the next relocation snapshot.
+        pages.sort_by_key(|(_, page)| self.document_tabs.page_position(page));
+        drop(pages);
+        let target = self
+            .document_tabs
+            .selected_page()
+            .map(|page| page.child().downcast::<gtk::Box>().expect("document page"))
+            .unwrap_or_else(|| self.empty_editor_page.clone());
+        if self.editor_panel.parent().as_ref() != Some(target.upcast_ref()) {
+            if let Some(parent) = self.editor_panel.parent().and_downcast::<gtk::Box>() {
+                parent.remove(&self.editor_panel);
+            }
+            target.append(&self.editor_panel);
+        }
+        self.editor_stack
+            .set_visible_child_name(if snapshot.open_documents.is_empty() {
+                "empty"
+            } else {
+                "documents"
+            });
+    }
+
     fn render(&self, snapshot: AppSnapshot) {
         self.sync_pending_move();
         let diagnostic_started = self
@@ -468,52 +559,12 @@ impl Ui {
         let tabs_changed = {
             let previous = self.snapshot.borrow();
             previous.open_documents != snapshot.open_documents
-                || previous.active_document.as_ref().map(|d| &d.id)
-                    != snapshot.active_document.as_ref().map(|d| &d.id)
+                || previous.active_document.as_ref().map(|doc| &doc.id)
+                    != snapshot.active_document.as_ref().map(|doc| &doc.id)
                 || previous.documents != snapshot.documents
         };
         if tabs_changed {
-            while let Some(child) = self.document_tabs.first_child() {
-                self.document_tabs.remove(&child);
-            }
-            for id in &snapshot.open_documents {
-                let dirty = snapshot.documents.iter().any(|d| &d.id == id && d.dirty);
-                let title = id.as_str().rsplit('/').next().unwrap_or(id.as_str());
-                let button = gtk::ToggleButton::with_label(&format!(
-                    "{title}{}",
-                    if dirty { " •" } else { "" }
-                ));
-                button.set_tooltip_text(Some(id.as_str()));
-                button.set_active(
-                    snapshot
-                        .active_document
-                        .as_ref()
-                        .is_some_and(|d| &d.id == id),
-                );
-                let ui = self.clone();
-                let target = id.clone();
-                button.connect_clicked(move |button| {
-                    ui.dispatch(AppCommand::OpenDocument(target.clone()));
-                    // Clicking the selected toggle must not visually deselect
-                    // the document when opening it is a no-op (or fails).
-                    button.set_active(
-                        ui.snapshot
-                            .borrow()
-                            .active_document
-                            .as_ref()
-                            .is_some_and(|d| d.id == target),
-                    );
-                });
-                self.document_tabs.append(&button);
-                let close = gtk::Button::from_icon_name("window-close-symbolic");
-                close.set_tooltip_text(Some(&format!("Close {}", id.as_str())));
-                let ui = self.clone();
-                let target = id.clone();
-                close.connect_clicked(move |_| {
-                    ui.request_close_document(target.clone());
-                });
-                self.document_tabs.append(&close);
-            }
+            self.render_document_tabs(&snapshot);
         }
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         let workspace_changed = self.snapshot.borrow().workspace_root != snapshot.workspace_root;
@@ -1330,6 +1381,40 @@ fn folder_icon_for(name: &str, expanded: bool) -> gtk::gdk::Texture {
     texture_for_icon(folder_icon_name(name, expanded))
 }
 
+// Keep the native leading indicator slot present even for clean documents, so
+// toggling the dirty marker never changes tab measurements or truncates it.
+fn document_tab_indicator_icon(dirty: bool) -> gio::Icon {
+    thread_local! {
+        static DIRTY: gio::Icon = gio::ThemedIcon::new("native-workspace-modified-symbolic").upcast();
+        static CLEAN: gio::Icon = gio::BytesIcon::new(&glib::Bytes::from_static(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"/>"#
+        )).upcast();
+    }
+    if dirty {
+        DIRTY.with(Clone::clone)
+    } else {
+        CLEAN.with(Clone::clone)
+    }
+}
+
+fn document_tab_icon(path: &str) -> gio::Icon {
+    thread_local! {
+        static ICONS: RefCell<std::collections::HashMap<String, gio::Icon>> = RefCell::new(std::collections::HashMap::new());
+    }
+    let name = file_icon_name(path);
+    ICONS.with(|icons| {
+        icons
+            .borrow_mut()
+            .entry(name.to_owned())
+            .or_insert_with(|| {
+                material_icons::png_bytes(name)
+                    .map(|bytes| gio::BytesIcon::new(&glib::Bytes::from_static(bytes)).upcast())
+                    .unwrap_or_else(|| gio::ThemedIcon::new("text-x-generic-symbolic").upcast())
+            })
+            .clone()
+    })
+}
+
 fn texture_for_icon(name: &str) -> gtk::gdk::Texture {
     thread_local! {
         static CACHE: RefCell<std::collections::HashMap<String, gtk::gdk::Texture>> = RefCell::new(std::collections::HashMap::new());
@@ -1688,21 +1773,34 @@ fn build_window(app: &adw::Application) {
     conflict_banner.append(&overwrite);
     conflict_banner.set_visible(false);
     let content_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let document_tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    let tabs_scroll = gtk::ScrolledWindow::new();
-    tabs_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
-    tabs_scroll.set_hexpand(true);
-    tabs_scroll.set_child(Some(&document_tabs));
-    let tabs_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    tabs_row.append(&tabs_scroll);
+    let document_tabs = adw::TabView::new();
+    document_tabs.set_vexpand(true);
+    document_tabs
+        .remove_shortcuts(adw::TabViewShortcuts::CONTROL_HOME | adw::TabViewShortcuts::CONTROL_END);
+    let tab_bar = adw::TabBar::new();
+    tab_bar.set_view(Some(&document_tabs));
+    tab_bar.add_css_class("workspace-document-tabs");
+    tab_bar.set_autohide(false);
+    let document_tab_scroll =
+        document_tab_scroll::TouchpadScroll::install(&tab_bar, &document_tabs);
     let save_all = gtk::Button::with_label("Save All");
     save_all.set_action_name(Some("app.save-all"));
-    tabs_row.append(&save_all);
-    content_body.append(&tabs_row);
-    content_body.append(&conflict_banner);
+    content_header.pack_end(&save_all);
+    // Share libadwaita's header surface and backdrop colors with the header bar.
+    content_view.add_top_bar(&tab_bar);
+    let editor_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    editor_panel.set_vexpand(true);
+    editor_panel.append(&conflict_banner);
     editor_scroll.set_vexpand(true);
     let editor_chrome = editor_chrome::wrap(&editor, &editor_scroll);
-    content_body.append(&editor_chrome.row);
+    editor_panel.append(&editor_chrome.row);
+    let empty_editor_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    empty_editor_page.append(&editor_panel);
+    let editor_stack = gtk::Stack::new();
+    editor_stack.set_vexpand(true);
+    editor_stack.add_named(&empty_editor_page, Some("empty"));
+    editor_stack.add_named(&document_tabs, Some("documents"));
+    content_body.append(&editor_stack);
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
     let sidebar_frame = gtk::Overlay::new();
@@ -1818,6 +1916,11 @@ fn build_window(app: &adw::Application) {
         watching_search: Rc::new(Cell::new(false)),
         conflict_banner,
         document_tabs,
+        document_tab_scroll,
+        document_pages: Rc::new(RefCell::new(Vec::new())),
+        editor_panel,
+        editor_stack,
+        empty_editor_page,
         editor,
         editor_chrome,
         buffer,
@@ -2128,6 +2231,67 @@ fn build_window(app: &adw::Application) {
         action.connect_activate(move |_, _| ui.dispatch(AppCommand::SaveAllDocuments));
         app.add_action(&action);
         app.set_accels_for_action("app.save-all", &["<Primary><Shift>s"]);
+    }
+    {
+        let ui = ui.clone();
+        let view = ui.document_tabs.clone();
+        view.connect_selected_page_notify(move |view| {
+            if ui.updating.get() {
+                return;
+            }
+            let id = view.selected_page().and_then(|page| {
+                ui.document_pages
+                    .borrow()
+                    .iter()
+                    .find(|(_, item)| item == &page)
+                    .map(|(id, _)| id.clone())
+            });
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::OpenDocument(id));
+            }
+        });
+    }
+    {
+        let ui = ui.clone();
+        let view = ui.document_tabs.clone();
+        view.connect_close_page(move |view, page| {
+            if ui.updating.get() {
+                return glib::Propagation::Proceed;
+            }
+            let id = ui
+                .document_pages
+                .borrow()
+                .iter()
+                .find(|(_, item)| item == page)
+                .map(|(id, _)| id.clone());
+            // The core removes the native page only after saving or confirming discard.
+            view.close_page_finish(page, false);
+            if let Some(id) = id {
+                ui.request_close_document(id);
+            }
+            glib::Propagation::Stop
+        });
+    }
+    {
+        let ui = ui.clone();
+        let view = ui.document_tabs.clone();
+        view.connect_page_reordered(move |_, page, index| {
+            if ui.updating.get() {
+                return;
+            }
+            let id = ui
+                .document_pages
+                .borrow()
+                .iter()
+                .find(|(_, item)| item == page)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = id {
+                ui.dispatch(AppCommand::MoveDocumentTab {
+                    id,
+                    index: index as usize,
+                });
+            }
+        });
     }
     if let Some(error) = persistence_error {
         ui.status.set_label(&error);
@@ -2950,26 +3114,29 @@ fn build_window(app: &adw::Application) {
                 });
                 ui.dispatch(AppCommand::OpenDocument(DocumentId::parse(name).unwrap()));
             }
-            let mut child = ui.document_tabs.first_child();
-            let mut checked_active = false;
-            while let Some(widget) = child {
-                child = widget.next_sibling();
-                if let Ok(button) = widget.downcast::<gtk::ToggleButton>() {
-                    if button.tooltip_text().as_deref() == Some("tab-review-b.txt") {
-                        assert!(button.is_active());
-                        button.emit_clicked();
-                        assert!(
-                            button.is_active(),
-                            "Clicking the active tab removed its selection"
-                        );
-                        checked_active = true;
-                        break;
-                    }
-                }
-            }
-            assert!(checked_active, "No active document tab was rendered");
-            println!("GTK active document tab remains selected after repeated clicks");
+            let active_page = ui
+                .document_tabs
+                .selected_page()
+                .expect("selected native document page");
+            assert_eq!(active_page.title(), "tab-review-b.txt");
+            ui.document_tabs.set_selected_page(&active_page);
+            assert_eq!(ui.document_tabs.selected_page(), Some(active_page.clone()));
+            ui.document_tabs.reorder_page(&active_page, 0);
+            assert_eq!(
+                ui.snapshot.borrow().open_documents[0].as_str(),
+                "tab-review-b.txt"
+            );
+            println!("GTK native document tabs selection/reordering smoke test passed");
+            let clean_indicator = active_page
+                .indicator_icon()
+                .expect("reserved native indicator slot");
             ui.buffer.set_text("edited");
+            assert_eq!(
+                active_page.title(),
+                "tab-review-b.txt",
+                "Dirty marker changed the native tab title"
+            );
+            assert_ne!(active_page.indicator_icon(), Some(clean_indicator));
             ui.dispatch(AppCommand::SaveAllDocuments);
             ui.dispatch(AppCommand::OpenDocument(
                 DocumentId::parse("tab-review-a.txt").unwrap(),
@@ -3000,6 +3167,117 @@ fn build_window(app: &adw::Application) {
                 "Rename cleared the current document's undo history"
             );
             println!("GTK document tab undo isolation/rename smoke test passed");
+            if std::env::var_os("NATIVE_WORKSPACE_SMOKE_TAB_SCROLL").is_some() {
+                for index in 0..20 {
+                    let id = DocumentId::parse(format!("scroll-tab-{index:02}.rs")).unwrap();
+                    ui.dispatch(AppCommand::CreateEntry {
+                        id: id.clone(),
+                        directory: false,
+                    });
+                    ui.dispatch(AppCommand::OpenDocument(id));
+                }
+                let settle = || {
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_millis(400);
+                    while std::time::Instant::now() < deadline {
+                        glib::MainContext::default().iteration(false);
+                    }
+                };
+                settle();
+                let scroll = &ui.document_tab_scroll;
+                let adjustment = scroll.adjustment().expect("overflowing native tab bar");
+                let position = (adjustment.upper() - adjustment.page_size()) * 0.35;
+                adjustment.set_value(position);
+                for _ in 0..4 {
+                    let snapshot = ui.core.borrow().snapshot();
+                    ui.render(snapshot);
+                    settle();
+                    assert!(
+                        (adjustment.value() - position).abs() < 1.0,
+                        "Idle snapshots snapped the horizontal tab scroll back: {} vs {position}",
+                        adjustment.value()
+                    );
+                }
+                ui.buffer.begin_user_action();
+                ui.buffer.insert(&mut ui.buffer.end_iter(), "// dirty");
+                ui.buffer.end_user_action();
+                settle();
+                assert!(
+                    (adjustment.value() - position).abs() < 1.0,
+                    "Dirty marker update snapped the horizontal tab scroll back"
+                );
+                println!(
+                    "GTK overflowing tabs retain manual scroll during idle snapshots and editing"
+                );
+                let selected = ui.document_tabs.selected_page();
+                let lower = adjustment.lower();
+                let upper = adjustment.upper() - adjustment.page_size();
+                for (start, delta, boundary) in
+                    [(upper - 5.0, 40.0, upper), (lower + 5.0, -40.0, lower)]
+                {
+                    adjustment.set_value(start);
+                    scroll.begin();
+                    for _ in 0..10 {
+                        assert_eq!(
+                            scroll.scroll(gtk::gdk::ScrollUnit::Surface, delta, 0.2),
+                            glib::Propagation::Stop
+                        );
+                    }
+                    scroll.decelerate(delta, 0.2);
+                    settle();
+                    assert!(
+                        (adjustment.value() - boundary).abs() < 1.0,
+                        "Touchpad scrolling rebounded from its boundary: {} vs {boundary}",
+                        adjustment.value()
+                    );
+                    assert_eq!(ui.document_tabs.selected_page(), selected);
+                    // Reversing immediately must leave the boundary without
+                    // having to consume accumulated overshoot first.
+                    scroll.scroll(gtk::gdk::ScrollUnit::Surface, -delta, 0.2);
+                    assert!((adjustment.value() - (boundary - delta)).abs() < 1.0);
+                }
+                adjustment.set_value(position);
+                scroll.begin();
+                scroll.scroll(gtk::gdk::ScrollUnit::Surface, 0.1, 0.3);
+                scroll.scroll(gtk::gdk::ScrollUnit::Surface, 12.0, 0.2);
+                assert!(
+                    (adjustment.value() - position - 12.1).abs() < 0.01,
+                    "Small transverse finger movement changed the scroll axis or amplified its distance"
+                );
+                scroll.decelerate(2.0, 0.0);
+                settle();
+                assert!(adjustment.value() > position + 12.1 && adjustment.value() <= upper);
+                scroll.begin();
+                assert_eq!(
+                    scroll.scroll(gtk::gdk::ScrollUnit::Wheel, 1.0, 0.0),
+                    glib::Propagation::Proceed
+                );
+                println!(
+                    "GTK touchpad boundary/reverse/axis lock/kinetic scrolling smoke test passed"
+                );
+            }
+            if let Some(capture) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_SCREENSHOT") {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+                while std::time::Instant::now() < deadline {
+                    glib::MainContext::default().iteration(false);
+                }
+                let paintable = gtk::WidgetPaintable::new(Some(&ui.window));
+                let snapshot = gtk::Snapshot::new();
+                paintable.snapshot(
+                    &snapshot,
+                    ui.window.width() as f64,
+                    ui.window.height() as f64,
+                );
+                let node = snapshot.to_node().expect("window render node");
+                let texture = ui
+                    .window
+                    .renderer()
+                    .expect("window renderer")
+                    .render_texture(&node, None);
+                texture
+                    .save_to_png(PathBuf::from(capture))
+                    .expect("native tabs screenshot");
+            }
         }
         if std::env::var_os("NATIVE_WORKSPACE_SMOKE_RECORD_DROP").is_some() {
             let app = app.clone();

@@ -519,9 +519,10 @@ struct ContentView: View {
     }
 
     private var sidebarHeader: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
             SidebarTabBar(selection: $sidebarTab)
             .frame(maxWidth: .infinity)
+            .frame(height: BonsplitTabBarMetrics.barHeight)
             .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
             if sidebarTab == 1 {
                 HStack(spacing: 8) {
@@ -535,6 +536,7 @@ struct ContentView: View {
                 }
                 .padding(10)
                 .glassEffect(.regular, in: Capsule())
+                .padding(.bottom, 8)
                 if store.searchTruncated {
                     Text("Showing the first 20,000 matches. Refine the search to see the rest.")
                         .font(.caption)
@@ -544,7 +546,6 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
     }
 
     var body: some View {
@@ -687,6 +688,9 @@ struct ContentView: View {
             editorDetail
                 .toolbar {
                     ToolbarItem(placement: .primaryAction) {
+                        Button("Save All", systemImage: "square.and.arrow.down.on.square") { store.saveAllDocuments() }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
                         Button("Home", systemImage: "house") { openWindow(id: "home") }
                     }
                 }
@@ -734,80 +738,71 @@ struct ContentView: View {
     }
 
     private var editorDetail: some View {
-            VStack(spacing: 0) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 6) {
-                        ForEach(store.openDocuments, id: \.self) { id in
-                            HStack(spacing: 4) {
-                                Button {
-                                    store.openDocument(id)
-                                } label: {
-                                    Text((id as NSString).lastPathComponent + (store.documents.first(where: { $0.id == id })?.dirty == true ? " •" : ""))
-                                }
-                                .buttonStyle(.plain)
-                                Button { store.closeDocument(id) } label: { Image(systemName: "xmark") }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Close " + id)
-                            }
-                            .padding(8)
-                            .background(store.activeDocument?.id == id ? Color.accentColor.opacity(0.15) : Color.clear)
-                            .help(id)
-                        }
-                        Button("Save All") { store.saveAllDocuments() }
-                    }
-                    .padding(.horizontal, 6)
-                }
-                Divider()
-                if let active = store.activeDocument {
-                    if active.externalChange {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text("This file changed on disk")
-                            Spacer()
-                            Button("Resolve…") { resolvingExternalChange = true }
-                        }
-                        .font(.callout)
-                        .padding(8)
-                    }
-                    NoWrapTextEditor(documentID: active.id, documentIdentity: store.editorDocumentIdentity,
-                                     textRevision: store.editorContentRevision,
-                                     text: Binding(
-                        get: { store.editorText },
-                        set: { store.changeDocument($0) }
-                    ), searchRange: store.selectedSearchRange,
-                       searchNavigationRevision: store.searchNavigationRevision)
-                } else {
-                    VStack(spacing: 16) {
-                        ContentUnavailableView(
-                            store.workspaceName == nil ? "Open a Workspace" : "Select a Document",
-                            systemImage: store.workspaceName == nil ? "folder" : "doc.text",
-                            description: Text(store.workspaceName == nil ? "Choose a directory containing Markdown or text files." : "Choose a file in the sidebar.")
-                        )
-                        if store.workspaceName == nil {
-                            Button("Open Workspace") { choosingWorkspace = true }
-                                .buttonStyle(.glassProminent)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                if let error = store.errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .padding(8)
-                }
-                Divider()
-                HStack {
-                    Text(store.activeDocument?.title ?? "No document")
-                    Spacer()
-                    Text(store.deletionPending ? "Deleting…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+        VStack(spacing: 0) {
+            DocumentTabs(documents: store.openDocuments,
+                         dirtyDocuments: Set(store.documents.filter(\.dirty).map(\.id)),
+                         selectedDocument: store.activeDocument?.id,
+                         select: { id in
+                             store.openDocument(id)
+                             return store.activeDocument?.id == id
+                         }, close: { store.closeDocument($0) }) {
+                editorPanel
             }
+        }
+    }
+
+    private var editorPanel: some View {
+        VStack(spacing: 0) {
+            if let active = store.activeDocument {
+                if active.externalChange {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("This file changed on disk")
+                        Spacer()
+                        Button("Resolve…") { resolvingExternalChange = true }
+                    }
+                    .font(.callout)
+                    .padding(8)
+                }
+                NoWrapTextEditor(documentID: active.id, documentIdentity: store.editorDocumentIdentity,
+                                 textRevision: store.editorContentRevision,
+                                 text: Binding(
+                    get: { store.editorText },
+                    set: { store.changeDocument($0) }
+                ), searchRange: store.selectedSearchRange,
+                   searchNavigationRevision: store.searchNavigationRevision)
+            } else {
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        store.workspaceName == nil ? "Open a Workspace" : "Select a Document",
+                        systemImage: store.workspaceName == nil ? "folder" : "doc.text",
+                        description: Text(store.workspaceName == nil ? "Choose a directory containing Markdown or text files." : "Choose a file in the sidebar.")
+                    )
+                    if store.workspaceName == nil {
+                        Button("Open Workspace") { choosingWorkspace = true }
+                            .buttonStyle(.glassProminent)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if let error = store.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(8)
+            }
+            Divider()
+            HStack {
+                Text(store.activeDocument?.title ?? "No document")
+                Spacer()
+                Text(store.deletionPending ? "Deleting…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        }
     }
 
     private func openWorkspace(_ url: URL) {

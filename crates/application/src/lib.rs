@@ -70,6 +70,10 @@ pub enum AppCommand {
     PollWorkspaceChanges,
     OpenDocument(DocumentId),
     CloseDocument(DocumentId),
+    MoveDocumentTab {
+        id: DocumentId,
+        index: usize,
+    },
     DiscardAndCloseDocument(DocumentId),
     ChangeDocument {
         id: DocumentId,
@@ -98,6 +102,7 @@ impl AppCommand {
             Self::PollWorkspaceChanges => "command.workspace_poll",
             Self::OpenDocument(_) => "command.document_open",
             Self::DiscardAndCloseDocument(_) => "command.document_discard_close",
+            Self::MoveDocumentTab { .. } => "command.document_tab_move",
             Self::CloseDocument(_) => "command.document_close",
             Self::ChangeDocument { .. } => "command.document_change",
             Self::SaveAllDocuments => "command.document_save_all",
@@ -156,6 +161,10 @@ pub enum AppEvent {
     },
     DocumentOpened {
         id: DocumentId,
+    },
+    DocumentTabMoved {
+        id: DocumentId,
+        index: usize,
     },
     DocumentClosed {
         id: DocumentId,
@@ -408,6 +417,7 @@ impl AppState {
             | AppEvent::SearchStarted
             | AppEvent::SearchQueryQueued(_)
             | AppEvent::DocumentOpened { .. }
+            | AppEvent::DocumentTabMoved { .. }
             | AppEvent::DocumentClosed { .. }
             | AppEvent::DocumentChanged { .. } => {}
             AppEvent::SearchQueryChanged { .. } | AppEvent::SearchResultsUpdated { .. } => {
@@ -606,6 +616,15 @@ impl AppState {
                     self.open_documents.push(id.clone());
                 }
                 self.active_document = Some(id.clone());
+            }
+            AppEvent::DocumentTabMoved { id, index } => {
+                let old = self
+                    .open_documents
+                    .iter()
+                    .position(|open| open == id)
+                    .expect("validated tab");
+                self.open_documents.remove(old);
+                self.open_documents.insert(*index, id.clone());
             }
             AppEvent::DocumentClosed { id } => {
                 let index = self.open_documents.iter().position(|open| open == id);
@@ -822,6 +841,9 @@ fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) 
         AppCommand::DeleteEntry(id) => AppCommand::DeleteEntry(map(id)),
         AppCommand::OpenDocument(id) => AppCommand::OpenDocument(map(id)),
         AppCommand::CloseDocument(id) => AppCommand::CloseDocument(map(id)),
+        AppCommand::MoveDocumentTab { id, index } => {
+            AppCommand::MoveDocumentTab { id: map(id), index }
+        }
         AppCommand::DiscardAndCloseDocument(id) => AppCommand::DiscardAndCloseDocument(map(id)),
         AppCommand::SaveDocument(id) => AppCommand::SaveDocument(map(id)),
         AppCommand::ReloadDocument(id) => AppCommand::ReloadDocument(map(id)),
@@ -1150,6 +1172,7 @@ impl Application {
                     }
                     AppEvent::DocumentSaved { .. } => ("document.saved", 0),
                     AppEvent::DocumentOpened { .. } => ("document.opened", 0),
+                    AppEvent::DocumentTabMoved { .. } => ("document.tab_moved", 0),
                     AppEvent::DocumentClosed { .. } => ("document.closed", 0),
                     AppEvent::WorkspaceOpened { documents, .. } => {
                         ("workspace.opened", documents.len() as u64)
@@ -1220,6 +1243,7 @@ impl Application {
                 }
                 AppCommand::ChangeDocument { .. }
                 | AppCommand::DiscardAndCloseDocument(_)
+                | AppCommand::MoveDocumentTab { .. }
                 | AppCommand::CloseDocument(_)
                 | AppCommand::IncrementDiagnostic => {}
                 _ => {
@@ -1672,6 +1696,20 @@ impl Application {
                     vec![AppEvent::DocumentClosed { id }]
                 } else {
                     Vec::new()
+                }
+            }
+            AppCommand::MoveDocumentTab { id, index } => {
+                let old = self
+                    .state
+                    .open_documents
+                    .iter()
+                    .position(|open| open == &id)
+                    .ok_or_else(|| AppError::DocumentNotOpen(id.as_str().to_owned()))?;
+                let index = index.min(self.state.open_documents.len() - 1);
+                if old == index {
+                    Vec::new()
+                } else {
+                    vec![AppEvent::DocumentTabMoved { id, index }]
                 }
             }
             AppCommand::CloseDocument(id) => {

@@ -20,11 +20,28 @@ Kirigami.ApplicationWindow {
     TestCase { id: input; when: false }
     property int step: 0
     property real initialWidth: 0
+    property real initialDocumentTabWidth: 0
     property string localText: "// unsaved resize check\n"
 
     function check(condition, message) { if (!condition) throw new Error(message) }
     function checkLayout() {
+        var search = pane.activeSidebarSearchRow
+        var documents = pane.documentTabBar
+        check(Math.abs(search.height - documents.height) <= 1,
+            "Search and document tab rows have different heights: " + search.height + " vs " + documents.height)
+        check(Math.abs(search.mapToItem(pane, 0, 0).y - documents.mapToItem(pane, 0, 0).y) <= 1,
+            "Search and document tabs are not vertically aligned")
+        for (var bar of [pane.sidebarTabBar, documents]) {
+            for (var i = 0; i < bar.count; i++) {
+                var button = bar.itemAt(i)
+                check(button.y >= -1 && button.y + button.height <= bar.availableHeight + 1,
+                    "Tab button is positioned outside the available height")
+                check(Math.abs(button.height - bar.availableHeight) <= 1,
+                    "Tab button did not fit the available height: " + button.height + " vs " + bar.availableHeight)
+            }
+        }
         var header = pane.sidebarHeaderBar
+        check(header.contentItem === pane.sidebarTabBar, "Sidebar tabs are missing from the header")
         var editorHeader = pane.workspacePage.globalToolBarItem
         check(header && editorHeader && header.height > 0 && editorHeader.height > 0,
             "Missing native sidebar/editor header")
@@ -68,11 +85,19 @@ Kirigami.ApplicationWindow {
                     checkLayout()
                     check(pane.sidebar.interactiveResizeEnabled && !pane.sidebar.modal,
                         "Sidebar is not a resizable native desktop drawer")
+                    initialDocumentTabWidth = pane.documentTabBar.currentItem.width
                     controller.change_document(localText)
                     initialWidth = pane.sidebar.width
                     resizeSidebarTo(initialWidth + Kirigami.Units.gridUnit * 4)
                     break
                 case 2:
+                    check(Math.abs(pane.documentTabBar.currentItem.width - initialDocumentTabWidth) <= 0.1,
+                        "Dirty indicator changed the document tab width")
+                    var tab = pane.documentTabBar.currentItem
+                    var marker = tab.children.find(item => item.objectName === "dirtyDocumentTab:src/main.rs")
+                    check(marker && marker.visible && marker.x + marker.width <= tab.leftPadding,
+                        "Dirty indicator is missing from the fixed leading padding")
+                    check(tab.text === "main.rs", "Dirty indicator leaked into the document title")
                     check(pane.sidebar.width > initialWidth + Kirigami.Units.gridUnit * 2,
                         "Dragging the native border did not widen the sidebar")
                     checkLayout()
@@ -87,7 +112,7 @@ Kirigami.ApplicationWindow {
                     break
                 case 4:
                     checkLayout()
-                    check(pane.sidebarHeaderBar.contentItem.text === "Search", "Header did not follow the sidebar tab")
+                    check(pane.sidebarTabBar.currentIndex === 1, "Header tab selection did not follow the sidebar")
                     pane.sidebarTab = 0
                     resizeSidebarTo(initialWidth)
                     break
