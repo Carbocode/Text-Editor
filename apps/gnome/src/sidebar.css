@@ -30,3 +30,5 @@ listview.compact-files row > box {
 .workspace-document-tabs button.tab-indicator image {
   -gtk-icon-size: 5px;
 }
+
+.workspace-document-tabs .workspace-preview label { font-style: italic; }

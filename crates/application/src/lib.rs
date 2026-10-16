@@ -68,7 +68,12 @@ pub enum AppCommand {
     DeleteEntry(DocumentId),
     RefreshWorkspace,
     PollWorkspaceChanges,
+    /// Open permanently, or promote an already open preview.
     OpenDocument(DocumentId),
+    /// Activate an existing tab, or open in the single replaceable preview slot.
+    PreviewDocument(DocumentId),
+    /// Promote an existing preview without changing the active document.
+    KeepDocumentOpen(DocumentId),
     CloseDocument(DocumentId),
     MoveDocumentTab {
         id: DocumentId,
@@ -101,6 +106,8 @@ impl AppCommand {
             Self::RefreshWorkspace => "command.workspace_refresh",
             Self::PollWorkspaceChanges => "command.workspace_poll",
             Self::OpenDocument(_) => "command.document_open",
+            Self::PreviewDocument(_) => "command.document_preview",
+            Self::KeepDocumentOpen(_) => "command.document_keep_open",
             Self::DiscardAndCloseDocument(_) => "command.document_discard_close",
             Self::MoveDocumentTab { .. } => "command.document_tab_move",
             Self::CloseDocument(_) => "command.document_close",
@@ -160,6 +167,12 @@ pub enum AppEvent {
         content: String,
     },
     DocumentOpened {
+        id: DocumentId,
+    },
+    DocumentPreviewed {
+        id: DocumentId,
+    },
+    DocumentKeptOpen {
         id: DocumentId,
     },
     DocumentTabMoved {
@@ -256,8 +269,10 @@ pub struct AppSnapshot {
     pub search_truncated: bool,
     pub directories: Arc<Vec<String>>,
     pub documents: Arc<Vec<DocumentSummary>>,
-    /// Open tabs in insertion order, independent of the workspace file listing.
+    /// Open tabs in visual order, independent of the workspace file listing.
     pub open_documents: Vec<DocumentId>,
+    /// At most one clean tab may be replaced by the next preview opening.
+    pub preview_document: Option<DocumentId>,
     pub active_document: Option<DocumentSnapshot>,
 }
 
@@ -328,6 +343,7 @@ pub struct AppState {
     directories: Vec<String>,
     documents: Vec<DocumentEntry>,
     open_documents: Vec<DocumentId>,
+    preview_document: Option<DocumentId>,
     active_document: Option<DocumentId>,
     /// Lists published by the last snapshot. Unchanged lists keep the same
     /// `Arc`, so frontends skip reconverting tens of thousands of paths.
@@ -406,6 +422,7 @@ impl AppState {
                 })
                 .clone(),
             open_documents: self.open_documents.clone(),
+            preview_document: self.preview_document.clone(),
             active_document,
         }
     }
@@ -417,6 +434,8 @@ impl AppState {
             | AppEvent::SearchStarted
             | AppEvent::SearchQueryQueued(_)
             | AppEvent::DocumentOpened { .. }
+            | AppEvent::DocumentPreviewed { .. }
+            | AppEvent::DocumentKeptOpen { .. }
             | AppEvent::DocumentTabMoved { .. }
             | AppEvent::DocumentClosed { .. }
             | AppEvent::DocumentChanged { .. } => {}
@@ -453,6 +472,10 @@ impl AppState {
                 };
                 for open in &mut self.open_documents {
                     *open = DocumentId::parse(renamed_path(open.as_str(), id, target)).unwrap();
+                }
+                if let Some(preview) = &mut self.preview_document {
+                    *preview =
+                        DocumentId::parse(renamed_path(preview.as_str(), id, target)).unwrap();
                 }
                 for entry in &mut self.documents {
                     if affected(entry.id.as_str()) {
@@ -553,6 +576,7 @@ impl AppState {
                 recent_workspaces,
             } => {
                 self.open_documents.clear();
+                self.preview_document = None;
                 self.workspace = Some(workspace.clone());
                 self.search_query = SearchQuery::default();
                 self.search_in_progress = false;
@@ -617,7 +641,18 @@ impl AppState {
                 }
                 self.active_document = Some(id.clone());
             }
+            AppEvent::DocumentPreviewed { id } => {
+                self.preview_document = Some(id.clone());
+            }
+            AppEvent::DocumentKeptOpen { id } => {
+                if self.preview_document.as_ref() == Some(id) {
+                    self.preview_document = None;
+                }
+            }
             AppEvent::DocumentTabMoved { id, index } => {
+                if self.preview_document.as_ref() == Some(id) {
+                    self.preview_document = None;
+                }
                 let old = self
                     .open_documents
                     .iter()
@@ -627,6 +662,9 @@ impl AppState {
                 self.open_documents.insert(*index, id.clone());
             }
             AppEvent::DocumentClosed { id } => {
+                if self.preview_document.as_ref() == Some(id) {
+                    self.preview_document = None;
+                }
                 let index = self.open_documents.iter().position(|open| open == id);
                 self.open_documents.retain(|open| open != id);
                 if self.active_document.as_ref() == Some(id) {
@@ -646,6 +684,9 @@ impl AppState {
                 self.refresh_search_result(id);
             }
             AppEvent::DocumentChanged { id, content } => {
+                if self.preview_document.as_ref() == Some(id) {
+                    self.preview_document = None;
+                }
                 let entry = self.document_mut(id);
                 let was_dirty = entry.dirty();
                 entry.content = Some(content.clone());
@@ -659,6 +700,9 @@ impl AppState {
                 self.refresh_search_result(id);
             }
             AppEvent::DocumentSaved { id } => {
+                if self.preview_document.as_ref() == Some(id) {
+                    self.preview_document = None;
+                }
                 let entry = self.document_mut(id);
                 entry.saved_content = entry.content.clone();
                 entry.external_change = false;
@@ -671,6 +715,13 @@ impl AppState {
         ) {
             self.open_documents
                 .retain(|id| self.documents.iter().any(|entry| &entry.id == id));
+            if self
+                .preview_document
+                .as_ref()
+                .is_some_and(|id| !self.open_documents.contains(id))
+            {
+                self.preview_document = None;
+            }
             if self.active_document.is_none() {
                 self.active_document = self.open_documents.last().cloned();
             }
@@ -840,6 +891,8 @@ fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) 
     match command {
         AppCommand::DeleteEntry(id) => AppCommand::DeleteEntry(map(id)),
         AppCommand::OpenDocument(id) => AppCommand::OpenDocument(map(id)),
+        AppCommand::PreviewDocument(id) => AppCommand::PreviewDocument(map(id)),
+        AppCommand::KeepDocumentOpen(id) => AppCommand::KeepDocumentOpen(map(id)),
         AppCommand::CloseDocument(id) => AppCommand::CloseDocument(map(id)),
         AppCommand::MoveDocumentTab { id, index } => {
             AppCommand::MoveDocumentTab { id: map(id), index }
@@ -1172,6 +1225,8 @@ impl Application {
                     }
                     AppEvent::DocumentSaved { .. } => ("document.saved", 0),
                     AppEvent::DocumentOpened { .. } => ("document.opened", 0),
+                    AppEvent::DocumentPreviewed { .. } => ("document.previewed", 0),
+                    AppEvent::DocumentKeptOpen { .. } => ("document.kept_open", 0),
                     AppEvent::DocumentTabMoved { .. } => ("document.tab_moved", 0),
                     AppEvent::DocumentClosed { .. } => ("document.closed", 0),
                     AppEvent::WorkspaceOpened { documents, .. } => {
@@ -1242,6 +1297,7 @@ impl Application {
                     return Ok(Vec::new());
                 }
                 AppCommand::ChangeDocument { .. }
+                | AppCommand::KeepDocumentOpen(_)
                 | AppCommand::DiscardAndCloseDocument(_)
                 | AppCommand::MoveDocumentTab { .. }
                 | AppCommand::CloseDocument(_)
@@ -1254,7 +1310,18 @@ impl Application {
         }
         // Commit each save separately so an error never hides earlier successful writes.
         if matches!(command, AppCommand::SaveAllDocuments) {
-            let ids: Vec<_> = self.state.open_documents.clone();
+            let ids: Vec<_> = self
+                .state
+                .open_documents
+                .iter()
+                .filter(|id| {
+                    self.state
+                        .documents
+                        .iter()
+                        .any(|entry| &entry.id == *id && entry.dirty())
+                })
+                .cloned()
+                .collect();
             let mut events = Vec::new();
             for id in ids {
                 events.extend(self.execute_inner(AppCommand::SaveDocument(id))?);
@@ -1368,6 +1435,7 @@ impl Application {
     }
 
     fn resolve(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
+        let preview_open = matches!(&command, AppCommand::PreviewDocument(_));
         let events = match command {
             AppCommand::IncrementDiagnostic => {
                 self.state
@@ -1665,7 +1733,7 @@ impl Application {
                     .create_entry(&workspace.root, &id, directory)?;
                 self.resolve(AppCommand::RefreshWorkspace)?
             }
-            AppCommand::OpenDocument(id) => {
+            AppCommand::OpenDocument(id) | AppCommand::PreviewDocument(id) => {
                 let root = &self
                     .state
                     .workspace
@@ -1679,6 +1747,8 @@ impl Application {
                     .find(|entry| entry.id == id)
                     .ok_or_else(|| AppError::DocumentNotFound(id.as_str().to_owned()))?;
                 let mut events = Vec::new();
+                let new_tab = !self.state.open_documents.contains(&id);
+                let preview_open = preview_open && !entry.dirty();
                 if entry.content.is_none() {
                     let content = self.filesystem.read_document(root, &id)?;
                     events.push(AppEvent::DocumentLoaded {
@@ -1686,10 +1756,61 @@ impl Application {
                         content,
                     });
                 }
+                let mut target_index = self
+                    .state
+                    .active_document
+                    .as_ref()
+                    .and_then(|active| {
+                        self.state
+                            .open_documents
+                            .iter()
+                            .position(|open| open == active)
+                    })
+                    .map_or(self.state.open_documents.len(), |index| index + 1);
+                let mut tab_count = self.state.open_documents.len();
+                if preview_open
+                    && new_tab
+                    && let Some(preview) = &self.state.preview_document
+                {
+                    let old_index = self
+                        .state
+                        .open_documents
+                        .iter()
+                        .position(|open| open == preview)
+                        .expect("open preview");
+                    if old_index < target_index {
+                        target_index -= 1;
+                    }
+                    tab_count -= 1;
+                    events.push(AppEvent::DocumentClosed {
+                        id: preview.clone(),
+                    });
+                }
                 if self.state.active_document.as_ref() != Some(&id) {
-                    events.push(AppEvent::DocumentOpened { id });
+                    events.push(AppEvent::DocumentOpened { id: id.clone() });
+                }
+                if new_tab && target_index < tab_count {
+                    events.push(AppEvent::DocumentTabMoved {
+                        id: id.clone(),
+                        index: target_index,
+                    });
+                }
+                if preview_open && new_tab {
+                    events.push(AppEvent::DocumentPreviewed { id });
+                } else if !preview_open && self.state.preview_document.as_ref() == Some(&id) {
+                    events.push(AppEvent::DocumentKeptOpen { id });
                 }
                 events
+            }
+            AppCommand::KeepDocumentOpen(id) => {
+                if !self.state.open_documents.contains(&id) {
+                    return Err(AppError::DocumentNotOpen(id.as_str().to_owned()));
+                }
+                if self.state.preview_document.as_ref() == Some(&id) {
+                    vec![AppEvent::DocumentKeptOpen { id }]
+                } else {
+                    Vec::new()
+                }
             }
             AppCommand::DiscardAndCloseDocument(id) => {
                 if self.state.open_documents.contains(&id) {
@@ -1774,6 +1895,8 @@ impl Application {
                     }
                     self.filesystem.write_document(root, &id, content)?;
                     vec![AppEvent::DocumentSaved { id }]
+                } else if self.state.preview_document.as_ref() == Some(&id) {
+                    vec![AppEvent::DocumentKeptOpen { id }]
                 } else {
                     Vec::new()
                 }

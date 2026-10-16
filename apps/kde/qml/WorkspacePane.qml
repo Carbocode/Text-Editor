@@ -277,7 +277,7 @@ Item {
 
     function selectDocumentTab(path) {
         if (!controller.snapshot_updating && !synchronizingDocumentTabs && flushEditor())
-            controller.open_document(path)
+            controller.preview_document(path)
         syncDocumentTabs()
     }
 
@@ -320,7 +320,7 @@ Item {
         }
         if (flushEditor()) {
             selectedDirectoryPath = ""
-            controller.open_document(path)
+            controller.preview_document(path)
             selectedResultIndex = -1
         }
     }
@@ -665,7 +665,8 @@ Item {
 
     Shortcut {
         sequences: [StandardKey.Save]
-        enabled: root.controller && root.controller.active_document_dirty
+        enabled: root.controller && root.controller.active_document_id.length > 0
+            && (root.controller.active_document_dirty || root.controller.preview_document_id === root.controller.active_document_id)
             && !root.controller.active_document_external_change
         onActivated: root.saveActive()
     }
@@ -675,7 +676,7 @@ Item {
         if (!flushEditor()) return
         var start = controller.search_result_starts[index]
         var end = controller.search_result_ends[index]
-        controller.open_document(id)
+        controller.preview_document(id)
         if (controller.active_document_id !== id) return
         selectedResultIndex = index
         if (start !== "") {
@@ -1184,7 +1185,9 @@ Item {
         id: saveAction
         text: "Save"
         icon.name: "document-save"
-        enabled: root.controller.active_document_dirty && !root.controller.active_document_external_change
+        enabled: root.controller.active_document_id.length > 0
+            && (root.controller.active_document_dirty || root.controller.preview_document_id === root.controller.active_document_id)
+            && !root.controller.active_document_external_change
         onTriggered: root.saveActive()
     }
     Kirigami.Action {
@@ -1614,6 +1617,8 @@ Item {
                                             if (drop.source === dragGhost && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
                                         }
                                     }
+                                    onDoubleClicked: if (entry && !entry.directory && root.flushEditor())
+                                        root.controller.open_document(entry.path)
                                     onClicked: if (entry) {
                                         if (entry.directory) root.selectedDirectoryPath = entry.path
                                         else root.clickSidebarEntry(entry.path, false)
@@ -1686,6 +1691,8 @@ Item {
                                         highlighted: fileGroup.isDirectory ? root.selectedDirectoryPath === fileGroup.fileId
                                             : root.selectedDirectoryPath.length === 0 && root.selectedResultIndex < 0 && root.controller.active_document_id === fileGroup.fileId
                                         onClicked: root.clickSidebarEntry(fileGroup.fileId, fileGroup.isDirectory)
+                                        onDoubleClicked: if (!fileGroup.isDirectory && root.flushEditor())
+                                            root.controller.open_document(fileGroup.fileId)
                                         Row {
                                             id: searchStatus
                                             anchors.right: parent.right
@@ -1765,6 +1772,7 @@ Item {
                                             icon.name: "go-jump"
                                             highlighted: root.selectedResultIndex === resultIndex
                                             onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)
+                                            onDoubleClicked: if (root.flushEditor()) root.controller.keep_document_open(fileGroup.fileId)
                                         }
                                     }
                                 }
@@ -1809,6 +1817,21 @@ Item {
                                     icon.source: root.entryIcon(path, false, false)
                                     icon.color: "transparent"
                                     text: path.split("/").pop()
+                                    font.italic: root.controller.preview_document_id === path
+                                    onDoubleClicked: if (root.flushEditor()) root.controller.keep_document_open(path)
+                                    TapHandler {
+                                        acceptedButtons: Qt.RightButton
+                                        onTapped: documentTabMenu.popup()
+                                    }
+                                    Menu {
+                                        id: documentTabMenu
+                                        MenuItem {
+                                            text: "Keep Open"
+                                            icon.name: "window-pin"
+                                            enabled: root.controller.preview_document_id === path
+                                            onTriggered: if (root.flushEditor()) root.controller.keep_document_open(path)
+                                        }
+                                    }
                                     Accessible.description: root.controller.dirty_document_ids.indexOf(path) !== -1 ? "Unsaved changes" : ""
                                     leftPadding: documentDirtyIndicator.width + Kirigami.Units.smallSpacing * 2
                                     rightPadding: closeDocumentTab.width + Kirigami.Units.smallSpacing

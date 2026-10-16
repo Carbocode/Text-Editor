@@ -7,6 +7,7 @@ struct BonsplitTabItem {
     let title: String
     var icon: String? = "doc.text"
     var isDirty: Bool = false
+    var isPreview: Bool = false
 }
 
 
@@ -18,12 +19,14 @@ struct BonsplitTabItemView: View {
     var accessibilityID: String = ""
     let onSelect: () -> Void
     let onClose: () -> Void
+    var onKeepOpen: () -> Void = {}
 
     @State private var isHovered = false
     @State private var isCloseHovered = false
 
     var body: some View {
         selectionButton
+            .simultaneousGesture(TapGesture(count: 2).onEnded { _ in onKeepOpen() })
             .buttonBorderShape(.roundedRectangle(radius: BonsplitTabBarMetrics.tabCornerRadius))
             .buttonSizing(.flexible)
             .frame(minWidth: BonsplitTabBarMetrics.tabMinWidth, maxWidth: BonsplitTabBarMetrics.tabMaxWidth)
@@ -45,7 +48,11 @@ struct BonsplitTabItemView: View {
             .onHover { isHovered = $0 }
             .accessibilityElement(children: .contain)
             .accessibilityLabel(tab.title)
-            .accessibilityValue(tab.isDirty ? "Modified" : "")
+            .accessibilityValue(tab.isDirty ? "Modified" : (tab.isPreview ? "Preview" : ""))
+            .contextMenu {
+                Button("Keep Open", systemImage: "pin") { onKeepOpen() }
+                    .disabled(!tab.isPreview)
+            }
             .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
@@ -77,6 +84,7 @@ struct BonsplitTabItemView: View {
 
             // Title
             Text(tab.title)
+                .italic(tab.isPreview)
                 .font(.system(size: BonsplitTabBarMetrics.titleFontSize))
                 .lineLimit(1)
                 .foregroundStyle(isSelected ? BonsplitTabBarColors.activeText : BonsplitTabBarColors.inactiveText)

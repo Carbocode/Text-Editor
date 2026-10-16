@@ -30,6 +30,7 @@ final class WorkspaceStore: ObservableObject {
         return NSRange(location: start, length: end - start)
     }
     @Published private(set) var openDocuments: [String] = []
+    @Published private(set) var previewDocument: String?
     @Published private(set) var documents: [DocumentSummary] = []
     @Published private(set) var externalChangeIDs: Set<String> = []
     @Published private(set) var activeDocument: DocumentSnapshot?
@@ -247,6 +248,11 @@ final class WorkspaceStore: ObservableObject {
         return activeDocument.dirty || editorText != activeDocument.content
     }
 
+    var canSaveActiveDocument: Bool {
+        guard let activeDocument else { return false }
+        return hasDirtyActiveDocument || previewDocument == activeDocument.id
+    }
+
     func openWorkspace(_ url: URL) {
         if deferUntilReady({ [weak self] in self?.openWorkspace(url) }) { return }
         do {
@@ -370,13 +376,14 @@ final class WorkspaceStore: ObservableObject {
         performInBackground { try $0.pollSearchResults() }
     }
 
-    func openDocument(_ id: String) {
-        if deferUntilReady({ [weak self] in guard let self else { return }; self.openDocument(self.deferredPath(id)) }) { return }
+    func openDocument(_ id: String, preview: Bool = false) {
+        if deferUntilReady({ [weak self] in guard let self else { return }; self.openDocument(self.deferredPath(id), preview: preview) }) { return }
         do {
             try flushLocalEdits()
             if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let opened = try core.openDocumentFast(id: id)
+                let opened = try preview ? core.previewDocumentFast(id: id) : core.openDocumentFast(id: id)
                 revision = opened.revision
+                if previewDocument != opened.previewDocument { previewDocument = opened.previewDocument }
                 if openDocuments != opened.openDocuments { openDocuments = opened.openDocuments }
                 if activeDocument?.id != opened.document.id {
                     editorDocumentIdentity &+= 1
@@ -388,7 +395,7 @@ final class WorkspaceStore: ObservableObject {
                     editorText = opened.document.content
                 }
             } else {
-                apply(try core.openDocument(id: id))
+                apply(try preview ? core.previewDocument(id: id) : core.openDocument(id: id))
             }
             errorMessage = nil
         } catch {
@@ -404,7 +411,7 @@ final class WorkspaceStore: ObservableObject {
                 self.openSearchResult(self.searchResults[updatedIndex], at: updatedIndex)
             } else { self.openSearchFile(path) }
         }) { return }
-        openDocument(result.id)
+        openDocument(result.id, preview: true)
         guard activeDocument?.id == result.id else { return }
         selectedSearchLocation = result.location
         selectedSearchResultIndex = index
@@ -413,11 +420,20 @@ final class WorkspaceStore: ObservableObject {
 
     func openSearchFile(_ id: String) {
         if deferUntilReady({ [weak self] in guard let self else { return }; self.openSearchFile(self.deferredPath(id)) }) { return }
-        openDocument(id)
+        openDocument(id, preview: true)
         guard activeDocument?.id == id else { return }
         selectedSearchLocation = nil
         selectedSearchResultIndex = nil
         searchNavigationRevision &+= 1
+    }
+
+    func keepDocumentOpen(_ id: String) {
+        if deferUntilReady({ [weak self] in guard let self else { return }; self.keepDocumentOpen(self.deferredPath(id)) }) { return }
+        do {
+            try flushLocalEdits()
+            apply(try core.keepDocumentOpen(id: id))
+            errorMessage = nil
+        } catch { errorMessage = error.localizedDescription }
     }
 
     func changeDocument(_ content: String) {
@@ -425,6 +441,7 @@ final class WorkspaceStore: ObservableObject {
         guard let id = activeDocument?.id, content != editorText else { return }
         editorContentRevision &+= 1
         editorText = content
+        if previewDocument == id { previewDocument = nil }
         selectedSearchResultIndex = nil
         // Never wait on the FFI mutex while a relocation or reconciliation runs.
         if backendBusy { return }
@@ -548,6 +565,7 @@ final class WorkspaceStore: ObservableObject {
         if searchTruncated != snapshot.searchTruncated { searchTruncated = snapshot.searchTruncated }
         if directories != snapshot.directories { directories = snapshot.directories }
         if openDocuments != snapshot.openDocuments { openDocuments = snapshot.openDocuments }
+        if previewDocument != snapshot.previewDocument { previewDocument = snapshot.previewDocument }
         if documents != snapshot.documents { documents = snapshot.documents }
         if pathsChanged {
             var protected = Set(snapshot.directories)

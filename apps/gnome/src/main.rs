@@ -42,6 +42,7 @@ struct Ui {
     watching_search: Rc<Cell<bool>>,
     conflict_banner: gtk::Box,
     document_tabs: adw::TabView,
+    document_tab_bar: adw::TabBar,
     document_tab_scroll: Rc<document_tab_scroll::TouchpadScroll>,
     document_pages: Rc<RefCell<Vec<(DocumentId, adw::TabPage)>>>,
     editor_panel: gtk::Box,
@@ -487,6 +488,11 @@ impl Ui {
         }
         // Keep the lookup in visual order for the next relocation snapshot.
         pages.sort_by_key(|(_, page)| self.document_tabs.page_position(page));
+        style_preview_tab(
+            &self.document_tab_bar.clone().upcast(),
+            &pages,
+            snapshot.preview_document.as_ref(),
+        );
         drop(pages);
         let target = self
             .document_tabs
@@ -577,6 +583,7 @@ impl Ui {
         let tabs_changed = {
             let previous = self.snapshot.borrow();
             previous.open_documents != snapshot.open_documents
+                || previous.preview_document != snapshot.preview_document
                 || previous.active_document.as_ref().map(|doc| &doc.id)
                     != snapshot.active_document.as_ref().map(|doc| &doc.id)
                 || previous.documents != snapshot.documents
@@ -1589,6 +1596,39 @@ fn main() {
     app.run();
 }
 
+fn tab_page_at_widget(widget: &gtk::Widget) -> Option<adw::TabPage> {
+    if widget
+        .find_property("page")
+        .is_some_and(|property| property.value_type() == adw::TabPage::static_type())
+    {
+        widget.property::<Option<adw::TabPage>>("page")
+    } else {
+        None
+    }
+}
+
+fn style_preview_tab(
+    widget: &gtk::Widget,
+    pages: &[(DocumentId, adw::TabPage)],
+    preview: Option<&DocumentId>,
+) {
+    if let Some(page) = tab_page_at_widget(widget) {
+        let is_preview = pages
+            .iter()
+            .any(|(id, item)| item == &page && Some(id) == preview);
+        if is_preview {
+            widget.add_css_class("workspace-preview");
+        } else {
+            widget.remove_css_class("workspace-preview");
+        }
+    }
+    let mut child = widget.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        style_preview_tab(&widget, pages, preview);
+    }
+}
+
 fn icon_button(label: &str, icon_name: &str) -> gtk::Button {
     let button = gtk::Button::new();
     let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -2040,6 +2080,7 @@ fn build_window(app: &adw::Application) {
         watching_search: Rc::new(Cell::new(false)),
         conflict_banner,
         document_tabs,
+        document_tab_bar: tab_bar.clone(),
         document_tab_scroll,
         document_pages: Rc::new(RefCell::new(Vec::new())),
         editor_panel,
@@ -2086,6 +2127,70 @@ fn build_window(app: &adw::Application) {
             increase.set_sensitive(next < 40.0);
             ui.editor_chrome.font_size_changed(&ui.editor);
             ui.editor.grab_focus();
+        });
+    }
+    {
+        let ui = ui.clone();
+        let bar = ui.document_tab_bar.clone();
+        let gesture_bar = bar.clone();
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(1);
+        gesture.set_name(Some("document-tab-keep-open"));
+        gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+        gesture.connect_pressed(move |gesture, presses, x, y| {
+            if presses != 2 {
+                return;
+            }
+            let mut target = bar.pick(x, y, gtk::PickFlags::DEFAULT);
+            while let Some(widget) = target {
+                // A double click on the native close control must only close.
+                if widget.is::<gtk::Button>() {
+                    return;
+                }
+                if let Some(page) = tab_page_at_widget(&widget) {
+                    let id = ui
+                        .document_pages
+                        .borrow()
+                        .iter()
+                        .find(|(_, item)| item == &page)
+                        .map(|(id, _)| id.clone());
+                    if let Some(id) = id {
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                        ui.dispatch(AppCommand::KeepDocumentOpen(id));
+                    }
+                    return;
+                }
+                target = widget.parent();
+            }
+        });
+        gesture_bar.add_controller(gesture);
+    }
+    {
+        let target = Rc::new(RefCell::new(None::<DocumentId>));
+        let action = gio::SimpleAction::new("keep-open", None);
+        let ui_action = ui.clone();
+        let action_target = target.clone();
+        action.connect_activate(move |_, _| {
+            if let Some(id) = action_target.borrow().clone() {
+                ui_action.dispatch(AppCommand::KeepDocumentOpen(id));
+            }
+        });
+        window.add_action(&action);
+        let menu = gio::Menu::new();
+        menu.append(Some("Keep Open"), Some("win.keep-open"));
+        ui.document_tabs.set_menu_model(Some(&menu));
+        let ui_menu = ui.clone();
+        ui.document_tabs.connect_setup_menu(move |_, page| {
+            let id = page.and_then(|page| {
+                ui_menu
+                    .document_pages
+                    .borrow()
+                    .iter()
+                    .find(|(_, item)| item == page)
+                    .map(|(id, _)| id.clone())
+            });
+            action.set_enabled(id.is_some() && id == ui_menu.snapshot.borrow().preview_document);
+            target.replace(id);
         });
     }
     if let Some(action) = app
@@ -2405,7 +2510,7 @@ fn build_window(app: &adw::Application) {
                     .map(|(id, _)| id.clone())
             });
             if let Some(id) = id {
-                ui.dispatch(AppCommand::OpenDocument(id));
+                ui.dispatch(AppCommand::PreviewDocument(id));
             }
         });
     }
@@ -2514,7 +2619,7 @@ fn build_window(app: &adw::Application) {
                         }
                         let Some(id) = row.id().cloned() else { return };
                         let location = row.location().cloned();
-                        ui.dispatch(AppCommand::OpenDocument(id.clone()));
+                        ui.dispatch(AppCommand::PreviewDocument(id.clone()));
                         if ui
                             .snapshot
                             .borrow()
@@ -2542,16 +2647,20 @@ fn build_window(app: &adw::Application) {
                     .get(index as usize)
                     .cloned();
                 if let Some(row) = selected
-                    && ui
+                    && let Some(id) = row.id().cloned()
+                {
+                    ui.dispatch(AppCommand::OpenDocument(id.clone()));
+                    if ui
                         .snapshot
                         .borrow()
                         .active_document
                         .as_ref()
                         .map(|doc| &doc.id)
-                        == row.id()
-                    && let Some(location) = row.location()
-                {
-                    ui.select_match(location);
+                        == Some(&id)
+                        && let Some(location) = row.location()
+                    {
+                        ui.select_match(location);
+                    }
                 }
             });
         }
@@ -3126,6 +3235,12 @@ fn build_window(app: &adw::Application) {
                 .file_selection
                 .set_selected(file_index as u32);
             selected_click.emit_by_name::<()>("pressed", &[&1i32, &24f64, &0f64]);
+            assert_eq!(file_stack.visible_child_name().as_deref(), Some("label"));
+            ui.sidebars[0]
+                .files
+                .emit_by_name::<()>("activate", &[&(file_index as u32)]);
+            assert!(ui.snapshot.borrow().preview_document.is_none());
+            ui.sidebars[0].interactions.begin_rename("notes/todo.md");
             assert_eq!(file_stack.visible_child_name().as_deref(), Some("edit"));
             assert_eq!(file_entry.selection_bounds(), Some((0, 4)));
             for _ in 0..40 {
@@ -3141,7 +3256,7 @@ fn build_window(app: &adw::Application) {
             assert!(workspace_path.join("notes/todo.md").is_file());
             assert!(!workspace_path.join("notes/discarded.md").exists());
             println!("GTK native focus loss cancels the rename draft");
-            println!("GTK selected file click/rename/stem selection smoke test passed");
+            println!("GTK double-click keep-open/explicit rename/stem selection smoke test passed");
             let folder_index = ui.sidebars[0]
                 .sidebar_rows
                 .borrow()
@@ -3406,6 +3521,120 @@ fn build_window(app: &adw::Application) {
                 "Closed file retained its editor indicator"
             );
             println!("GTK sidebar open/closed file indicator smoke test passed");
+            for name in ["preview-one.txt", "preview-two.txt"] {
+                ui.dispatch(AppCommand::CreateEntry {
+                    id: DocumentId::parse(name).unwrap(),
+                    directory: false,
+                });
+            }
+            file_tab.set_active(true);
+            let select_file = |name: &str| {
+                let index = ui.sidebars[0]
+                    .sidebar_rows
+                    .borrow()
+                    .iter()
+                    .position(|row| matches!(row, SidebarRow::File(id) if id.as_str() == name))
+                    .unwrap();
+                ui.sidebars[0].file_selection.set_selected(index as u32);
+                index as u32
+            };
+            select_file("preview-one.txt");
+            assert_eq!(
+                ui.snapshot
+                    .borrow()
+                    .preview_document
+                    .as_ref()
+                    .unwrap()
+                    .as_str(),
+                "preview-one.txt"
+            );
+            let second = select_file("preview-two.txt");
+            assert!(
+                !ui.snapshot
+                    .borrow()
+                    .open_documents
+                    .contains(&DocumentId::parse("preview-one.txt").unwrap())
+            );
+            ui.sidebars[0]
+                .files
+                .emit_by_name::<()>("activate", &[&second]);
+            assert!(
+                ui.snapshot.borrow().preview_document.is_none(),
+                "Sidebar double click did not keep the preview"
+            );
+            select_file("preview-one.txt");
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            while std::time::Instant::now() < until {
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            fn find_preview(widget: &gtk::Widget) -> Option<gtk::Widget> {
+                if widget.has_css_class("workspace-preview") {
+                    return Some(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(widget) = child {
+                    child = widget.next_sibling();
+                    if let Some(found) = find_preview(&widget) {
+                        return Some(found);
+                    }
+                }
+                None
+            }
+            let preview_widget =
+                find_preview(ui.document_tab_bar.upcast_ref()).expect("native italic preview tab");
+            fn title_label(widget: &gtk::Widget) -> Option<gtk::Label> {
+                if let Some(label) = widget.downcast_ref::<gtk::Label>()
+                    && label.text() == "preview-one.txt"
+                {
+                    return Some(label.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(widget) = child {
+                    child = widget.next_sibling();
+                    if let Some(label) = title_label(&widget) {
+                        return Some(label);
+                    }
+                }
+                None
+            }
+            let label = title_label(&preview_widget).expect("native preview title label");
+            assert_eq!(
+                label.pango_context().font_description().unwrap().style(),
+                gtk::pango::Style::Italic,
+                "Native preview title did not render in italics"
+            );
+
+            let point = preview_widget
+                .compute_point(
+                    &ui.document_tab_bar,
+                    &gtk::graphene::Point::new(
+                        preview_widget.width() as f32 / 2.0,
+                        preview_widget.height() as f32 / 2.0,
+                    ),
+                )
+                .unwrap();
+            let controllers = ui.document_tab_bar.observe_controllers();
+            let double_click = (0..controllers.n_items())
+                .filter_map(|index| controllers.item(index))
+                .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+                .find(|gesture| gesture.name().as_deref() == Some("document-tab-keep-open"))
+                .unwrap();
+            double_click.emit_by_name::<()>(
+                "pressed",
+                &[&2i32, &f64::from(point.x()), &f64::from(point.y())],
+            );
+            assert!(
+                ui.snapshot.borrow().preview_document.is_none(),
+                "Tab double click did not keep the preview"
+            );
+            assert!(!preview_widget.has_css_class("workspace-preview"));
+            println!(
+                "GTK native preview/replacement/italic/double-click keep-open smoke test passed"
+            );
+            ui.dispatch(AppCommand::PreviewDocument(
+                DocumentId::parse("README.md").unwrap(),
+            ));
             if std::env::var_os("NATIVE_WORKSPACE_SMOKE_TAB_SCROLL").is_some() {
                 for index in 0..20 {
                     let id = DocumentId::parse(format!("scroll-tab-{index:02}.rs")).unwrap();

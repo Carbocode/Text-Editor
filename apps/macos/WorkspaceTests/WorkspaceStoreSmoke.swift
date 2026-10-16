@@ -187,6 +187,20 @@ struct WorkspaceStoreSmoke {
         precondition(store.openDocuments.isEmpty && store.activeDocument == nil)
         precondition(store.errorMessage == nil)
         print("macOS tabs/save-all/close-after-rename smoke test passed")
+        store.openDocument("tab-a", preview: true)
+        precondition(store.previewDocument == "tab-a")
+        store.openDocument("tab-c", preview: true)
+        precondition(store.openDocuments == ["tab-c"] && store.previewDocument == "tab-c")
+        let previewIdentity = store.editorDocumentIdentity
+        store.keepDocumentOpen("tab-c")
+        precondition(store.previewDocument == nil && store.editorDocumentIdentity == previewIdentity)
+        store.openDocument("tab-a", preview: true)
+        store.changeDocument("edited preview")
+        precondition(store.previewDocument == nil)
+        store.saveDocument()
+        store.openDocument("tab-c", preview: true)
+        precondition(store.openDocuments == ["tab-c", "tab-a"] && store.previewDocument == nil)
+        print("macOS fast preview/replacement/keep-open/edit promotion smoke test passed")
         print("macOS optimistic rename/rollback/concurrent edits/deferred save/icon debounce smoke test passed")
     }
 }

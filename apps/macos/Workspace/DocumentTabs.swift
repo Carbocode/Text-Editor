@@ -5,10 +5,12 @@ import SwiftUI
 /// labels so selection, focus and undo survive a rename.
 struct DocumentTabs<Content: View>: View {
     let documents: [String]
+    let previewDocument: String?
     let dirtyDocuments: Set<String>
     let selectedDocument: String?
     let select: (String) -> Bool
     let close: (String) -> Void
+    let keepOpen: (String) -> Void
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -20,12 +22,12 @@ struct DocumentTabs<Content: View>: View {
                             ForEach(documents, id: \.self) { id in
                                 BonsplitTabItemView(
                                     tab: BonsplitTabItem(title: (id as NSString).lastPathComponent,
-                                                        isDirty: dirtyDocuments.contains(id)),
+                                                        isDirty: dirtyDocuments.contains(id), isPreview: previewDocument == id),
                                     isSelected: selectedDocument == id,
                                     fileImage: WorkspaceIcons.image(for: id),
                                     accessibilityID: id,
                                     onSelect: { _ = select(id) },
-                                    onClose: { close(id) })
+                                    onClose: { close(id) }, onKeepOpen: { keepOpen(id) })
                                 .help(id)
                                 .accessibilityIdentifier("documentTab:" + id)
                                 .id(id)

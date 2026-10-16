@@ -18,6 +18,150 @@ fn fixture() -> (tempfile::TempDir, Application) {
     (dir, app)
 }
 
+fn preview_fixture() -> (tempfile::TempDir, Application) {
+    let (dir, mut app) = fixture();
+    for name in ["a", "b", "c"] {
+        app.dispatch(AppCommand::CloseDocument(id(name))).unwrap();
+    }
+    (dir, app)
+}
+
+#[test]
+fn preview_replaces_only_the_previous_preview_and_releases_its_buffer() {
+    let (dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    let next = app.dispatch(AppCommand::PreviewDocument(id("b"))).unwrap();
+    assert_eq!(next.open_documents, [id("b")]);
+    assert_eq!(next.preview_document, Some(id("b")));
+    fs::write(dir.path().join("a"), "new disk a").unwrap();
+    let next = app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    assert_eq!(next.open_documents, [id("a")]);
+    assert_eq!(next.active_document.unwrap().content, "new disk a");
+}
+
+#[test]
+fn selecting_an_existing_tab_keeps_both_the_permanent_tab_and_the_preview() {
+    let (_dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::OpenDocument(id("c"))).unwrap();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    let selected = app.dispatch(AppCommand::PreviewDocument(id("c"))).unwrap();
+    assert_eq!(selected.open_documents, [id("c"), id("a")]);
+    assert_eq!(selected.preview_document, Some(id("a")));
+    let next = app.dispatch(AppCommand::PreviewDocument(id("b"))).unwrap();
+    assert_eq!(next.open_documents, [id("c"), id("b")]);
+    assert_eq!(next.preview_document, Some(id("b")));
+}
+
+#[test]
+fn editing_a_preview_promotes_it_even_after_undo_and_save() {
+    let (_dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    app.dispatch(AppCommand::ChangeDocument {
+        id: id("a"),
+        content: "edited".into(),
+    })
+    .unwrap();
+    assert!(app.snapshot().preview_document.is_none());
+    app.dispatch(AppCommand::ChangeDocument {
+        id: id("a"),
+        content: "original a".into(),
+    })
+    .unwrap();
+    app.dispatch(AppCommand::SaveDocument(id("a"))).unwrap();
+    let next = app.dispatch(AppCommand::PreviewDocument(id("b"))).unwrap();
+    assert_eq!(next.open_documents, [id("a"), id("b")]);
+    assert_eq!(next.preview_document, Some(id("b")));
+}
+
+#[test]
+fn keep_open_and_explicit_open_promote_without_changing_the_selected_editor() {
+    let (_dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    app.dispatch(AppCommand::OpenDocument(id("b"))).unwrap();
+    let kept = app.dispatch(AppCommand::KeepDocumentOpen(id("a"))).unwrap();
+    assert!(kept.preview_document.is_none());
+    assert_eq!(kept.active_document.unwrap().id, id("b"));
+    app.dispatch(AppCommand::PreviewDocument(id("c"))).unwrap();
+    let kept = app.dispatch(AppCommand::OpenDocument(id("c"))).unwrap();
+    assert!(kept.preview_document.is_none());
+    assert_eq!(kept.open_documents, [id("a"), id("b"), id("c")]);
+}
+
+#[test]
+fn failed_preview_open_preserves_the_previous_preview() {
+    let (dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    fs::remove_file(dir.path().join("b")).unwrap();
+    for target in ["b", "missing"] {
+        assert!(
+            app.dispatch(AppCommand::PreviewDocument(id(target)))
+                .is_err()
+        );
+        assert_eq!(app.snapshot().preview_document, Some(id("a")));
+        assert_eq!(app.snapshot().open_documents, [id("a")]);
+        assert_eq!(app.snapshot().active_document.unwrap().id, id("a"));
+    }
+}
+
+#[test]
+fn preview_follows_renames_and_is_promoted_by_tab_reordering() {
+    let (_dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::OpenDocument(id("c"))).unwrap();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    let renamed = app
+        .dispatch(AppCommand::RenameEntry {
+            id: id("a"),
+            new_name: "renamed".into(),
+        })
+        .unwrap();
+    assert_eq!(renamed.preview_document, Some(id("renamed")));
+    let moved = app
+        .dispatch(AppCommand::MoveDocumentTab {
+            id: id("renamed"),
+            index: 0,
+        })
+        .unwrap();
+    assert!(moved.preview_document.is_none());
+    let next = app.dispatch(AppCommand::PreviewDocument(id("b"))).unwrap();
+    assert_eq!(next.open_documents, [id("renamed"), id("b"), id("c")]);
+}
+
+#[test]
+fn save_promotes_a_clean_preview_but_save_all_leaves_it_temporary() {
+    let (_dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    let saved = app.dispatch(AppCommand::SaveAllDocuments).unwrap();
+    assert_eq!(saved.preview_document, Some(id("a")));
+    let saved = app.dispatch(AppCommand::SaveDocument(id("a"))).unwrap();
+    assert!(saved.preview_document.is_none());
+}
+
+#[test]
+fn preview_is_cleared_by_close_delete_and_workspace_switch() {
+    let (dir, mut app) = preview_fixture();
+    app.dispatch(AppCommand::PreviewDocument(id("a"))).unwrap();
+    assert!(
+        app.dispatch(AppCommand::CloseDocument(id("a")))
+            .unwrap()
+            .preview_document
+            .is_none()
+    );
+    app.dispatch(AppCommand::PreviewDocument(id("b"))).unwrap();
+    assert!(
+        app.dispatch(AppCommand::DeleteEntry(id("b")))
+            .unwrap()
+            .preview_document
+            .is_none()
+    );
+    app.dispatch(AppCommand::PreviewDocument(id("c"))).unwrap();
+    assert!(
+        app.dispatch(AppCommand::OpenWorkspace(dir.path().into()))
+            .unwrap()
+            .preview_document
+            .is_none()
+    );
+}
+
 #[test]
 fn tabs_preserve_open_order_and_close_inactive_or_neighbor_without_losing_buffers() {
     let (_dir, mut app) = fixture();

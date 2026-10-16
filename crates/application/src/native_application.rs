@@ -353,6 +353,11 @@ fn project_paths(snapshot: &mut AppSnapshot, source: &DocumentId, target: &Docum
             *id = DocumentId::parse(renamed_path(id.as_str(), source, target)).unwrap();
         }
     }
+    if let Some(id) = &mut snapshot.preview_document
+        && affected(id.as_str())
+    {
+        *id = DocumentId::parse(renamed_path(id.as_str(), source, target)).unwrap();
+    }
     let documents = Arc::make_mut(&mut snapshot.documents);
     for doc in documents.iter_mut() {
         remap(&mut doc.id, &mut doc.title);
@@ -383,6 +388,9 @@ fn project_paths(snapshot: &mut AppSnapshot, source: &DocumentId, target: &Docum
 }
 
 fn project_edit(snapshot: &mut AppSnapshot, id: &DocumentId, content: &str) {
+    if snapshot.preview_document.as_ref() == Some(id) {
+        snapshot.preview_document = None;
+    }
     if let Some(doc) = &mut snapshot.active_document
         && &doc.id == id
     {

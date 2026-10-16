@@ -118,11 +118,11 @@ struct WorkspaceDragLatencySmoke {
                 + (close ? BonsplitTabBarMetrics.tabMinWidth - 12 : 40),
                 y: editorFrame.maxY + BonsplitTabBarMetrics.barHeight / 2)
         }
-        func click(_ point: NSPoint) {
+        func click(_ point: NSPoint, count: Int = 1) {
             for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
                 let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                    context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)!
+                    context: nil, eventNumber: 1, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
                 window.sendEvent(event)
             }
         }
@@ -162,7 +162,37 @@ struct WorkspaceDragLatencySmoke {
         store.openDocument("README.md")
         pump(until: { editorReady("README.md") }, timeout: 3)
         print("macOS document tab selection/close/editor identity/rename smoke test passed")
+        store.closeDocument("notes.md")
+        pump(until: { !store.openDocuments.contains("notes.md") }, timeout: 3)
+        let notesRow = sourceView("notes.md", in: window.contentView)!
+        let notesPoint = notesRow.convert(NSPoint(x: notesRow.bounds.midX, y: notesRow.bounds.midY), to: nil)
+        click(notesPoint)
+        pump(until: { store.previewDocument == "notes.md" && editorReady("notes.md") }, timeout: 3)
+        precondition(store.previewDocument == "notes.md", "Sidebar single click did not open a preview")
+        click(notesPoint, count: 2)
+        pump(until: { store.previewDocument == nil }, timeout: 3)
+        precondition(store.previewDocument == nil && store.openDocuments.contains("notes.md") && store.activeDocument?.id == "notes.md",
+            "Sidebar double click did not keep the file open")
+        store.closeDocument("notes.md")
+        store.openDocument("notes.md", preview: true)
+        pump(until: { store.previewDocument == "notes.md" && editorReady("notes.md") }, timeout: 3)
+        pump(until: { false }, timeout: 0.15)
+        click(tabPoint(2))
+        click(tabPoint(2), count: 2)
+        pump(until: { store.previewDocument == nil }, timeout: 3)
+        precondition(store.previewDocument == nil && store.openDocuments.contains("notes.md") && store.activeDocument?.id == "notes.md",
+            "Tab double click did not keep the preview open")
+        precondition(!window.isMiniaturized, "Double-clicking a document tab minimized the window")
+        store.closeDocument("notes.md")
+        store.openDocument("notes.md", preview: true)
+        pump(until: { editorReady("notes.md") }, timeout: 3)
+        print("macOS native sidebar preview/double-click/tab keep-open smoke test passed")
         if let capture = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_SMOKE_SCREENSHOT"] {
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            app.activate(ignoringOtherApps: true)
+            window.displayIfNeeded()
+            print("macOS capture window: visible=\(window.isVisible), minimized=\(window.isMiniaturized), number=\(window.windowNumber), frame=\(window.frame)")
             pump(until: { false }, timeout: 0.3)
             if CGPreflightScreenCaptureAccess() {
                 let task = Process()

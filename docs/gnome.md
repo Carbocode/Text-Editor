@@ -19,3 +19,5 @@ Document tabs use AdwTabBar with AdwTabView. The tab bar is a top bar of the sam
 The header provides linked Decrease/Increase Text Size buttons, using one-point steps from 8 to 40 points. A percentage between the controls uses the initial editor font as 100%. The editor font and line-number gutter resize without modifying the document or its undo history.
 
 File rows show an eye for documents open in the editor, in addition to their dirty/conflict status. Open/close snapshots update the visible row indicators without rebuilding the cached tree or name-filter index.
+
+Single-clicking a file or search result opens a preview tab with an italic title. There is at most one preview per window; opening another file in preview replaces it, while selecting an existing tab preserves it. Editing, explicitly saving, double-clicking the file or tab, or choosing Keep Open makes the tab permanent. Undoing edits or saving afterwards does not turn it back into a preview. New files open permanently. F2 and the context menu handle renaming. These rules follow [VS Code preview mode](https://code.visualstudio.com/docs/editing/getting-started/userinterface#_preview-mode).

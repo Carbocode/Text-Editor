@@ -51,6 +51,7 @@ pub struct DocumentSnapshot {
 pub struct OpenedDocument {
     pub revision: u64,
     pub open_documents: Vec<String>,
+    pub preview_document: Option<String>,
     pub document: DocumentSnapshot,
 }
 
@@ -94,6 +95,7 @@ pub struct WorkspaceSnapshot {
     pub directories: Vec<String>,
     pub documents: Vec<DocumentSummary>,
     pub open_documents: Vec<String>,
+    pub preview_document: Option<String>,
     pub active_document: Option<DocumentSnapshot>,
 }
 
@@ -150,6 +152,7 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                 .into_iter()
                 .map(|id| id.as_str().to_owned())
                 .collect(),
+            preview_document: snapshot.preview_document.map(|id| id.as_str().to_owned()),
             active_document: snapshot.active_document.map(|doc| DocumentSnapshot {
                 id: doc.id.as_str().to_owned(),
                 title: doc.title,
@@ -402,31 +405,20 @@ impl WorkspaceApplication {
         self.dispatch(AppCommand::OpenDocument(Self::parse_id(id)?))
     }
 
+    pub fn preview_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::PreviewDocument(Self::parse_id(id)?))
+    }
+
+    pub fn keep_document_open(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::KeepDocumentOpen(Self::parse_id(id)?))
+    }
+
     pub fn open_document_fast(&self, id: String) -> Result<OpenedDocument, WorkspaceError> {
-        let id = Self::parse_id(id)?;
-        let mut app = self
-            .inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?;
-        let snapshot = app.dispatch(AppCommand::OpenDocument(id.clone()))?;
-        let document = snapshot
-            .active_document
-            .ok_or_else(|| WorkspaceError::DocumentNotOpen(id.as_str().to_owned()))?;
-        Ok(OpenedDocument {
-            open_documents: snapshot
-                .open_documents
-                .into_iter()
-                .map(|id| id.as_str().to_owned())
-                .collect(),
-            revision: snapshot.revision,
-            document: DocumentSnapshot {
-                id: document.id.as_str().to_owned(),
-                title: document.title,
-                content: document.content,
-                dirty: document.dirty,
-                external_change: document.external_change,
-            },
-        })
+        self.open_document_fast_impl(id, false)
+    }
+
+    pub fn preview_document_fast(&self, id: String) -> Result<OpenedDocument, WorkspaceError> {
+        self.open_document_fast_impl(id, true)
     }
 
     pub fn change_document(
@@ -467,6 +459,43 @@ impl WorkspaceApplication {
 }
 
 impl WorkspaceApplication {
+    fn open_document_fast_impl(
+        &self,
+        id: String,
+        preview: bool,
+    ) -> Result<OpenedDocument, WorkspaceError> {
+        let id = Self::parse_id(id)?;
+        let mut app = self
+            .inner
+            .lock()
+            .map_err(|_| WorkspaceError::LockPoisoned)?;
+        let command = if preview {
+            AppCommand::PreviewDocument(id.clone())
+        } else {
+            AppCommand::OpenDocument(id.clone())
+        };
+        let snapshot = app.dispatch(command)?;
+        let document = snapshot
+            .active_document
+            .ok_or_else(|| WorkspaceError::DocumentNotOpen(id.as_str().to_owned()))?;
+        Ok(OpenedDocument {
+            preview_document: snapshot.preview_document.map(|id| id.as_str().to_owned()),
+            open_documents: snapshot
+                .open_documents
+                .into_iter()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
+            revision: snapshot.revision,
+            document: DocumentSnapshot {
+                id: document.id.as_str().to_owned(),
+                title: document.title,
+                content: document.content,
+                dirty: document.dirty,
+                external_change: document.external_change,
+            },
+        })
+    }
+
     fn parse_id(id: String) -> Result<DocumentId, WorkspaceError> {
         DocumentId::parse(id).map_err(|_| WorkspaceError::InvalidDocumentId)
     }

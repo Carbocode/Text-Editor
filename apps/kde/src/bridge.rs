@@ -38,6 +38,7 @@ pub mod qobject {
         #[qproperty(QStringList, file_filter_directories)]
         #[qproperty(bool, file_filter_in_progress)]
         #[qproperty(bool, snapshot_updating)]
+        #[qproperty(QString, preview_document_id)]
         #[qproperty(QStringList, open_document_ids)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, directory_ids)]
@@ -111,6 +112,10 @@ pub mod qobject {
         #[qinvokable]
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
+        fn preview_document(self: Pin<&mut Self>, id: &QString);
+        #[qinvokable]
+        fn keep_document_open(self: Pin<&mut Self>, id: &QString);
+        #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
         #[qinvokable]
         fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList;
@@ -154,6 +159,7 @@ pub struct AppControllerRust {
     file_filter_in_progress: bool,
     snapshot_updating: bool,
     open_document_ids: QStringList,
+    preview_document_id: QString,
     document_ids: QStringList,
     directory_ids: QStringList,
     dirty_document_ids: QStringList,
@@ -510,6 +516,12 @@ impl qobject::AppController {
                 .map(|id| QString::from(id.as_str()))
                 .collect(),
         );
+        self.as_mut().set_preview_document_id(QString::from(
+            snapshot
+                .preview_document
+                .as_ref()
+                .map_or("", |id| id.as_str()),
+        ));
         match snapshot.active_document {
             Some(doc) => {
                 self.as_mut()
@@ -810,6 +822,27 @@ impl qobject::AppController {
                 .set_error_message(QString::from("Invalid document name")),
         }
         self.as_mut().sync_pending_move();
+        self.as_mut().report_background_error();
+    }
+
+    pub fn preview_document(mut self: Pin<&mut Self>, id: &QString) {
+        match DocumentId::parse(id.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::PreviewDocument(id)),
+            Err(_) => self
+                .as_mut()
+                .set_error_message(QString::from("Invalid document name")),
+        }
+        self.as_mut().sync_pending_move();
+        self.as_mut().report_background_error();
+    }
+
+    pub fn keep_document_open(mut self: Pin<&mut Self>, id: &QString) {
+        match DocumentId::parse(id.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::KeepDocumentOpen(id)),
+            Err(_) => self
+                .as_mut()
+                .set_error_message(QString::from("Invalid document name")),
+        }
         self.as_mut().report_background_error();
     }
 

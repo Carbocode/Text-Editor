@@ -31,7 +31,7 @@ struct NativeWorkspaceApp: App {
                     .keyboardShortcut("s", modifiers: [.command, .shift])
                 Button("Save") { store.saveDocument() }
                     .keyboardShortcut("s", modifiers: .command)
-                    .disabled(!store.hasDirtyActiveDocument)
+                    .disabled(!store.canSaveActiveDocument)
             }
         }
     }

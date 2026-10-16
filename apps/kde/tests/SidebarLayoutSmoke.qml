@@ -176,6 +176,36 @@ Kirigami.ApplicationWindow {
                 case 8:
                     check(pane.documentTabBar.currentItem === retainedTab && retainedTab.checked,
                         "Native tab highlight did not follow the active document")
+                    controller.create_entry("preview-a.txt", false)
+                    controller.create_entry("preview-b.txt", false)
+                    controller.preview_document("preview-a.txt")
+                    break
+                case 9:
+                    check(controller.preview_document_id === "preview-a.txt" && pane.documentTabBar.currentItem.font.italic,
+                        "Preview tab is missing its italic title")
+                    controller.preview_document("preview-b.txt")
+                    check(controller.open_document_ids.indexOf("preview-a.txt") === -1,
+                        "Opening another preview kept the old temporary tab")
+                    var previewTab = pane.documentTabBar.currentItem
+                    input.mouseDoubleClickSequence(previewTab, previewTab.width / 2, previewTab.height / 2)
+                    break
+                case 10:
+                    check(controller.preview_document_id.length === 0 && !pane.documentTabBar.currentItem.font.italic,
+                        "Double-clicking a native tab did not keep it open")
+                    controller.preview_document("preview-a.txt")
+                    controller.change_document("edited preview")
+                    check(controller.preview_document_id.length === 0, "Editing did not promote the preview")
+                    controller.save_all_documents()
+                    controller.preview_document("stable-c.txt")
+                    check(controller.open_document_ids.indexOf("preview-a.txt") !== -1
+                        && controller.open_document_ids.indexOf("preview-b.txt") !== -1,
+                        "A promoted preview was replaced")
+                    console.log("KDE preview replacement/italic/double-click/edit promotion smoke test passed")
+                    break
+                case 11:
+                    check(pane.documentTabBar.currentItem.path === controller.active_document_id
+                        && pane.documentTabBar.currentItem.checked && pane.documentTabBar.currentItem.font.italic,
+                        "Native tab selection did not follow the new preview: " + pane.documentTabBar.currentItem.path + " vs " + controller.active_document_id)
                     running = false
                     var capture = Qt.application.arguments.find(value => value.startsWith("--smoke-screenshot="))
                     if (!capture) { Qt.quit(); return }

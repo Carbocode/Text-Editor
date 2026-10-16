@@ -271,13 +271,8 @@ struct ContentView: View {
         case .file(let group):
             Button {
                 if renamePath != group.id {
-                    if selectedDirectory == nil && store.selectedSearchResultIndex == nil
-                        && store.activeDocument.map({ store.presentationPath($0.id) }) == group.id {
-                        beginRename(group.id)
-                    } else {
-                        selectedDirectory = nil
-                        store.openSearchFile(group.id)
-                    }
+                    selectedDirectory = nil
+                    store.openSearchFile(group.id)
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -304,6 +299,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture(count: 2).onEnded { store.openDocument(group.id) })
             .background(nativeDragSource(group.id, directory: false))
             .overlay(nativeDropTarget(parentDirectory(group.id)))
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
@@ -334,6 +330,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture(count: 2).onEnded { store.keepDocumentOpen(match.result.id) })
             .overlay {
                 if selectedDirectory == nil && store.selectedSearchResultIndex == match.index {
                     SidebarRowHighlight()
@@ -718,7 +715,7 @@ struct ContentView: View {
                     ToolbarSpacer(.fixed, placement: .primaryAction)
                     ToolbarItemGroup(placement: .primaryAction) {
                         Button("Save", systemImage: "square.and.arrow.down") { store.saveDocument() }
-                            .disabled(!store.hasDirtyActiveDocument)
+                            .disabled(!store.canSaveActiveDocument)
                             .accessibilityIdentifier("saveDocument")
                         Button("Save All", systemImage: "square.and.arrow.down.on.square") { store.saveAllDocuments() }
                     }
@@ -773,13 +770,13 @@ struct ContentView: View {
 
     private var editorDetail: some View {
         VStack(spacing: 0) {
-            DocumentTabs(documents: store.openDocuments,
+            DocumentTabs(documents: store.openDocuments, previewDocument: store.previewDocument,
                          dirtyDocuments: Set(store.documents.filter(\.dirty).map(\.id)),
                          selectedDocument: store.activeDocument?.id,
                          select: { id in
-                             store.openDocument(id)
+                             store.openDocument(id, preview: true)
                              return store.activeDocument?.id == id
-                         }, close: { store.closeDocument($0) }) {
+                         }, close: { store.closeDocument($0) }, keepOpen: { store.keepDocumentOpen($0) }) {
                 editorPanel
             }
         }
