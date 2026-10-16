@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 @main
 struct EditorLayoutSmoke {
@@ -146,6 +147,45 @@ struct EditorLayoutSmoke {
             click(NSPoint(x: 24, y: emptyY))
             precondition(clickTextView.selectedRange().location == source.utf16.count)
         }
+        // Reuse the real representable while switching tabs, including equal text.
+        let host = NSHostingView(rootView: NoWrapTextEditor(documentID: "a.txt", documentIdentity: 1,
+            textRevision: 1, text: .constant("first"), searchRange: nil, searchNavigationRevision: 0))
+        let tabWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 240),
+                                 styleMask: [.titled], backing: .buffered, defer: false)
+        tabWindow.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        func findEditor(_ view: NSView) -> NSTextView? {
+            if let text = view as? NSTextView { return text }
+            return view.subviews.lazy.compactMap { findEditor($0) }.first
+        }
+        let tabEditor = findEditor(host)!
+        tabWindow.makeFirstResponder(tabEditor)
+        tabEditor.insertText(" edited", replacementRange: NSRange(location: 5, length: 0))
+        tabEditor.breakUndoCoalescing()
+        precondition(tabEditor.undoManager?.canUndo == true, "Fixture must contain an undoable edit")
+        host.rootView = NoWrapTextEditor(documentID: "b.txt", documentIdentity: 2,
+            textRevision: 2, text: .constant("first edited"), searchRange: nil, searchNavigationRevision: 0)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        precondition(findEditor(host) === tabEditor, "Tab switching should reuse the native editor")
+        precondition(tabEditor.undoManager?.canUndo == false, "Undo from a previous tab must not change this document")
+        tabEditor.insertText("!", replacementRange: NSRange(location: tabEditor.string.utf16.count, length: 0))
+        tabEditor.breakUndoCoalescing()
+        tabEditor.setSelectedRange(NSRange(location: 1, length: 2))
+        host.rootView = NoWrapTextEditor(documentID: "renamed-b.txt", documentIdentity: 2,
+            textRevision: 3, text: .constant(tabEditor.string), searchRange: nil, searchNavigationRevision: 0)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        precondition(tabEditor.undoManager?.canUndo == true, "A rename must preserve the document's undo history")
+        precondition(tabEditor.selectedRange() == NSRange(location: 1, length: 2), "A rename must preserve selection")
+        host.rootView = NoWrapTextEditor(documentID: "c.txt", documentIdentity: 3,
+            textRevision: 4, text: .constant("third document"), searchRange: nil, searchNavigationRevision: 0)
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        precondition(tabEditor.string == "third document")
+        precondition(tabEditor.undoManager?.canUndo == false, "Different tab contents must also isolate undo")
+        print("AppKit tab undo isolation/rename selection smoke test passed")
         print("AppKit horizontal overflow smoke test passed")
     }
 }

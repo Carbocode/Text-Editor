@@ -93,6 +93,17 @@ struct WorkspaceDragLatencySmoke {
               let state = source.configuration?.state else {
             fatalError("Actual workspace sidebar did not expose the source and destination rows")
         }
+        store.openDocument("README.md")
+        func editorContainer(in view: NSView?) -> EditorContainer? {
+            guard let view else { return nil }
+            if let editor = view as? EditorContainer { return editor }
+            return view.subviews.lazy.compactMap { editorContainer(in: $0) }.first
+        }
+        pump(until: { editorContainer(in: window.contentView) != nil }, timeout: 3)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let editorHeight = editorContainer(in: window.contentView)!.bounds.height
+        precondition(editorHeight > window.contentView!.bounds.height * 0.7,
+            "Document tabs consume editor space: editor height \(editorHeight), window height \(window.contentView!.bounds.height)")
         let destinationPoint = destination.convert(NSPoint(x: min(100, destination.bounds.width / 2), y: destination.bounds.midY), to: nil)
         var pendingAt: TimeInterval?
         let subscription = store.$pendingRelocation.sink { relocation in

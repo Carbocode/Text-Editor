@@ -492,7 +492,7 @@ ApplicationWindow {
                 case 24:
                     if (controller.deletion_pending && Date.now() - switchedAt < 3000) { --step; break }
                     check(!controller.deletion_pending && controller.error_message.length === 0, "File deletion failed")
-                    check(controller.document_ids.indexOf("renamed.rs") === -1 && controller.active_document_id.length === 0,
+                    check(controller.document_ids.indexOf("renamed.rs") === -1 && controller.open_document_ids.indexOf("renamed.rs") === -1 && controller.active_document_id !== "renamed.rs",
                         "Deleted document stayed in the editor or tree")
                     controller.create_entry("delete-check", true)
                     controller.create_entry("delete-check/note", false)
@@ -506,6 +506,37 @@ ApplicationWindow {
                     check(controller.directory_ids.indexOf("delete-check") === -1
                         && controller.document_ids.indexOf("delete-check/note") === -1, "Deleted subtree stayed in the tree")
                     console.log("KDE deletion confirmation/cancel/unsaved protection/file/folder smoke test passed")
+                    controller.create_entry("tab-review-a.txt", false)
+                    controller.create_entry("tab-review-b.txt", false)
+                    controller.open_document("tab-review-b.txt")
+                    var tabEditor = findItem(pane, "documentEditor")
+                    tabEditor.text = "edited"
+                    check(pane.flushEditor(), "Could not flush tab fixture")
+                    controller.save_all_documents()
+                    controller.open_document("tab-review-a.txt")
+                    tabEditor.insert(0, "edited")
+                    check(pane.flushEditor() && tabEditor.canUndo, "Fixture must contain an undoable edit")
+                    controller.open_document("tab-review-b.txt")
+                    check(!tabEditor.canUndo, "Undo history leaked between equal tab buffers")
+                    tabEditor.insert(tabEditor.length, "!")
+                    check(pane.flushEditor() && tabEditor.canUndo, "Second tab edit must be undoable")
+                    tabEditor.select(1, 3)
+                    controller.rename_entry("tab-review-b.txt", "tab-review-renamed.txt")
+                    check(tabEditor.canUndo && tabEditor.selectedText === "di", "Rename lost undo history or selection")
+                    controller.save_all_documents()
+                    check(controller.dirty_document_ids.length === 0, "Save All did not save inactive documents")
+                    controller.open_document("tab-review-a.txt")
+                    tabEditor.insert(tabEditor.length, " discard")
+                    pane.requestCloseDocument("tab-review-a.txt")
+                    var closeDialog = findItem(pane, "closeDocumentDialog")
+                    check(closeDialog && closeDialog.visible, "Dirty tab close did not ask for confirmation")
+                    closeDialog.customFooterActions[0].trigger()
+                    check(controller.open_document_ids.indexOf("tab-review-a.txt") !== -1, "Cancel closed a dirty tab")
+                    pane.requestCloseDocument("tab-review-a.txt")
+                    closeDialog.customFooterActions[1].trigger()
+                    check(controller.open_document_ids.indexOf("tab-review-a.txt") === -1, "Discard kept the tab open")
+                    check(controller.active_document_id === "tab-review-renamed.txt", "Closing the active tab did not select its neighbor")
+                    console.log("KDE document tabs/undo isolation/rename/save-all/cancel/discard smoke test passed")
                     Qt.quit()
                 }
             } catch (error) {

@@ -735,6 +735,29 @@ struct ContentView: View {
 
     private var editorDetail: some View {
             VStack(spacing: 0) {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        ForEach(store.openDocuments, id: \.self) { id in
+                            HStack(spacing: 4) {
+                                Button {
+                                    store.openDocument(id)
+                                } label: {
+                                    Text((id as NSString).lastPathComponent + (store.documents.first(where: { $0.id == id })?.dirty == true ? " •" : ""))
+                                }
+                                .buttonStyle(.plain)
+                                Button { store.closeDocument(id) } label: { Image(systemName: "xmark") }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel("Close " + id)
+                            }
+                            .padding(8)
+                            .background(store.activeDocument?.id == id ? Color.accentColor.opacity(0.15) : Color.clear)
+                            .help(id)
+                        }
+                        Button("Save All") { store.saveAllDocuments() }
+                    }
+                    .padding(.horizontal, 6)
+                }
+                Divider()
                 if let active = store.activeDocument {
                     if active.externalChange {
                         HStack(spacing: 8) {

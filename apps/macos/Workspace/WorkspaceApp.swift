@@ -27,6 +27,8 @@ struct NativeWorkspaceApp: App {
             }
             CommandGroup(replacing: .newItem) { }
             CommandGroup(replacing: .saveItem) {
+                Button("Save All") { store.saveAllDocuments() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
                 Button("Save") { store.saveDocument() }
                     .keyboardShortcut("s", modifiers: .command)
                     .disabled(!store.hasDirtyActiveDocument)

@@ -220,6 +220,11 @@ Item {
         return true
     }
 
+    Shortcut {
+        sequence: "Ctrl+Shift+S"
+        onActivated: if (root.flushEditor()) root.controller.save_all_documents()
+    }
+
     function saveActive() {
         if (flushEditor()) controller.save_document()
     }
@@ -537,6 +542,39 @@ Item {
                         root.controller.delete_entry(deleteEntryDialog.path)
                 }
             }
+        ]
+    }
+
+    function requestCloseDocument(path) {
+        if (!root.flushEditor()) return
+        if (root.controller.dirty_document_ids.indexOf(path) === -1) {
+            root.controller.close_document(path)
+        } else {
+            closeDocumentDialog.path = path
+            closeDocumentDialog.workspaceRoot = root.controller.workspace_root
+            closeDocumentDialog.open()
+        }
+    }
+    Kirigami.Dialog {
+        id: closeDocumentDialog
+        objectName: "closeDocumentDialog"
+        property string path: ""
+        property string workspaceRoot: ""
+        title: "Save changes to “" + path.split("/").pop() + "”?"
+        standardButtons: Kirigami.Dialog.NoButton
+        Label { text: "Your changes will be lost if you close without saving."; wrapMode: Text.WordWrap }
+        customFooterActions: [
+            Kirigami.Action { text: "Cancel"; onTriggered: closeDocumentDialog.close() },
+            Kirigami.Action { text: "Discard Changes"; onTriggered: {
+                closeDocumentDialog.close()
+                if (closeDocumentDialog.workspaceRoot === root.controller.workspace_root && root.flushEditor())
+                    root.controller.discard_and_close_document(closeDocumentDialog.path)
+            } },
+            Kirigami.Action { text: "Save"; onTriggered: {
+                closeDocumentDialog.close()
+                if (closeDocumentDialog.workspaceRoot === root.controller.workspace_root && root.flushEditor())
+                    root.controller.save_and_close_document(closeDocumentDialog.path)
+            } }
         ]
     }
 
@@ -1559,6 +1597,33 @@ Item {
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: Kirigami.Units.smallSpacing
+                    RowLayout {
+                        Layout.fillWidth: true
+                        ScrollView {
+                            Layout.fillWidth: true
+                            implicitHeight: 40
+                            Row {
+                                Repeater {
+                                    model: root.controller.open_document_ids
+                                    delegate: Row {
+                                        Button {
+                                            text: modelData.split("/").pop() + (root.controller.dirty_document_ids.indexOf(modelData) !== -1 ? " •" : "")
+                                            highlighted: root.controller.active_document_id === modelData
+                                            onClicked: { if (root.flushEditor()) root.controller.open_document(modelData) }
+                                            ToolTip.text: modelData
+                                            ToolTip.visible: hovered
+                                        }
+                                        ToolButton {
+                                            text: "×"
+                                            Accessible.name: "Close " + modelData
+                                            onClicked: { root.requestCloseDocument(modelData) }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Button { text: "Save All"; onClicked: { if (root.flushEditor()) root.controller.save_all_documents() } }
+                    }
                     Pane {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
@@ -1828,7 +1893,12 @@ Item {
 
     Connections {
         target: root.controller
+        function onDocument_switched() {
+            syntaxHighlighter.clearUndoHistory()
+            editor.deselect()
+        }
         function onActive_document_idChanged() {
+            root.selectedResultIndex = -1
             Qt.callLater(root.updateHighlight)
             Qt.callLater(root.restoreFileTreeSelection)
         }

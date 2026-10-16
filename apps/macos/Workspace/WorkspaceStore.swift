@@ -29,6 +29,7 @@ final class WorkspaceStore: ObservableObject {
               let end = Int(exactly: location.endUtf16), end >= start else { return nil }
         return NSRange(location: start, length: end - start)
     }
+    @Published private(set) var openDocuments: [String] = []
     @Published private(set) var documents: [DocumentSummary] = []
     @Published private(set) var externalChangeIDs: Set<String> = []
     @Published private(set) var activeDocument: DocumentSnapshot?
@@ -376,7 +377,11 @@ final class WorkspaceStore: ObservableObject {
             if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let opened = try core.openDocumentFast(id: id)
                 revision = opened.revision
-                if activeDocument?.id != opened.document.id { editorDocumentIdentity &+= 1 }
+                if openDocuments != opened.openDocuments { openDocuments = opened.openDocuments }
+                if activeDocument?.id != opened.document.id {
+                    editorDocumentIdentity &+= 1
+                    clearSearchSelection()
+                }
                 activeDocument = opened.document
                 if editorText != opened.document.content {
                     editorContentRevision &+= 1
@@ -431,6 +436,43 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    func closeDocument(_ id: String) {
+        if deferUntilReady({ [weak self] in guard let self else { return }; self.closeDocument(self.deferredPath(id)) }) { return }
+        do {
+            try flushLocalEdits()
+            if documents.first(where: { $0.id == id })?.dirty == true {
+                let alert = NSAlert()
+                alert.messageText = "Save changes to “\((id as NSString).lastPathComponent)”?"
+                alert.informativeText = "Your changes will be lost if you close without saving."
+                alert.addButton(withTitle: "Save")
+                alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Discard Changes")
+                switch alert.runModal() {
+                case .alertFirstButtonReturn: apply(try core.saveDocument(id: id))
+                case .alertThirdButtonReturn:
+                    apply(try core.discardAndCloseDocument(id: id))
+                    errorMessage = nil
+                    return
+                default: return
+                }
+            }
+            apply(try core.closeDocument(id: id))
+            errorMessage = nil
+        } catch { errorMessage = "Save changes before closing this tab. \(error.localizedDescription)" }
+    }
+
+    func saveAllDocuments() {
+        if deferUntilReady({ [weak self] in self?.saveAllDocuments() }) { return }
+        do {
+            try flushLocalEdits()
+            apply(try core.saveAllDocuments())
+            errorMessage = nil
+        } catch {
+            if let snapshot = try? core.snapshot() { apply(snapshot) }
+            errorMessage = error.localizedDescription
+        }
+    }
+
     func saveDocument() {
         if deferUntilReady({ [weak self] in self?.saveDocument() }) { return }
         guard let id = activeDocument?.id else { return }
@@ -469,6 +511,13 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
+    private func clearSearchSelection() {
+        guard selectedSearchLocation != nil || selectedSearchResultIndex != nil else { return }
+        selectedSearchLocation = nil
+        selectedSearchResultIndex = nil
+        searchNavigationRevision &+= 1
+    }
+
     private func flushLocalEdits() throws {
         guard let activeDocument, editorText != activeDocument.content else { return }
         apply(try core.changeDocument(id: activeDocument.id, content: editorText))
@@ -498,6 +547,7 @@ final class WorkspaceStore: ObservableObject {
         if searchInProgress != snapshot.searchInProgress { searchInProgress = snapshot.searchInProgress }
         if searchTruncated != snapshot.searchTruncated { searchTruncated = snapshot.searchTruncated }
         if directories != snapshot.directories { directories = snapshot.directories }
+        if openDocuments != snapshot.openDocuments { openDocuments = snapshot.openDocuments }
         if documents != snapshot.documents { documents = snapshot.documents }
         if pathsChanged {
             var protected = Set(snapshot.directories)
@@ -511,7 +561,10 @@ final class WorkspaceStore: ObservableObject {
         if changedIDs != externalChangeIDs { externalChangeIDs = changedIDs }
         if activeDocument?.id != snapshot.activeDocument?.id {
             let relocated = activeDocument.map { pendingRelocation?.path($0.id) == snapshot.activeDocument?.id } ?? false
-            if !relocated { editorDocumentIdentity &+= 1 }
+            if !relocated {
+                editorDocumentIdentity &+= 1
+                clearSearchSelection()
+            }
         }
         if activeDocument != snapshot.activeDocument { activeDocument = snapshot.activeDocument }
         let content = snapshot.activeDocument?.content ?? ""

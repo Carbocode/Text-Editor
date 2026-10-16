@@ -50,6 +50,7 @@ pub struct DocumentSnapshot {
 #[derive(Clone, uniffi::Record)]
 pub struct OpenedDocument {
     pub revision: u64,
+    pub open_documents: Vec<String>,
     pub document: DocumentSnapshot,
 }
 
@@ -92,6 +93,7 @@ pub struct WorkspaceSnapshot {
     pub search_truncated: bool,
     pub directories: Vec<String>,
     pub documents: Vec<DocumentSummary>,
+    pub open_documents: Vec<String>,
     pub active_document: Option<DocumentSnapshot>,
 }
 
@@ -143,6 +145,11 @@ impl From<AppSnapshot> for WorkspaceSnapshot {
                     external_change: doc.external_change,
                 })
                 .collect(),
+            open_documents: snapshot
+                .open_documents
+                .into_iter()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
             active_document: snapshot.active_document.map(|doc| DocumentSnapshot {
                 id: doc.id.as_str().to_owned(),
                 title: doc.title,
@@ -162,7 +169,7 @@ pub enum WorkspaceError {
     DocumentNotFound(String),
     #[error("document is not open: {0}")]
     DocumentNotOpen(String),
-    #[error("save modified documents before changing workspaces")]
+    #[error("save modified documents before changing workspaces or closing tabs")]
     UnsavedChanges,
     #[error("save all modified documents in this file or folder before deleting it")]
     DeleteUnsavedChanges,
@@ -406,6 +413,11 @@ impl WorkspaceApplication {
             .active_document
             .ok_or_else(|| WorkspaceError::DocumentNotOpen(id.as_str().to_owned()))?;
         Ok(OpenedDocument {
+            open_documents: snapshot
+                .open_documents
+                .into_iter()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
             revision: snapshot.revision,
             document: DocumentSnapshot {
                 id: document.id.as_str().to_owned(),
@@ -426,6 +438,19 @@ impl WorkspaceApplication {
             id: Self::parse_id(id)?,
             content,
         })
+    }
+
+    pub fn discard_and_close_document(
+        &self,
+        id: String,
+    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::DiscardAndCloseDocument(Self::parse_id(id)?))
+    }
+    pub fn close_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::CloseDocument(Self::parse_id(id)?))
+    }
+    pub fn save_all_documents(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+        self.dispatch(AppCommand::SaveAllDocuments)
     }
 
     pub fn save_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {

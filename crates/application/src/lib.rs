@@ -70,11 +70,13 @@ pub enum AppCommand {
     PollWorkspaceChanges,
     OpenDocument(DocumentId),
     CloseDocument(DocumentId),
+    DiscardAndCloseDocument(DocumentId),
     ChangeDocument {
         id: DocumentId,
         content: String,
     },
     SaveDocument(DocumentId),
+    SaveAllDocuments,
     ReloadDocument(DocumentId),
     OverwriteDocument(DocumentId),
 }
@@ -95,8 +97,10 @@ impl AppCommand {
             Self::RefreshWorkspace => "command.workspace_refresh",
             Self::PollWorkspaceChanges => "command.workspace_poll",
             Self::OpenDocument(_) => "command.document_open",
+            Self::DiscardAndCloseDocument(_) => "command.document_discard_close",
             Self::CloseDocument(_) => "command.document_close",
             Self::ChangeDocument { .. } => "command.document_change",
+            Self::SaveAllDocuments => "command.document_save_all",
             Self::SaveDocument(_) => "command.document_save",
             Self::ReloadDocument(_) => "command.document_reload",
             Self::OverwriteDocument(_) => "command.document_overwrite",
@@ -243,6 +247,8 @@ pub struct AppSnapshot {
     pub search_truncated: bool,
     pub directories: Arc<Vec<String>>,
     pub documents: Arc<Vec<DocumentSummary>>,
+    /// Open tabs in insertion order, independent of the workspace file listing.
+    pub open_documents: Vec<DocumentId>,
     pub active_document: Option<DocumentSnapshot>,
 }
 
@@ -312,6 +318,7 @@ pub struct AppState {
     search_touched: HashSet<DocumentId>,
     directories: Vec<String>,
     documents: Vec<DocumentEntry>,
+    open_documents: Vec<DocumentId>,
     active_document: Option<DocumentId>,
     /// Lists published by the last snapshot. Unchanged lists keep the same
     /// `Arc`, so frontends skip reconverting tens of thousands of paths.
@@ -389,6 +396,7 @@ impl AppState {
                     )
                 })
                 .clone(),
+            open_documents: self.open_documents.clone(),
             active_document,
         }
     }
@@ -433,6 +441,9 @@ impl AppState {
                             .strip_prefix(id.as_str())
                             .is_some_and(|suffix| suffix.starts_with('/'))
                 };
+                for open in &mut self.open_documents {
+                    *open = DocumentId::parse(renamed_path(open.as_str(), id, target)).unwrap();
+                }
                 for entry in &mut self.documents {
                     if affected(entry.id.as_str()) {
                         entry.id =
@@ -531,6 +542,7 @@ impl AppState {
                 directories,
                 recent_workspaces,
             } => {
+                self.open_documents.clear();
                 self.workspace = Some(workspace.clone());
                 self.search_query = SearchQuery::default();
                 self.search_in_progress = false;
@@ -589,10 +601,30 @@ impl AppState {
                 entry.external_change = false;
                 self.refresh_search_result(id);
             }
-            AppEvent::DocumentOpened { id } => self.active_document = Some(id.clone()),
+            AppEvent::DocumentOpened { id } => {
+                if !self.open_documents.contains(id) {
+                    self.open_documents.push(id.clone());
+                }
+                self.active_document = Some(id.clone());
+            }
             AppEvent::DocumentClosed { id } => {
-                debug_assert_eq!(self.active_document.as_ref(), Some(id));
-                self.active_document = None;
+                let index = self.open_documents.iter().position(|open| open == id);
+                self.open_documents.retain(|open| open != id);
+                if self.active_document.as_ref() == Some(id) {
+                    self.active_document = index
+                        .and_then(|i| {
+                            self.open_documents
+                                .get(i.min(self.open_documents.len().saturating_sub(1)))
+                        })
+                        .cloned();
+                }
+                let entry = self.document_mut(id);
+                entry.content = None;
+                entry.saved_content = None;
+                entry.external_change = false;
+                self.published_documents = OnceLock::new();
+                self.published_search_results = OnceLock::new();
+                self.refresh_search_result(id);
             }
             AppEvent::DocumentChanged { id, content } => {
                 let entry = self.document_mut(id);
@@ -612,6 +644,16 @@ impl AppState {
                 entry.saved_content = entry.content.clone();
                 entry.external_change = false;
                 self.refresh_search_result(id);
+            }
+        }
+        if matches!(
+            event,
+            AppEvent::EntryDeleted { .. } | AppEvent::WorkspaceRefreshed { .. }
+        ) {
+            self.open_documents
+                .retain(|id| self.documents.iter().any(|entry| &entry.id == id));
+            if self.active_document.is_none() {
+                self.active_document = self.open_documents.last().cloned();
             }
         }
     }
@@ -780,6 +822,7 @@ fn remap_command(command: AppCommand, source: &DocumentId, target: &DocumentId) 
         AppCommand::DeleteEntry(id) => AppCommand::DeleteEntry(map(id)),
         AppCommand::OpenDocument(id) => AppCommand::OpenDocument(map(id)),
         AppCommand::CloseDocument(id) => AppCommand::CloseDocument(map(id)),
+        AppCommand::DiscardAndCloseDocument(id) => AppCommand::DiscardAndCloseDocument(map(id)),
         AppCommand::SaveDocument(id) => AppCommand::SaveDocument(map(id)),
         AppCommand::ReloadDocument(id) => AppCommand::ReloadDocument(map(id)),
         AppCommand::OverwriteDocument(id) => AppCommand::OverwriteDocument(map(id)),
@@ -1176,6 +1219,7 @@ impl Application {
                     return Ok(Vec::new());
                 }
                 AppCommand::ChangeDocument { .. }
+                | AppCommand::DiscardAndCloseDocument(_)
                 | AppCommand::CloseDocument(_)
                 | AppCommand::IncrementDiagnostic => {}
                 _ => {
@@ -1184,11 +1228,23 @@ impl Application {
                 }
             }
         }
+        // Commit each save separately so an error never hides earlier successful writes.
+        if matches!(command, AppCommand::SaveAllDocuments) {
+            let ids: Vec<_> = self.state.open_documents.clone();
+            let mut events = Vec::new();
+            for id in ids {
+                events.extend(self.execute_inner(AppCommand::SaveDocument(id))?);
+            }
+            return Ok(events);
+        }
         let queued_query = matches!(command, AppCommand::QueueSearchQuery(_));
         let synchronous_query = matches!(command, AppCommand::SetSearchQuery(_));
         let explicit_refresh = matches!(
             command,
-            AppCommand::RefreshWorkspace | AppCommand::DeleteEntry(_)
+            AppCommand::RefreshWorkspace
+                | AppCommand::DeleteEntry(_)
+                | AppCommand::CloseDocument(_)
+                | AppCommand::DiscardAndCloseDocument(_)
         );
         let next_revision = self
             .state
@@ -1611,6 +1667,13 @@ impl Application {
                 }
                 events
             }
+            AppCommand::DiscardAndCloseDocument(id) => {
+                if self.state.open_documents.contains(&id) {
+                    vec![AppEvent::DocumentClosed { id }]
+                } else {
+                    Vec::new()
+                }
+            }
             AppCommand::CloseDocument(id) => {
                 let entry = self
                     .state
@@ -1621,7 +1684,7 @@ impl Application {
                 if entry.dirty() {
                     return Err(AppError::UnsavedChanges);
                 }
-                if self.state.active_document.as_ref() == Some(&id) {
+                if self.state.open_documents.contains(&id) {
                     vec![AppEvent::DocumentClosed { id }]
                 } else {
                     Vec::new()
@@ -1648,6 +1711,7 @@ impl Application {
                     vec![AppEvent::DocumentChanged { id, content }]
                 }
             }
+            AppCommand::SaveAllDocuments => unreachable!("handled before resolution"),
             AppCommand::SaveDocument(id) => {
                 let root = &self
                     .state
@@ -2825,3 +2889,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod document_tabs_tests;

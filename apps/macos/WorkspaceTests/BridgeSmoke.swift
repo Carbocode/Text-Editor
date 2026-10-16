@@ -110,9 +110,29 @@ struct BridgeSmoke {
         precondition(FileManager.default.fileExists(atPath: directory.appendingPathComponent("delete-test/note").path))
         _ = try app.saveDocument(id: "delete-test/note")
         let deleted = try app.deleteEntry(path: "delete-test")
-        precondition(deleted.activeDocument == nil)
+        precondition(deleted.activeDocument?.id == "todo.md")
+        precondition(!deleted.openDocuments.contains("delete-test/note"))
         precondition(!deleted.directories.contains("delete-test"))
         precondition(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("delete-test").path))
+        // Tabs expose order through both snapshot and fast-open APIs.
+        let tabs = WorkspaceApplication()
+        _ = try tabs.openWorkspace(path: directory.path)
+        _ = try tabs.openDocument(id: "README.md")
+        let second = try tabs.openDocumentFast(id: "todo.md")
+        precondition(second.openDocuments == ["README.md", "todo.md"])
+        _ = try tabs.changeDocument(id: "README.md", content: "tab edit")
+        var closeBlocked = false
+        do { _ = try tabs.closeDocument(id: "README.md") } catch { closeBlocked = true }
+        precondition(closeBlocked)
+        let allSaved = try tabs.saveAllDocuments()
+        precondition(allSaved.documents.allSatisfy { !$0.dirty })
+        let closedInactive = try tabs.closeDocument(id: "README.md")
+        precondition(closedInactive.activeDocument?.id == "todo.md")
+        _ = try tabs.changeDocument(id: "todo.md", content: "discard me")
+        let closedLast = try tabs.discardAndCloseDocument(id: "todo.md")
+        precondition(closedLast.openDocuments.isEmpty && closedLast.activeDocument == nil)
+        let reopenedTab = try tabs.openDocumentFast(id: "todo.md")
+        precondition(reopenedTab.document.content == "unsaved move")
         print("Swift → UniFFI → Rust workspace smoke test passed")
     }
 }

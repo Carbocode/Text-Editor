@@ -67,6 +67,12 @@ struct NoWrapTextEditor: NSViewRepresentable {
             if pathChanged {
                 container.fileName = documentID
             }
+            if switchedDocument {
+                // The same NSTextView serves every tab. Never replay another
+                // document's edits, even when both buffers contain equal text.
+                textView.breakUndoCoalescing()
+                textView.undoManager?.removeAllActions()
+            }
             let changedText = textView.string != text
             if changedText {
                 textView.string = text

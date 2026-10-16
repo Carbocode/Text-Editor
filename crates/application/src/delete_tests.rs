@@ -35,7 +35,11 @@ fn deletes_subtree_closes_its_documents_and_keeps_siblings_and_dirty_buffers() {
         matches!(&outcome.events[0], AppEvent::EntryDeleted { id: deleted } if deleted == &id("notes"))
     );
     assert!(!dir.path().join("notes").exists());
-    assert!(outcome.snapshot.active_document.is_none());
+    assert_eq!(
+        outcome.snapshot.active_document.unwrap().id,
+        id("notes-other")
+    );
+    assert_eq!(outcome.snapshot.open_documents, [id("notes-other")]);
     assert!(outcome.snapshot.directories.is_empty());
     assert_eq!(outcome.snapshot.documents.len(), 1);
     assert_eq!(outcome.snapshot.documents[0].id, id("notes-other"));

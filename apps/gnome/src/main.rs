@@ -40,6 +40,7 @@ struct Ui {
     search_truncated: gtk::Label,
     watching_search: Rc<Cell<bool>>,
     conflict_banner: gtk::Box,
+    document_tabs: gtk::Box,
     editor: gtk::TextView,
     editor_chrome: editor_chrome::EditorChrome,
     buffer: gtk::TextBuffer,
@@ -170,6 +171,8 @@ impl Ui {
                 }
             }
             Err(error) => {
+                let snapshot = self.core.borrow().snapshot();
+                self.render(snapshot);
                 self.status.set_label(&error.to_string());
                 self.home_error.set_label(&error.to_string());
             }
@@ -293,6 +296,54 @@ impl Ui {
         }
     }
 
+    fn request_close_document(&self, id: DocumentId) {
+        if !self
+            .snapshot
+            .borrow()
+            .documents
+            .iter()
+            .any(|doc| doc.id == id && doc.dirty)
+        {
+            self.dispatch(AppCommand::CloseDocument(id));
+            return;
+        }
+        let dialog = adw::AlertDialog::builder()
+            .heading(format!("Save changes to “{}”?", id.as_str()))
+            .body("Your changes will be lost if you close without saving.")
+            .build();
+        dialog.add_responses(&[
+            ("cancel", "Cancel"),
+            ("discard", "Discard Changes"),
+            ("save", "Save"),
+        ]);
+        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("save"));
+        dialog.set_close_response("cancel");
+        let root = self.snapshot.borrow().workspace_root.clone();
+        let ui = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if ui.snapshot.borrow().workspace_root != root {
+                return;
+            }
+            if response == "discard" {
+                ui.dispatch(AppCommand::DiscardAndCloseDocument(id.clone()));
+            }
+            if response == "save" {
+                ui.dispatch(AppCommand::SaveDocument(id.clone()));
+                if !ui
+                    .snapshot
+                    .borrow()
+                    .documents
+                    .iter()
+                    .any(|d| d.id == id && d.dirty)
+                {
+                    ui.dispatch(AppCommand::CloseDocument(id.clone()));
+                }
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
     fn confirm_delete(&self, path: String) {
         if self.core.borrow().has_pending_move() {
             return;
@@ -414,6 +465,56 @@ impl Ui {
                 );
             }
         }
+        let tabs_changed = {
+            let previous = self.snapshot.borrow();
+            previous.open_documents != snapshot.open_documents
+                || previous.active_document.as_ref().map(|d| &d.id)
+                    != snapshot.active_document.as_ref().map(|d| &d.id)
+                || previous.documents != snapshot.documents
+        };
+        if tabs_changed {
+            while let Some(child) = self.document_tabs.first_child() {
+                self.document_tabs.remove(&child);
+            }
+            for id in &snapshot.open_documents {
+                let dirty = snapshot.documents.iter().any(|d| &d.id == id && d.dirty);
+                let title = id.as_str().rsplit('/').next().unwrap_or(id.as_str());
+                let button = gtk::ToggleButton::with_label(&format!(
+                    "{title}{}",
+                    if dirty { " •" } else { "" }
+                ));
+                button.set_tooltip_text(Some(id.as_str()));
+                button.set_active(
+                    snapshot
+                        .active_document
+                        .as_ref()
+                        .is_some_and(|d| &d.id == id),
+                );
+                let ui = self.clone();
+                let target = id.clone();
+                button.connect_clicked(move |button| {
+                    ui.dispatch(AppCommand::OpenDocument(target.clone()));
+                    // Clicking the selected toggle must not visually deselect
+                    // the document when opening it is a no-op (or fails).
+                    button.set_active(
+                        ui.snapshot
+                            .borrow()
+                            .active_document
+                            .as_ref()
+                            .is_some_and(|d| d.id == target),
+                    );
+                });
+                self.document_tabs.append(&button);
+                let close = gtk::Button::from_icon_name("window-close-symbolic");
+                close.set_tooltip_text(Some(&format!("Close {}", id.as_str())));
+                let ui = self.clone();
+                let target = id.clone();
+                close.connect_clicked(move |_| {
+                    ui.request_close_document(target.clone());
+                });
+                self.document_tabs.append(&close);
+            }
+        }
         let recent_changed = self.snapshot.borrow().recent_workspaces != snapshot.recent_workspaces;
         let workspace_changed = self.snapshot.borrow().workspace_root != snapshot.workspace_root;
         if workspace_changed {
@@ -524,8 +625,25 @@ impl Ui {
                 .active_document
                 .as_ref()
                 .map(|doc| doc.id.as_str().rsplit('/').next().unwrap());
+        let previous = self.snapshot.borrow();
+        let previous_id = previous.active_document.as_ref().map(|doc| &doc.id);
+        let next_id = snapshot.active_document.as_ref().map(|doc| &doc.id);
+        let switched_document = previous_id != next_id
+            && !(previous.open_documents.len() == snapshot.open_documents.len()
+                && previous_id
+                    .is_some_and(|id| !snapshot.documents.iter().any(|doc| &doc.id == id)));
+        drop(previous);
+        if switched_document {
+            // Equal text does not invoke set_text, so explicitly end the old
+            // document's undo history before reusing the native buffer.
+            self.buffer.begin_irreversible_action();
+        }
         if content_changed {
             self.buffer.set_text(content);
+        }
+        if switched_document {
+            self.buffer.end_irreversible_action();
+            self.buffer.place_cursor(&self.buffer.start_iter());
         }
         if content_changed || language_changed {
             syntax::apply(
@@ -1570,6 +1688,17 @@ fn build_window(app: &adw::Application) {
     conflict_banner.append(&overwrite);
     conflict_banner.set_visible(false);
     let content_body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let document_tabs = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let tabs_scroll = gtk::ScrolledWindow::new();
+    tabs_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    tabs_scroll.set_hexpand(true);
+    tabs_scroll.set_child(Some(&document_tabs));
+    let tabs_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    tabs_row.append(&tabs_scroll);
+    let save_all = gtk::Button::with_label("Save All");
+    save_all.set_action_name(Some("app.save-all"));
+    tabs_row.append(&save_all);
+    content_body.append(&tabs_row);
     content_body.append(&conflict_banner);
     editor_scroll.set_vexpand(true);
     let editor_chrome = editor_chrome::wrap(&editor, &editor_scroll);
@@ -1688,6 +1817,7 @@ fn build_window(app: &adw::Application) {
         search_truncated,
         watching_search: Rc::new(Cell::new(false)),
         conflict_banner,
+        document_tabs,
         editor,
         editor_chrome,
         buffer,
@@ -1991,6 +2121,13 @@ fn build_window(app: &adw::Application) {
         });
         app.add_action(&save_action);
         app.set_accels_for_action("app.save", &["<Primary>s"]);
+    }
+    {
+        let ui = ui.clone();
+        let action = gio::SimpleAction::new("save-all", None);
+        action.connect_activate(move |_, _| ui.dispatch(AppCommand::SaveAllDocuments));
+        app.add_action(&action);
+        app.set_accels_for_action("app.save-all", &["<Primary><Shift>s"]);
     }
     if let Some(error) = persistence_error {
         ui.status.set_label(&error);
@@ -2806,6 +2943,63 @@ fn build_window(app: &adw::Application) {
             );
             println!("GTK drag-and-drop/buffer smoke test passed");
             println!("GTK workspace edit/save smoke test passed");
+            for name in ["tab-review-a.txt", "tab-review-b.txt"] {
+                ui.dispatch(AppCommand::CreateEntry {
+                    id: DocumentId::parse(name).unwrap(),
+                    directory: false,
+                });
+                ui.dispatch(AppCommand::OpenDocument(DocumentId::parse(name).unwrap()));
+            }
+            let mut child = ui.document_tabs.first_child();
+            let mut checked_active = false;
+            while let Some(widget) = child {
+                child = widget.next_sibling();
+                if let Ok(button) = widget.downcast::<gtk::ToggleButton>() {
+                    if button.tooltip_text().as_deref() == Some("tab-review-b.txt") {
+                        assert!(button.is_active());
+                        button.emit_clicked();
+                        assert!(
+                            button.is_active(),
+                            "Clicking the active tab removed its selection"
+                        );
+                        checked_active = true;
+                        break;
+                    }
+                }
+            }
+            assert!(checked_active, "No active document tab was rendered");
+            println!("GTK active document tab remains selected after repeated clicks");
+            ui.buffer.set_text("edited");
+            ui.dispatch(AppCommand::SaveAllDocuments);
+            ui.dispatch(AppCommand::OpenDocument(
+                DocumentId::parse("tab-review-a.txt").unwrap(),
+            ));
+            ui.buffer.begin_user_action();
+            ui.buffer.insert(&mut ui.buffer.end_iter(), "edited");
+            ui.buffer.end_user_action();
+            assert!(
+                ui.buffer.can_undo(),
+                "Fixture must contain an undoable edit"
+            );
+            ui.dispatch(AppCommand::OpenDocument(
+                DocumentId::parse("tab-review-b.txt").unwrap(),
+            ));
+            assert!(
+                !ui.buffer.can_undo(),
+                "Undo history leaked between equal document buffers"
+            );
+            ui.buffer.begin_user_action();
+            ui.buffer.insert(&mut ui.buffer.end_iter(), "!");
+            ui.buffer.end_user_action();
+            ui.dispatch(AppCommand::RenameEntry {
+                id: DocumentId::parse("tab-review-b.txt").unwrap(),
+                new_name: "tab-review-renamed.txt".into(),
+            });
+            assert!(
+                ui.buffer.can_undo(),
+                "Rename cleared the current document's undo history"
+            );
+            println!("GTK document tab undo isolation/rename smoke test passed");
         }
         if std::env::var_os("NATIVE_WORKSPACE_SMOKE_RECORD_DROP").is_some() {
             let app = app.clone();
