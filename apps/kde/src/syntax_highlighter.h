@@ -22,6 +22,7 @@ public:
     void setSpans(const QStringList& spans);
     QList<QColor> colors() const { return colors_; }
     void setColors(const QList<QColor>& colors);
+    Q_INVOKABLE void clearUndoHistory();
 
 private:
     QPointer<QQuickTextDocument> document_;

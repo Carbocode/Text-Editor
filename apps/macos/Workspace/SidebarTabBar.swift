@@ -34,5 +34,6 @@ struct SidebarTabBar: View {
         .glassEffect(.regular, in: Capsule())
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Sidebar")
+        .accessibilityIdentifier("sidebarTabBar")
     }
 }

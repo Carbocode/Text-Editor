@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import Darwin
 import Foundation
 import SwiftUI
@@ -53,6 +54,7 @@ struct WorkspaceDragLatencySmoke {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("workspace-drag-latency-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root.appendingPathComponent("src"), withIntermediateDirectories: true)
         try "source\n".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "notes\n".write(to: root.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
         try "fn main() {}\n".write(to: root.appendingPathComponent("src/main.rs"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: root) }
         let queue = DispatchQueue(label: "workspace.drag-latency.backend")
@@ -92,6 +94,118 @@ struct WorkspaceDragLatencySmoke {
               let destination = sourceView("src", in: window.contentView),
               let state = source.configuration?.state else {
             fatalError("Actual workspace sidebar did not expose the source and destination rows")
+        }
+        store.openDocument("README.md")
+        func editorContainer(in view: NSView?) -> EditorContainer? {
+            guard let view else { return nil }
+            if let editor = view as? EditorContainer { return editor }
+            return view.subviews.lazy.compactMap { editorContainer(in: $0) }.first
+        }
+        pump(until: { editorContainer(in: window.contentView) != nil }, timeout: 3)
+        window.contentView?.layoutSubtreeIfNeeded()
+        let editorHeight = editorContainer(in: window.contentView)!.bounds.height
+        precondition(editorHeight > window.contentView!.bounds.height * 0.7,
+            "Document tabs consume editor space: editor height \(editorHeight), window height \(window.contentView!.bounds.height)")
+        let originalEditor = editorContainer(in: window.contentView)!
+        func editorReady(_ path: String) -> Bool {
+            originalEditor.fileName == path
+                && (originalEditor.textView?.delegate as? NoWrapTextEditor.Coordinator)?.documentIdentity == store.editorDocumentIdentity
+        }
+        func tabPoint(_ index: Int, close: Bool = false) -> NSPoint {
+            let editorFrame = originalEditor.convert(originalEditor.bounds, to: nil)
+            return NSPoint(x: editorFrame.minX + BonsplitTabBarMetrics.barPadding
+                + CGFloat(index) * (BonsplitTabBarMetrics.tabMinWidth + BonsplitTabBarMetrics.tabSpacing)
+                + (close ? BonsplitTabBarMetrics.tabMinWidth - 12 : 40),
+                y: editorFrame.maxY + BonsplitTabBarMetrics.barHeight / 2)
+        }
+        func click(_ point: NSPoint, count: Int = 1) {
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: count, pressure: type == .leftMouseDown ? 1 : 0)!
+                window.sendEvent(event)
+            }
+        }
+        store.openDocument("src/main.rs")
+        pump(until: { editorReady("src/main.rs") }, timeout: 3)
+        pump(until: { false }, timeout: 0.15)
+        precondition(editorContainer(in: window.contentView) === originalEditor, "Switching tabs replaced the editor")
+        click(tabPoint(0))
+        pump(until: { store.activeDocument?.id == "README.md" && editorReady("README.md") }, timeout: 3)
+        precondition(store.activeDocument?.id == "README.md", "Tab click did not open its document")
+        click(tabPoint(1))
+        pump(until: { store.activeDocument?.id == "src/main.rs" && editorReady("src/main.rs") }, timeout: 3)
+        precondition(store.activeDocument?.id == "src/main.rs", "Second tab click did not open its document")
+        let tabText = originalEditor.textView!
+        window.makeFirstResponder(tabText)
+        tabText.insertText("// edited", replacementRange: NSRange(location: 0, length: 0))
+        tabText.breakUndoCoalescing()
+        tabText.setSelectedRange(NSRange(location: 0, length: 2))
+        precondition(tabText.undoManager?.canUndo == true)
+        let identityBeforeRename = store.editorDocumentIdentity
+        precondition(store.renameEntry("src/main.rs", newName: "renamed.rs"))
+        pump(until: { !store.backendBusy && originalEditor.fileName == "src/renamed.rs" }, timeout: 3)
+        precondition(editorContainer(in: window.contentView) === originalEditor, "Native rename replaced the editor")
+        precondition(tabText.selectedRange() == NSRange(location: 0, length: 2) && tabText.undoManager?.canUndo == true,
+            "Native tabs lost selection or undo history during rename: selection=\(tabText.selectedRange()), undo=\(String(describing: tabText.undoManager?.canUndo)), identity=\(identityBeforeRename)→\(store.editorDocumentIdentity)")
+        store.saveDocument()
+        store.openDocument("README.md")
+        pump(until: { editorReady("README.md") }, timeout: 3)
+        pump(until: { false }, timeout: 0.15)
+        click(tabPoint(0, close: true))
+        pump(until: { !store.openDocuments.contains("README.md") }, timeout: 3)
+        precondition(!store.openDocuments.contains("README.md"), "Tab close button did not close its document")
+        store.openDocument("README.md")
+        pump(until: { editorReady("README.md") }, timeout: 3)
+        store.openDocument("notes.md")
+        pump(until: { editorReady("notes.md") }, timeout: 3)
+        store.openDocument("README.md")
+        pump(until: { editorReady("README.md") }, timeout: 3)
+        print("macOS document tab selection/close/editor identity/rename smoke test passed")
+        store.closeDocument("notes.md")
+        pump(until: { !store.openDocuments.contains("notes.md") }, timeout: 3)
+        let notesRow = sourceView("notes.md", in: window.contentView)!
+        let notesPoint = notesRow.convert(NSPoint(x: notesRow.bounds.midX, y: notesRow.bounds.midY), to: nil)
+        click(notesPoint)
+        pump(until: { store.previewDocument == "notes.md" && editorReady("notes.md") }, timeout: 3)
+        precondition(store.previewDocument == "notes.md", "Sidebar single click did not open a preview")
+        click(notesPoint, count: 2)
+        pump(until: { store.previewDocument == nil }, timeout: 3)
+        precondition(store.previewDocument == nil && store.openDocuments.contains("notes.md") && store.activeDocument?.id == "notes.md",
+            "Sidebar double click did not keep the file open")
+        store.closeDocument("notes.md")
+        store.openDocument("notes.md", preview: true)
+        pump(until: { store.previewDocument == "notes.md" && editorReady("notes.md") }, timeout: 3)
+        pump(until: { false }, timeout: 0.15)
+        click(tabPoint(2))
+        click(tabPoint(2), count: 2)
+        pump(until: { store.previewDocument == nil }, timeout: 3)
+        precondition(store.previewDocument == nil && store.openDocuments.contains("notes.md") && store.activeDocument?.id == "notes.md",
+            "Tab double click did not keep the preview open")
+        precondition(!window.isMiniaturized, "Double-clicking a document tab minimized the window")
+        store.closeDocument("notes.md")
+        store.openDocument("notes.md", preview: true)
+        pump(until: { editorReady("notes.md") }, timeout: 3)
+        print("macOS native sidebar preview/double-click/tab keep-open smoke test passed")
+        if let capture = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_SMOKE_SCREENSHOT"] {
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            app.activate(ignoringOtherApps: true)
+            window.displayIfNeeded()
+            print("macOS capture window: visible=\(window.isVisible), minimized=\(window.isMiniaturized), number=\(window.windowNumber), frame=\(window.frame)")
+            pump(until: { false }, timeout: 0.3)
+            if CGPreflightScreenCaptureAccess() {
+                let task = Process()
+                task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                task.arguments = ["-x", "-l", String(window.windowNumber), capture]
+                try task.run()
+                task.waitUntilExit()
+                precondition(task.terminationStatus == 0, "Could not capture the smoke window")
+            } else if let content = window.contentView,
+                      let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: capture))
+            }
         }
         let destinationPoint = destination.convert(NSPoint(x: min(100, destination.bounds.width / 2), y: destination.bounds.midY), to: nil)
         var pendingAt: TimeInterval?

@@ -61,6 +61,10 @@ void EditorSyntaxHighlighter::setTextDocument(QQuickTextDocument* document) {
     }
 }
 
+void EditorSyntaxHighlighter::clearUndoHistory() {
+    if (document_ && document_->textDocument()) document_->textDocument()->clearUndoRedoStacks();
+}
+
 void EditorSyntaxHighlighter::setSpans(const QStringList& spans) {
     if (spans_ == spans) return;
     spans_ = spans;

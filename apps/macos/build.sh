@@ -25,6 +25,8 @@ if [ "${NATIVE_WORKSPACE_DEVTOOLS_BUILD:-1}" = "1" ]; then
   chmod +x "$legacy_launcher.tmp.$$"
   mv "$legacy_launcher.tmp.$$" "$legacy_launcher"
 fi
+mkdir -p apps/macos/.build/NativeWorkspace.app/Contents/Resources/licenses
+cp apps/macos/ThirdParty/Bonsplit/LICENSE apps/macos/.build/NativeWorkspace.app/Contents/Resources/licenses/Bonsplit.txt
 cp apps/macos/Info.plist apps/macos/.build/NativeWorkspace.app/Contents/Info.plist
 cp assets/material-icon-theme/png/*.png apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons/
 cp assets/material-icon-theme/manifest.json apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons/

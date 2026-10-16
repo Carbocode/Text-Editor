@@ -486,9 +486,6 @@ impl Interactions {
                     {
                         (callbacks.collapse)(&path);
                     }
-                } else if !folder && selected {
-                    gesture.set_state(gtk::EventSequenceState::Claimed);
-                    state.begin_rename(&path);
                 }
             });
         }

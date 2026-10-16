@@ -248,9 +248,12 @@ impl NativeApplication {
         if let AppCommand::MoveEntryOptimistic { id, directory } = command {
             return self.dispatch_sidebar_move(id, directory, true, SidebarDropTrace::default());
         }
-        let result = self.core.as_mut().unwrap().dispatch(command)?;
-        self.cached = result.clone();
-        Ok(result)
+        let result = self.core.as_mut().unwrap().dispatch(command);
+        self.cached = match &result {
+            Ok(snapshot) => snapshot.clone(),
+            Err(_) => self.core.as_ref().unwrap().snapshot(),
+        };
+        result
     }
     pub fn dispatch_if_changed(
         &mut self,
@@ -345,6 +348,16 @@ fn project_paths(snapshot: &mut AppSnapshot, source: &DocumentId, target: &Docum
             *title = id.as_str().to_owned();
         }
     };
+    for id in &mut snapshot.open_documents {
+        if affected(id.as_str()) {
+            *id = DocumentId::parse(renamed_path(id.as_str(), source, target)).unwrap();
+        }
+    }
+    if let Some(id) = &mut snapshot.preview_document
+        && affected(id.as_str())
+    {
+        *id = DocumentId::parse(renamed_path(id.as_str(), source, target)).unwrap();
+    }
     let documents = Arc::make_mut(&mut snapshot.documents);
     for doc in documents.iter_mut() {
         remap(&mut doc.id, &mut doc.title);
@@ -375,6 +388,9 @@ fn project_paths(snapshot: &mut AppSnapshot, source: &DocumentId, target: &Docum
 }
 
 fn project_edit(snapshot: &mut AppSnapshot, id: &DocumentId, content: &str) {
+    if snapshot.preview_document.as_ref() == Some(id) {
+        snapshot.preview_document = None;
+    }
     if let Some(doc) = &mut snapshot.active_document
         && &doc.id == id
     {

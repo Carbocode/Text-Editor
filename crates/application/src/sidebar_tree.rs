@@ -129,6 +129,8 @@ mod tests {
             .collect();
         documents.sort_by(|left, right| left.id.cmp(&right.id));
         AppSnapshot {
+            open_documents: Vec::new(),
+            preview_document: None,
             diagnostic_operation: 0,
             revision: 0,
             diagnostic_counter: 0,

@@ -18,7 +18,6 @@ struct HomeView: View {
             HStack {
                 Button("Open Folder…", systemImage: "folder.badge.plus") { choosingWorkspace = true }
                     .buttonStyle(.borderedProminent).controlSize(.large)
-                    .keyboardShortcut("o", modifiers: .command)
                 if store.workspaceName != nil {
                     Button("Resume Workspace", systemImage: "arrow.right") { openWindow(id: "workspace") }
                         .controlSize(.large)
@@ -54,13 +53,16 @@ struct HomeView: View {
             }
             Spacer(minLength: 0)
             if let error = store.errorMessage { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            if store.diagnosticsEnabled {
-                Button("Developer Tools", systemImage: "waveform.path.ecg") { store.openDevtools() }
-            }
         }
         .padding(.top, 24)
         .padding(28)
         .frame(minWidth: 520, minHeight: 440)
+        .toolbar {
+            ToolbarSpacer(.flexible, placement: .primaryAction)
+            ToolbarItem(placement: .primaryAction) {
+                ApplicationMenu(store: store, openFolder: { choosingWorkspace = true })
+            }
+        }
         .fileImporter(isPresented: $choosingWorkspace, allowedContentTypes: [.folder]) { result in
             if case .success(let url) = result { open(url) }
         }

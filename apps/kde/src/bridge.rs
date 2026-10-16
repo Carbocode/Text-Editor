@@ -37,6 +37,9 @@ pub mod qobject {
         #[qproperty(QStringList, file_filter_files)]
         #[qproperty(QStringList, file_filter_directories)]
         #[qproperty(bool, file_filter_in_progress)]
+        #[qproperty(bool, snapshot_updating)]
+        #[qproperty(QString, preview_document_id)]
+        #[qproperty(QStringList, open_document_ids)]
         #[qproperty(QStringList, document_ids)]
         #[qproperty(QStringList, directory_ids)]
         #[qproperty(QStringList, dirty_document_ids)]
@@ -52,6 +55,9 @@ pub mod qobject {
         #[qproperty(bool, deletion_pending)]
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
+
+        #[qsignal]
+        fn document_switched(self: Pin<&mut Self>);
 
         #[qinvokable]
         fn open_devtools(self: Pin<&mut Self>);
@@ -106,6 +112,10 @@ pub mod qobject {
         #[qinvokable]
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
+        fn preview_document(self: Pin<&mut Self>, id: &QString);
+        #[qinvokable]
+        fn keep_document_open(self: Pin<&mut Self>, id: &QString);
+        #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
         #[qinvokable]
         fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList;
@@ -113,6 +123,14 @@ pub mod qobject {
         fn minimap_glyphs(self: Pin<&mut Self>) -> QString;
         #[qinvokable]
         fn save_document(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn save_all_documents(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn close_document(self: Pin<&mut Self>, id: &QString);
+        #[qinvokable]
+        fn discard_and_close_document(self: Pin<&mut Self>, id: &QString);
+        #[qinvokable]
+        fn save_and_close_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
         fn reload_document(self: Pin<&mut Self>);
         #[qinvokable]
@@ -139,6 +157,9 @@ pub struct AppControllerRust {
     file_filter_files: QStringList,
     file_filter_directories: QStringList,
     file_filter_in_progress: bool,
+    snapshot_updating: bool,
+    open_document_ids: QStringList,
+    preview_document_id: QString,
     document_ids: QStringList,
     directory_ids: QStringList,
     dirty_document_ids: QStringList,
@@ -256,9 +277,12 @@ impl qobject::AppController {
                 self.as_mut().set_error_message(QString::default());
                 self.as_mut().update_snapshot(snapshot);
             }
-            Err(error) => self
-                .as_mut()
-                .set_error_message(QString::from(error.to_string())),
+            Err(error) => {
+                let snapshot = self.rust().application.snapshot();
+                self.as_mut().update_snapshot(snapshot);
+                self.as_mut()
+                    .set_error_message(QString::from(error.to_string()));
+            }
         }
         self.as_mut().sync_pending_move();
         self.as_mut().report_background_error();
@@ -288,7 +312,25 @@ impl qobject::AppController {
     }
 
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
+        self.as_mut().set_snapshot_updating(true);
         self.as_mut().sync_pending_move();
+        let previous_id = self.rust().active_document_id.to_string();
+        let next_id = snapshot
+            .active_document
+            .as_ref()
+            .map_or("", |doc| doc.id.as_str());
+        if previous_id != next_id {
+            let relocated = snapshot.open_documents.len() as isize
+                == self.rust().open_document_ids.len()
+                && !previous_id.is_empty()
+                && !snapshot
+                    .documents
+                    .iter()
+                    .any(|doc| doc.id.as_str() == previous_id);
+            if !relocated {
+                self.as_mut().document_switched();
+            }
+        }
         let diagnostic_started = self
             .rust()
             .application
@@ -467,6 +509,19 @@ impl qobject::AppController {
                     .collect(),
             );
         }
+        self.as_mut().set_open_document_ids(
+            snapshot
+                .open_documents
+                .iter()
+                .map(|id| QString::from(id.as_str()))
+                .collect(),
+        );
+        self.as_mut().set_preview_document_id(QString::from(
+            snapshot
+                .preview_document
+                .as_ref()
+                .map_or("", |id| id.as_str()),
+        ));
         match snapshot.active_document {
             Some(doc) => {
                 self.as_mut()
@@ -484,6 +539,7 @@ impl qobject::AppController {
                 self.as_mut().set_active_document_external_change(false);
             }
         }
+        self.as_mut().set_snapshot_updating(false);
         if let Some(started) = diagnostic_started {
             self.rust().application.diagnostic_snapshot_applied(
                 diagnostic_operation,
@@ -759,39 +815,34 @@ impl qobject::AppController {
     pub fn open_document(mut self: Pin<&mut Self>, id: &QString) {
         match DocumentId::parse(id.to_string()) {
             Ok(id) => {
-                if !self.rust().search_query.to_string().trim().is_empty() {
-                    self.dispatch(AppCommand::OpenDocument(id));
-                    return;
-                }
-                let result = self
-                    .as_mut()
-                    .rust_mut()
-                    .application
-                    .dispatch(AppCommand::OpenDocument(id));
-                match result {
-                    Ok(snapshot) => {
-                        self.as_mut().set_error_message(QString::default());
-                        self.as_mut().set_revision(snapshot.revision);
-                        if let Some(doc) = snapshot.active_document {
-                            self.as_mut()
-                                .set_active_document_id(QString::from(doc.id.as_str()));
-                            self.as_mut()
-                                .set_active_document_text(QString::from(doc.content));
-                            self.as_mut().set_active_document_dirty(doc.dirty);
-                            self.as_mut()
-                                .set_active_document_external_change(doc.external_change);
-                        }
-                    }
-                    Err(error) => self
-                        .as_mut()
-                        .set_error_message(QString::from(error.to_string())),
-                }
+                self.as_mut().dispatch(AppCommand::OpenDocument(id));
             }
             Err(_) => self
                 .as_mut()
                 .set_error_message(QString::from("Invalid document name")),
         }
         self.as_mut().sync_pending_move();
+        self.as_mut().report_background_error();
+    }
+
+    pub fn preview_document(mut self: Pin<&mut Self>, id: &QString) {
+        match DocumentId::parse(id.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::PreviewDocument(id)),
+            Err(_) => self
+                .as_mut()
+                .set_error_message(QString::from("Invalid document name")),
+        }
+        self.as_mut().sync_pending_move();
+        self.as_mut().report_background_error();
+    }
+
+    pub fn keep_document_open(mut self: Pin<&mut Self>, id: &QString) {
+        match DocumentId::parse(id.to_string()) {
+            Ok(id) => self.as_mut().dispatch(AppCommand::KeepDocumentOpen(id)),
+            Err(_) => self
+                .as_mut()
+                .set_error_message(QString::from("Invalid document name")),
+        }
         self.as_mut().report_background_error();
     }
 
@@ -825,6 +876,29 @@ impl qobject::AppController {
             Err(_) => self
                 .as_mut()
                 .set_error_message(QString::from("No document is open")),
+        }
+    }
+
+    pub fn discard_and_close_document(self: Pin<&mut Self>, id: &QString) {
+        if let Ok(id) = DocumentId::parse(id.to_string()) {
+            self.dispatch(AppCommand::DiscardAndCloseDocument(id));
+        }
+    }
+    pub fn save_and_close_document(mut self: Pin<&mut Self>, id: &QString) {
+        if let Ok(id) = DocumentId::parse(id.to_string()) {
+            self.as_mut().dispatch(AppCommand::SaveDocument(id.clone()));
+            if self.rust().error_message.to_string().is_empty() {
+                self.dispatch(AppCommand::CloseDocument(id));
+            }
+        }
+    }
+
+    pub fn save_all_documents(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::SaveAllDocuments);
+    }
+    pub fn close_document(self: Pin<&mut Self>, id: &QString) {
+        if let Ok(id) = DocumentId::parse(id.to_string()) {
+            self.dispatch(AppCommand::CloseDocument(id));
         }
     }
 

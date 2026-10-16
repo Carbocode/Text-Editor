@@ -3,5 +3,9 @@
   <gresource prefix="/org/nativeworkspace/icons/scalable/actions">
     <file>native-workspace-branch-symbolic.svg</file>
     <file>native-workspace-bookmark-symbolic.svg</file>
+    <file>native-workspace-modified-symbolic.svg</file>
+    <file>native-workspace-save-all-symbolic.svg</file>
+    <file>native-workspace-new-file-symbolic.svg</file>
+    <file>native-workspace-quit-symbolic.svg</file>
   </gresource>
 </gresources>

@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @ObservedObject var store: WorkspaceStore
     @State private var choosingWorkspace = false
-    @Environment(\.openWindow) private var openWindow
+    @State private var editorFontSize = NSFont.systemFontSize
     @State private var resolvingExternalChange = false
     @State private var deletePath = ""
     @State private var confirmingDelete = false
@@ -271,13 +271,8 @@ struct ContentView: View {
         case .file(let group):
             Button {
                 if renamePath != group.id {
-                    if selectedDirectory == nil && store.selectedSearchResultIndex == nil
-                        && store.activeDocument.map({ store.presentationPath($0.id) }) == group.id {
-                        beginRename(group.id)
-                    } else {
-                        selectedDirectory = nil
-                        store.openSearchFile(group.id)
-                    }
+                    selectedDirectory = nil
+                    store.openSearchFile(group.id)
                 }
             } label: {
                 HStack(spacing: 8) {
@@ -286,6 +281,14 @@ struct ContentView: View {
                     entryName(group.id).opacity(isPendingMove(group.id) ? 0.5 : 1)
                     Spacer(minLength: 0)
                     pendingMoveIndicator(group.id)
+                    if store.openDocuments.contains(where: { store.presentationPath($0) == group.id }) {
+                        Image(systemName: "eye")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Open in editor")
+                            .accessibilityIdentifier("sidebarOpen:" + group.id)
+                            .help("Open in editor")
+                    }
                     if store.externalChangeIDs.contains(where: { store.presentationPath($0) == group.id }) {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
@@ -296,6 +299,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture(count: 2).onEnded { store.openDocument(group.id) })
             .background(nativeDragSource(group.id, directory: false))
             .overlay(nativeDropTarget(parentDirectory(group.id)))
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
@@ -326,6 +330,7 @@ struct ContentView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .simultaneousGesture(TapGesture(count: 2).onEnded { store.keepDocumentOpen(match.result.id) })
             .overlay {
                 if selectedDirectory == nil && store.selectedSearchResultIndex == match.index {
                     SidebarRowHighlight()
@@ -519,9 +524,10 @@ struct ContentView: View {
     }
 
     private var sidebarHeader: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 0) {
             SidebarTabBar(selection: $sidebarTab)
             .frame(maxWidth: .infinity)
+            .frame(height: BonsplitTabBarMetrics.barHeight)
             .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
             if sidebarTab == 1 {
                 HStack(spacing: 8) {
@@ -535,6 +541,7 @@ struct ContentView: View {
                 }
                 .padding(10)
                 .glassEffect(.regular, in: Capsule())
+                .padding(.bottom, 8)
                 if store.searchTruncated {
                     Text("Showing the first 20,000 matches. Refine the search to see the rest.")
                         .font(.caption)
@@ -544,7 +551,6 @@ struct ContentView: View {
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
     }
 
     var body: some View {
@@ -686,10 +692,39 @@ struct ContentView: View {
         } detail: {
             editorDetail
                 .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text(store.workspaceName ?? "Native Workspace")
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .sharedBackgroundVisibility(.hidden)
+                    ToolbarSpacer(.flexible, placement: .primaryAction)
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button("Decrease Text Size", systemImage: "textformat.size.smaller") { editorFontSize -= 1 }
+                            .disabled(editorFontSize <= 8)
+                            .help("Decrease Text Size")
+                        Text("\(Int((editorFontSize / NSFont.systemFontSize * 100).rounded()))%")
+                            .monospacedDigit()
+                            .frame(minWidth: 44)
+                            .accessibilityLabel("Text Zoom")
+                        Button("Increase Text Size", systemImage: "textformat.size.larger") { editorFontSize += 1 }
+                            .disabled(editorFontSize >= 40)
+                            .help("Increase Text Size")
+                    }
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        Button("Save", systemImage: "square.and.arrow.down") { store.saveDocument() }
+                            .disabled(!store.canSaveActiveDocument)
+                            .accessibilityIdentifier("saveDocument")
+                        Button("Save All", systemImage: "square.and.arrow.down.on.square") { store.saveAllDocuments() }
+                    }
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
                     ToolbarItem(placement: .primaryAction) {
-                        Button("Home", systemImage: "house") { openWindow(id: "home") }
+                        ApplicationMenu(store: store, openFolder: { choosingWorkspace = true })
                     }
                 }
+                .toolbar(removing: .title)
         }
         }
         }
@@ -734,57 +769,72 @@ struct ContentView: View {
     }
 
     private var editorDetail: some View {
-            VStack(spacing: 0) {
-                if let active = store.activeDocument {
-                    if active.externalChange {
-                        HStack(spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text("This file changed on disk")
-                            Spacer()
-                            Button("Resolve…") { resolvingExternalChange = true }
-                        }
-                        .font(.callout)
-                        .padding(8)
-                    }
-                    NoWrapTextEditor(documentID: active.id, documentIdentity: store.editorDocumentIdentity,
-                                     textRevision: store.editorContentRevision,
-                                     text: Binding(
-                        get: { store.editorText },
-                        set: { store.changeDocument($0) }
-                    ), searchRange: store.selectedSearchRange,
-                       searchNavigationRevision: store.searchNavigationRevision)
-                } else {
-                    VStack(spacing: 16) {
-                        ContentUnavailableView(
-                            store.workspaceName == nil ? "Open a Workspace" : "Select a Document",
-                            systemImage: store.workspaceName == nil ? "folder" : "doc.text",
-                            description: Text(store.workspaceName == nil ? "Choose a directory containing Markdown or text files." : "Choose a file in the sidebar.")
-                        )
-                        if store.workspaceName == nil {
-                            Button("Open Workspace") { choosingWorkspace = true }
-                                .buttonStyle(.glassProminent)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                if let error = store.errorMessage {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .padding(8)
-                }
-                Divider()
-                HStack {
-                    Text(store.activeDocument?.title ?? "No document")
-                    Spacer()
-                    Text(store.deletionPending ? "Deleting…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+        VStack(spacing: 0) {
+            DocumentTabs(documents: store.openDocuments, previewDocument: store.previewDocument,
+                         dirtyDocuments: Set(store.documents.filter(\.dirty).map(\.id)),
+                         selectedDocument: store.activeDocument?.id,
+                         select: { id in
+                             store.openDocument(id, preview: true)
+                             return store.activeDocument?.id == id
+                         }, close: { store.closeDocument($0) }, keepOpen: { store.keepDocumentOpen($0) }) {
+                editorPanel
             }
+        }
+    }
+
+    private var editorPanel: some View {
+        VStack(spacing: 0) {
+            if let active = store.activeDocument {
+                if active.externalChange {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("This file changed on disk")
+                        Spacer()
+                        Button("Resolve…") { resolvingExternalChange = true }
+                    }
+                    .font(.callout)
+                    .padding(8)
+                }
+                NoWrapTextEditor(documentID: active.id, documentIdentity: store.editorDocumentIdentity,
+                                 textRevision: store.editorContentRevision,
+                                 text: Binding(
+                    get: { store.editorText },
+                    set: { store.changeDocument($0) }
+                ), searchRange: store.selectedSearchRange,
+                   searchNavigationRevision: store.searchNavigationRevision,
+                   fontSize: editorFontSize)
+            } else {
+                VStack(spacing: 16) {
+                    ContentUnavailableView(
+                        store.workspaceName == nil ? "Open a Workspace" : "Select a Document",
+                        systemImage: store.workspaceName == nil ? "folder" : "doc.text",
+                        description: Text(store.workspaceName == nil ? "Choose a directory containing Markdown or text files." : "Choose a file in the sidebar.")
+                    )
+                    if store.workspaceName == nil {
+                        Button("Open Workspace") { choosingWorkspace = true }
+                            .buttonStyle(.glassProminent)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            if let error = store.errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .padding(8)
+            }
+            Divider()
+            HStack {
+                Text(store.activeDocument?.title ?? "No document")
+                Spacer()
+                Text(store.deletionPending ? "Deleting…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+        }
     }
 
     private func openWorkspace(_ url: URL) {

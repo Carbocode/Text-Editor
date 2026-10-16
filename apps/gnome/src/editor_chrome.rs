@@ -81,12 +81,23 @@ pub struct EditorChrome {
     model: Rc<RefCell<MinimapModel>>,
     buffer: gtk::TextBuffer,
     minimap: gtk::DrawingArea,
+    gutter: gtk::DrawingArea,
     cache: MinimapCache,
 }
 
 type MinimapCache = Rc<RefCell<Option<(i32, i32, i32, gtk::cairo::ImageSurface)>>>;
 
 impl EditorChrome {
+    pub fn font_size_changed(&self, editor: &gtk::TextView) {
+        let digits = editor.buffer().line_count().to_string().len().max(3);
+        let (width, _) = editor
+            .create_pango_layout(Some(&"0".repeat(digits)))
+            .pixel_size();
+        self.gutter.set_content_width((width + 16).max(48));
+        self.row.queue_resize();
+        self.row.queue_draw();
+    }
+
     pub fn set_file_name(&self, name: &str) {
         if self.file_name.borrow().as_str() == name {
             return;
@@ -188,7 +199,16 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
             gtk::cairo::FontSlant::Normal,
             gtk::cairo::FontWeight::Normal,
         );
-        context.set_font_size(11.0);
+        let font_size = view
+            .pango_context()
+            .font_description()
+            .and_then(|font| view.pango_context().load_font(&font))
+            .map(|font| {
+                f64::from(font.describe_with_absolute_size().size()) / f64::from(gtk::pango::SCALE)
+            })
+            .unwrap_or(13.0);
+        context.set_font_size((font_size - 2.0).max(8.0));
+        let font_extents = context.font_extents().ok();
         for line in first..buffer.line_count() {
             let Some(iter) = buffer.iter_at_line(line) else {
                 break;
@@ -202,10 +222,18 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
                 continue;
             }
             let label = (line + 1).to_string();
-            let width = context
+            let label_width = context
                 .text_extents(&label)
                 .map_or(0.0, |extents| extents.width());
-            context.move_to(42.0 - width, f64::from(draw_y + line_height - 3));
+            let baseline =
+                font_extents
+                    .as_ref()
+                    .map_or(f64::from(draw_y + line_height - 3), |font| {
+                        f64::from(draw_y)
+                            + (f64::from(line_height) - font.height()) / 2.0
+                            + font.ascent()
+                    });
+            context.move_to(f64::from(width) - 8.0 - label_width, baseline);
             let _ = context.show_text(&label);
         }
     });
@@ -403,6 +431,7 @@ pub fn wrap(editor: &gtk::TextView, scroll: &gtk::ScrolledWindow) -> EditorChrom
     row.append(&minimap);
     EditorChrome {
         row,
+        gutter,
         file_name,
         model,
         buffer,
