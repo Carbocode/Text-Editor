@@ -87,6 +87,11 @@ pub fn workspace_replacement_confirmation(occurrences: u64, files: u64) -> Confi
 }
 
 #[uniffi::export]
+pub fn workspace_terminal_confirmation() -> Confirmation {
+    native_workspace_application::terminal_close_confirmation().into()
+}
+
+#[uniffi::export]
 pub fn workspace_close_confirmation(value: String) -> Confirmation {
     native_workspace_application::close_confirmation(&value).into()
 }
@@ -201,6 +206,9 @@ impl From<SearchOptions> for native_workspace_application::SearchOptions {
 /// `snapshot` always includes every list. Commands and `poll` deliver deltas.
 #[derive(Clone, uniffi::Record)]
 pub struct WorkspaceUpdate {
+    pub terminal_only: bool,
+    pub terminal_json: String,
+    pub terminals_running: bool,
     pub diagnostic_operation: u64,
     pub revision: u64,
     pub editor_generation: u64,
@@ -231,6 +239,9 @@ pub struct WorkspaceUpdate {
 
 fn update(snapshot: &AppSnapshot, previous: Option<&AppSnapshot>) -> WorkspaceUpdate {
     WorkspaceUpdate {
+        terminal_only: false,
+        terminal_json: String::new(),
+        terminals_running: false,
         diagnostic_operation: snapshot.diagnostic_operation,
         revision: snapshot.revision,
         editor_generation: snapshot.editor_generation,
@@ -352,13 +363,31 @@ impl From<AppError> for WorkspaceError {
 }
 
 struct BridgeSession {
+    terminal_revision: u64,
     session: Session,
     delivered: Option<AppSnapshot>,
 }
 impl BridgeSession {
     fn deliver(&mut self, full: bool) -> WorkspaceUpdate {
         let snapshot = self.session.snapshot();
-        let result = update(&snapshot, if full { None } else { self.delivered.as_ref() });
+        let terminal_only = !full
+            && self
+                .delivered
+                .as_ref()
+                .is_some_and(|last| last.revision == snapshot.revision);
+        let mut view = snapshot.clone();
+        if terminal_only {
+            view.active_document = None;
+        }
+        let mut result = update(&view, if full { None } else { self.delivered.as_ref() });
+        result.terminal_only = terminal_only;
+        let terminal = self.session.terminal_snapshot();
+        if full || terminal.revision != self.terminal_revision {
+            result.terminal_json =
+                serde_json::to_string(&*terminal).expect("terminal snapshot serializes");
+        }
+        result.terminals_running = self.session.has_running_terminals();
+        self.terminal_revision = terminal.revision;
         self.delivered = Some(snapshot);
         result
     }
@@ -399,6 +428,7 @@ impl WorkspaceApplication {
         }
         Self {
             inner: Mutex::new(BridgeSession {
+                terminal_revision: 0,
                 session,
                 delivered: None,
             }),
@@ -464,14 +494,81 @@ impl WorkspaceApplication {
     pub fn poll(&self) -> Result<Option<WorkspaceUpdate>, WorkspaceError> {
         let mut bridge = self.lock()?;
         bridge.session.poll();
-        if bridge
-            .delivered
-            .as_ref()
-            .is_some_and(|s| s.revision == bridge.session.revision())
-        {
+        if bridge.delivered.as_ref().is_some_and(|s| {
+            s.revision == bridge.session.revision()
+                && bridge.terminal_revision == bridge.session.terminal_snapshot().revision
+        }) {
             return Ok(None);
         }
         Ok(Some(bridge.deliver(false)))
+    }
+    pub fn terminal_action(
+        &self,
+        action: String,
+        id: u64,
+        confirmed: bool,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        use native_workspace_application::TerminalCommand as T;
+        let command = match action.as_str() {
+            "new" => T::New,
+            "activate" => T::Activate(id),
+            "close" => T::Close { id, confirmed },
+            "close_all" => T::CloseAll { confirmed },
+            _ => {
+                return Err(native_workspace_application::AppError::Terminal(
+                    "Unknown terminal action".into(),
+                )
+                .into());
+            }
+        };
+        let mut bridge = self.lock()?;
+        bridge.session.terminal_command(command)?;
+        Ok(bridge.deliver(false))
+    }
+    pub fn terminal_input(
+        &self,
+        id: u64,
+        key: String,
+        text: String,
+        modifiers: u16,
+        paste: bool,
+    ) -> Result<(), WorkspaceError> {
+        use native_workspace_application::{TerminalCommand, TerminalInput, TerminalKey};
+        let input = if paste {
+            TerminalInput::Paste(text)
+        } else if key.is_empty() {
+            TerminalInput::Text(text)
+        } else {
+            TerminalInput::Key(TerminalKey {
+                key,
+                text,
+                modifiers,
+            })
+        };
+        self.lock()?
+            .session
+            .terminal_command(TerminalCommand::Input { id, input })?;
+        Ok(())
+    }
+    pub fn terminal_resize(&self, id: u64, cols: u16, rows: u16) -> Result<(), WorkspaceError> {
+        use native_workspace_application::{TerminalCommand, TerminalInput};
+        self.lock()?
+            .session
+            .terminal_command(TerminalCommand::Input {
+                id,
+                input: TerminalInput::Resize { cols, rows },
+            })?;
+        Ok(())
+    }
+    pub fn terminal_scroll(&self, id: u64, lines: i32) -> Result<(), WorkspaceError> {
+        use native_workspace_application::{TerminalCommand, TerminalInput};
+        self.lock()?
+            .session
+            .terminal_command(TerminalCommand::Input {
+                id,
+                input: TerminalInput::Scroll(lines),
+            })?;
+        Ok(())
     }
     pub fn filter_files(&self, query: String) -> Result<WorkspaceUpdate, WorkspaceError> {
         let mut bridge = self.lock()?;

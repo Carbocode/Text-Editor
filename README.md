@@ -49,11 +49,18 @@ positions and expanded folders are not restored. See
 [session restoration verification](docs/development.md#session-restoration-verification)
 and [ADR 0007](docs/adr/0007-session-restoration.md).
 
+Phase 12 adds an integrated terminal panel with independent tabs in each native
+frontend. New shells start in the workspace root; hiding the panel retains them.
+Ghostty's libghostty-vt provides shared emulation, with native rendering and shared
+PTY/process ownership through Session. Live terminal closure and application exit
+require confirmation. Close running terminals before changing workspace. Restarting
+the app does not restore processes. See [terminal verification](docs/development.md#integrated-terminal-verification).
+
 ## Planned phases
 
 The following work is planned:
 
-12. **Integrated terminal:** run commands in the current workspace from each native frontend.
+
 13. **Basic Git integration:** show changed files and diffs before committing.
 14. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
 

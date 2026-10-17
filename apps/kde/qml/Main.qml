@@ -31,13 +31,26 @@ Kirigami.ApplicationWindow {
     pageStack.initialPage: Kirigami.Page {
         title: controller.workspace_name
         padding: 0
+        SplitView {
+            anchors.fill: parent
+            orientation: Qt.Vertical
         WorkspacePane {
             id: workspacePane
             objectName: "workspacePane"
-            anchors.fill: parent
+            SplitView.fillHeight: true
             controller: controller
             enableBrowse: true
             onBrowseRequested: folderDialog.open()
+            onTerminalRequested: terminalPanel.toggle()
+        }
+        TerminalPanel {
+            id: terminalPanel
+            enabled: !workspacePane.terminalQuitPending
+            controller: controller
+            visible: false
+            SplitView.preferredHeight: 240
+            SplitView.minimumHeight: 120
+        }
         }
     }
 

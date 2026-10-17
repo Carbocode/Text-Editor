@@ -43,6 +43,7 @@ impl SidebarTab {
 pub(super) struct Ui {
     pub(super) window: adw::ApplicationWindow,
     pub(super) core: Rc<RefCell<Session>>,
+    pub(super) terminal: crate::terminal::TerminalPanel,
     pub(super) snapshot: Rc<RefCell<AppSnapshot>>,
     // Keep Files and Search models, selections and scroll positions alive across tab switches.
     pub(super) sidebars: [SidebarView; 2],
@@ -196,6 +197,7 @@ impl Ui {
 
     pub(super) fn poll_core(&self) {
         self.core.borrow_mut().poll();
+        self.terminal.refresh();
         if self.core.borrow().revision() != self.snapshot.borrow().revision {
             self.render_current();
         }
@@ -247,8 +249,8 @@ impl Ui {
             .dispatch(AppCommand::PrepareToQuit { save })
             .is_ok();
         self.render_current();
-        if ready && let Some(app) = self.window.application() {
-            app.quit();
+        if ready {
+            self.terminal.request_quit();
         }
     }
 

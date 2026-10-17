@@ -77,6 +77,15 @@ Save All steps before allowing termination. Saved tab layout survives discard;
 unsaved text and native presentation state are not persisted. See
 [ADR 0007](adr/0007-session-restoration.md).
 
+## Integrated terminals
+
+The existing Session owns transient terminal tabs and a separate terminal snapshot
+revision. `terminal.rs` reduces terminal lifecycle events independently of document
+state. The `terminal` I/O adapter owns PTY threads and libghostty-vt. Frontends draw
+immutable visible grids; they never parse terminal output or own shell processes.
+Session polls terminal updates even while filesystem work is active. See
+[ADR 0008](adr/0008-integrated-terminals.md).
+
 ## Tabs and errors
 
 Open tabs have visual order and at most one replaceable clean preview. Explicit opening, editing, saving, keeping open or reordering promotes the preview. Renames retain editor generation; switching documents advances it. Closing and deletion choose the visual neighbor. `SaveAndCloseDocument` saves before closing and stops on failure. `SaveAllDocuments` follows tab order and retains completed saves if another conflicts.

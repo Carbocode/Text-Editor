@@ -20,6 +20,7 @@ use std::{
 };
 
 pub(crate) struct Application {
+    pub(crate) live_terminals: Arc<std::sync::atomic::AtomicUsize>,
     state: AppState,
     pub(crate) filesystem: Arc<dyn WorkspaceFilesystem>,
     pub(crate) storage: Box<dyn MetadataStorage>,
@@ -53,6 +54,7 @@ impl Application {
         let filesystem: Arc<dyn WorkspaceFilesystem> = filesystem.into();
         Self {
             state: AppState::default(),
+            live_terminals: Arc::default(),
             search: SearchService::new(Arc::clone(&filesystem)),
             filesystem,
             storage: Box::new(MemoryStorage::default()),

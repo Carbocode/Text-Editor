@@ -39,7 +39,7 @@ final class WorkspaceAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
             return .terminateCancel
         }
         guard store.documents.contains(where: \.dirty) else {
-            return store.prepareToQuit(save: false) ? .terminateNow : .terminateCancel
+            return finishQuit(sender, save: false)
         }
         confirmingQuit = true
         defer { confirmingQuit = false }
@@ -52,11 +52,27 @@ final class WorkspaceAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
         alert.addButton(withTitle: prompt.discard)
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            return store.prepareToQuit(save: true) ? .terminateNow : .terminateCancel
+            return finishQuit(sender, save: true)
         case .alertThirdButtonReturn:
-            return store.prepareToQuit(save: false) ? .terminateNow : .terminateCancel
+            return finishQuit(sender, save: false)
         default: return .terminateCancel
         }
+    }
+
+    private func finishQuit(_ sender: NSApplication, save: Bool) -> NSApplication.TerminateReply {
+        guard store.prepareToQuit(save: save) else { return .terminateCancel }
+        guard store.terminalsRunning else { return .terminateNow }
+        confirmingQuit = true
+        defer { confirmingQuit = false }
+        let prompt = workspaceTerminalConfirmation()
+        let alert = NSAlert()
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.body
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: prompt.cancel)
+        guard alert.runModal() == .alertFirstButtonReturn else { return .terminateCancel }
+        store.stopTerminalsForQuit { sender.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
 
     func installPresentation(_ present: @escaping () -> Void) {

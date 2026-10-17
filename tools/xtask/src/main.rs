@@ -23,6 +23,8 @@ fn report(name: &str, ok: bool) {
 fn doctor(strict: Option<&str>) -> ExitCode {
     let rust = available("rustc", &["--version"]);
     let cargo = available("cargo", &["--version"]);
+    let zig_program = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    let zig = available(&zig_program, &["version"]);
     let uniffi =
         std::fs::read_to_string("Cargo.lock").is_ok_and(|lock| lock.contains("name = \"uniffi\""));
     let xcode = available("xcodebuild", &["-version"]);
@@ -48,6 +50,7 @@ fn doctor(strict: Option<&str>) -> ExitCode {
     println!("native-workspace development environment\n\nRust");
     report("rustc", rust);
     report("cargo", cargo);
+    report("Zig 0.16 (terminal)", zig);
     report("UniFFI crate", uniffi);
     println!("\nmacOS");
     report("xcodebuild", xcode);
@@ -60,14 +63,24 @@ fn doctor(strict: Option<&str>) -> ExitCode {
     report("cmake", cmake);
     report("Qt6", qt);
     report("Kirigami", kirigami);
-    let all =
-        rust && cargo && uniffi && xcode && swift && pkg && gtk && adw && cmake && qt && kirigami;
+    let all = rust
+        && cargo
+        && zig
+        && uniffi
+        && xcode
+        && swift
+        && pkg
+        && gtk
+        && adw
+        && cmake
+        && qt
+        && kirigami;
     println!("\nStatus: {}", if all { "complete" } else { "partial" });
     let pass = match strict {
         None => true,
-        Some("macos") => rust && cargo && uniffi && xcode && swift,
-        Some("gnome") => rust && cargo && pkg && gtk && adw,
-        Some("kde") => rust && cargo && cmake && qt && kirigami,
+        Some("macos") => rust && cargo && zig && uniffi && xcode && swift,
+        Some("gnome") => rust && cargo && zig && pkg && gtk && adw,
+        Some("kde") => rust && cargo && zig && cmake && qt && kirigami,
         Some(_) => false,
     };
     if pass {

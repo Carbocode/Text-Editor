@@ -12,6 +12,7 @@ default = ["devtools"]
 devtools = ["native-workspace-application/devtools"]
 
 [dependencies]
+serde_json = "1"
 native-workspace-application = { path = "../application" }
 native-workspace-domain = { path = "../domain" }
 native-workspace-syntax = { path = "../syntax" }

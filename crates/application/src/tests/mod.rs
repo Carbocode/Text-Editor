@@ -10,6 +10,7 @@ mod restore;
 mod search;
 mod session;
 mod system_open;
+mod terminal;
 
 use crate::*;
 use native_workspace_domain::DocumentId;

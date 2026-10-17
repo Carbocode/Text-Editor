@@ -9,6 +9,8 @@ default = []
 devtools = ["dep:native-workspace-devtools-producer"]
 
 [dependencies]
+native-workspace-terminal = { path = "../terminal" }
+serde = { version = "1", features = ["derive", "rc"] }
 native-workspace-devtools-producer = { path = "../devtools", optional = true }
 native-workspace-domain = { path = "../domain" }
 native-workspace-filesystem = { path = "../filesystem" }

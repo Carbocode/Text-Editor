@@ -11,6 +11,11 @@ extension Relocation {
 /// AppKit presentation state. Execution, optimistic state and errors belong to Session.
 @MainActor
 final class WorkspaceStore: ObservableObject {
+    @Published private(set) var terminals = TerminalPanelState()
+    @Published var terminalVisible = false
+    @Published private(set) var terminalsRunning = false
+    @Published private(set) var terminalQuitPending = false
+    private var terminalQuitCompletion: (@MainActor @Sendable () -> Void)?
     @Published private(set) var revision: UInt64 = 0
     @Published private(set) var workspaceName: String?
     @Published private(set) var workspaceRoot: String?
@@ -81,7 +86,7 @@ final class WorkspaceStore: ObservableObject {
         let timer = Timer(timeInterval: 0.016, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
-                let fast = self.backendBusy || self.searchInProgress || self.fileFilterInProgress
+                let fast = self.backendBusy || self.searchInProgress || self.fileFilterInProgress || self.terminalsRunning
                 if fast || Date().timeIntervalSince(self.lastIdlePoll) >= 0.25 {
                     self.poll()
                     self.lastIdlePoll = Date()
@@ -93,6 +98,26 @@ final class WorkspaceStore: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    func stopTerminalsForQuit(_ completion: @escaping @MainActor @Sendable () -> Void) {
+        terminalQuitPending = true
+        terminalQuitCompletion = completion
+        terminalAction("close_all", confirmed: true)
+    }
+    func terminalAction(_ action: String, id: UInt64 = 0, confirmed: Bool = false) {
+        request { try core.terminalAction(action: action, id: id, confirmed: confirmed) }
+        if action == "new" { terminalVisible = true }
+    }
+    func terminalInput(_ id: UInt64, key: String = "", text: String = "", modifiers: UInt16 = 0, paste: Bool = false) {
+        do { try core.terminalInput(id: id, key: key, text: text, modifiers: modifiers, paste: paste) }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func terminalResize(_ id: UInt64, cols: Int, rows: Int) {
+        do { try core.terminalResize(id: id, cols: UInt16(clamping: min(500, max(2, cols))), rows: UInt16(clamping: min(200, max(1, rows)))) }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func terminalScroll(_ id: UInt64, lines: Int32) {
+        do { try core.terminalScroll(id: id, lines: lines) } catch { errorMessage = error.localizedDescription }
+    }
     func openDevtools() {
         if !core.openDevtools() { errorMessage = "Developer Tools are busy. Try again after the current operation finishes." }
     }
@@ -228,6 +253,10 @@ final class WorkspaceStore: ObservableObject {
         }
     }
     private func apply(_ snapshot: WorkspaceUpdate) {
+        terminalsRunning = snapshot.terminalsRunning
+        if !terminalsRunning, let completion = terminalQuitCompletion { terminalQuitCompletion = nil; DispatchQueue.main.async(execute: completion) }
+        if let data = snapshot.terminalJson.data(using: .utf8), let value = try? JSONDecoder().decode(TerminalPanelState.self, from: data), value.revision != terminals.revision { terminals = value }
+        if snapshot.terminalOnly { return }
         let started = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
         defer { if let started { core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started) } }
         let sidebarChanged = snapshot.documents != nil || snapshot.directories != nil || snapshot.searchResults != nil
