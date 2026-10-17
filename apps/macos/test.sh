@@ -82,6 +82,7 @@ swiftc -parse-as-library -I apps/macos/generated \
   -Xcc -fmodule-map-file=apps/macos/generated/native_workspace_ffi_swiftFFI.modulemap \
   apps/macos/generated/native_workspace_ffi_swift.swift \
   apps/macos/Workspace/WorkspaceStore.swift \
+  apps/macos/Workspace/TerminalPanel.swift \
   apps/macos/Workspace/SystemOpen.swift \
   apps/macos/Workspace/WorkspaceIcons.swift \
   apps/macos/Workspace/SidebarInteractionState.swift \

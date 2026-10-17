@@ -265,8 +265,8 @@ program such as `vi`; check arrows, Tab, Ctrl-C, Unicode, colors and the alterna
 screen. Select text with the mouse; use Cmd-C/V on macOS or Ctrl-Shift-C/V on Linux.
 Scroll to inspect retained output. The first version uses a native CPU renderer;
 Kitty graphics, terminal search UI, shell integration and process restoration are
-not exposed. Each window permits at most 16 tabs, 10,000 scrollback lines and
-8 MiB of scrollback per terminal; individual input messages are limited to 64 KiB.
+not exposed. Each window permits at most 16 tabs. Ghostty scrollback budgets are configured to
+10,000 lines and 8 MiB per terminal, enforced at its allocation-page granularity; individual input messages are limited to 64 KiB.
 
 Generate sustained output in one tab while typing in another and editing a file.
 Filesystem moves must not pause terminal input/output. Close a running tab:

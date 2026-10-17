@@ -60,6 +60,7 @@ Item {
     }
     Dialog {
         id: closeDialog
+        width: 420
         parent: Overlay.overlay
         anchors.centerIn: parent
         modal: true

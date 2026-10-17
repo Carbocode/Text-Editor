@@ -1133,6 +1133,7 @@ Item {
     }
     Dialog {
         id: terminalQuitDialog
+        width: 420
         parent: root.showingHome ? homeWindow.Overlay.overlay : root.Overlay.overlay
         anchors.centerIn: parent
         modal: true

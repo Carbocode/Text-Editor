@@ -231,7 +231,7 @@ impl Terminals {
 pub fn terminal_close_confirmation() -> crate::Confirmation {
     crate::Confirmation {
         title: "Terminate terminal processes?".into(),
-        body: "The shell and programs running in this terminal will be terminated.",
+        body: "The shells and programs in the selected terminals will be terminated.",
         confirm: "Terminate",
         cancel: "Cancel",
         discard: "",

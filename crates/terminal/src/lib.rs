@@ -593,7 +593,15 @@ mod tests {
                 .vt_write(b"A line of sustained output\r\n");
         }
         emulator.terminal.vt_write(b"LAST_FRAME");
-        assert!(emulator.terminal.scrollback_rows().unwrap() <= 100);
+        // Ghostty prunes whole pages and retains at least one historical page.
+        // Repeated output must plateau instead of retaining every input line.
+        let retained = emulator.terminal.scrollback_rows().unwrap();
+        assert!(retained < 1000, "retained {retained} rows");
+        for _ in 0..1000 {
+            emulator.terminal.vt_write(b"More sustained output\r\n");
+        }
+        assert!(emulator.terminal.scrollback_rows().unwrap() < 1000);
+        emulator.terminal.vt_write(b"LAST_FRAME");
         assert!(text(&emulator.frame().unwrap()).contains("LAST_FRAME"));
         emulator
             .terminal

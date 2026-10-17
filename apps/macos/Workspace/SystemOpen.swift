@@ -33,7 +33,7 @@ final class WorkspaceAppDelegate: NSObject, NSApplicationDelegate, ObservableObj
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard !confirmingQuit else { return .terminateCancel }
+        guard !confirmingQuit && !store.terminalQuitPending else { return .terminateCancel }
         if store.backendBusy {
             store.prepareToQuit(save: false)
             return .terminateCancel

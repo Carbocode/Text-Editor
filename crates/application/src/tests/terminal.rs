@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn failed_save_on_quit_keeps_documents_and_running_terminals() {
+    let dir = workspace(&[("a.txt", "original")]);
+    let mut session = Session::with_application(open(dir.path(), TestFilesystem::real()));
+    session
+        .dispatch(AppCommand::OpenDocument(id("a.txt")))
+        .unwrap();
+    session.terminal_command(TerminalCommand::New).unwrap();
+    let terminal = session.terminal_snapshot().active;
+    session
+        .dispatch(AppCommand::ChangeDocument {
+            id: id("a.txt"),
+            content: "unsaved edits".into(),
+        })
+        .unwrap();
+    fs::write(dir.path().join("a.txt"), "external change").unwrap();
+    assert!(matches!(
+        session.dispatch(AppCommand::PrepareToQuit { save: true }),
+        Err(AppError::ExternalChanges(_))
+    ));
+    assert!(session.snapshot().active_document.unwrap().dirty);
+    assert_eq!(session.terminal_snapshot().active, terminal);
+    assert!(session.has_running_terminals());
+    session
+        .terminal_command(TerminalCommand::CloseAll { confirmed: true })
+        .unwrap();
+    wait_until(
+        || {
+            session.poll();
+            session.has_running_terminals()
+        },
+        |running| !*running,
+    );
+}
+
+#[test]
 fn terminal_tabs_are_independent_and_do_not_change_document_revisions() {
     let dir = workspace(&[("a.txt", "content")]);
     let mut session = Session::with_application(open(dir.path(), TestFilesystem::real()));
