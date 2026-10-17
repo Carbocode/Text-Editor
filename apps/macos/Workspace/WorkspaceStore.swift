@@ -2,26 +2,51 @@ import Foundation
 import Combine
 import AppKit
 
+extension Relocation {
+    func path(_ value: String) -> String {
+        workspacePathRebase(value: value, source: source, target: target)
+    }
+}
+
+/// AppKit presentation state. Execution, optimistic state and errors belong to Session.
 @MainActor
 final class WorkspaceStore: ObservableObject {
-    @Published private(set) var counter: UInt64 = 0
     @Published private(set) var revision: UInt64 = 0
     @Published private(set) var workspaceName: String?
     @Published private(set) var workspaceRoot: String?
     @Published private(set) var recentWorkspaces: [RecentWorkspace] = []
-    /// The query whose results are shown. The search field shows `searchFieldText`,
-    /// which typing updates at once while the core searches in the background.
     @Published private(set) var searchQuery = ""
     @Published private(set) var searchFieldText = ""
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var searchInProgress = false
-    /// The search stopped at the core's result limit.
     @Published private(set) var searchTruncated = false
     @Published private(set) var directories: [String] = []
+    @Published private(set) var documents: [DocumentSummary] = []
+    @Published private(set) var fileFilterQuery = ""
+    @Published private(set) var fileFilterInProgress = false
     @Published private(set) var sidebarRevision: UInt64 = 0
     @Published private(set) var selectedSearchLocation: SearchLocation?
     @Published private(set) var selectedSearchResultIndex: Int?
     @Published private(set) var searchNavigationRevision: UInt64 = 0
+    @Published private(set) var openDocuments: [String] = []
+    @Published private(set) var previewDocument: String?
+    @Published private(set) var externalChangeIDs: Set<String> = []
+    @Published private(set) var activeDocument: DocumentSnapshot?
+    @Published private(set) var editorText = ""
+    private(set) var editorContentRevision: UInt64 = 0
+    private(set) var editorDocumentIdentity: UInt64 = 0
+    @Published private(set) var errorMessage: String?
+    @Published private(set) var pendingRelocation: Relocation?
+    @Published private(set) var relocationSlow = false
+    @Published private(set) var deletionPending = false
+    private(set) var backendBusy = false
+    private let core: WorkspaceApplication
+    let diagnosticsEnabled: Bool
+    private var timer: Timer?
+    private var lastIdlePoll = Date.distantPast
+    private var sidebarDropTrace: WorkspaceDropTrace?
+    private var sidebarDropTarget: String?
+    private var sidebarDropAccepting = false
 
     var selectedSearchRange: NSRange? {
         guard let location = selectedSearchLocation,
@@ -29,45 +54,34 @@ final class WorkspaceStore: ObservableObject {
               let end = Int(exactly: location.endUtf16), end >= start else { return nil }
         return NSRange(location: start, length: end - start)
     }
-    @Published private(set) var openDocuments: [String] = []
-    @Published private(set) var previewDocument: String?
-    @Published private(set) var documents: [DocumentSummary] = []
-    @Published private(set) var externalChangeIDs: Set<String> = []
-    @Published private(set) var activeDocument: DocumentSnapshot?
-    @Published private(set) var editorText = ""
-    private(set) var editorContentRevision: UInt64 = 0
-    private(set) var editorDocumentIdentity: UInt64 = 0
-    @Published private(set) var errorMessage: String?
-
-    struct Relocation: Equatable {
-        let source: String
-        let target: String
-        func path(_ path: String) -> String {
-            if path == source { return target }
-            if path.hasPrefix(source + "/") { return target + path.dropFirst(source.count) }
-            return path
-        }
+    var hasDirtyActiveDocument: Bool { activeDocument?.dirty ?? false }
+    var canSaveActiveDocument: Bool {
+        guard let activeDocument else { return false }
+        return activeDocument.dirty || previewDocument == activeDocument.id
     }
-    @Published private(set) var pendingRelocation: Relocation?
-    @Published private(set) var deletionPending = false
-    private(set) var backendBusy = false
-    private let core: WorkspaceApplication
-    let diagnosticsEnabled: Bool
-    private let operationQueue: DispatchQueue
-    private var deferredActions: [() -> Void] = []
-    private var queuedSearchQuery: String?
-    private var searchSubmissionDeferred = false
-    private var committedRelocation: Relocation?
-    private var failedRelocation: Relocation?
-    private var relocationFailure: String?
-    private var protectedPaths: Set<String> = []
-    private var sidebarDragging = false
-    private var sidebarRenaming = false
-    private var sidebarDropTrace: WorkspaceDropTrace?
-    private var sidebarDropTarget: String?
-    private var sidebarDropAccepting = false
-    private var diagnosticHeartbeat: Timer?
 
+    init(core: WorkspaceApplication = WorkspaceApplication(), persistence: Bool = true) {
+        self.core = core
+        diagnosticsEnabled = core.devtoolsAvailable()
+        request { try persistence ? core.enablePersistence() : core.snapshot() }
+        let timer = Timer(timeInterval: 0.016, repeats: true) { [weak self] timer in
+            MainActor.assumeIsolated {
+                guard let self else { timer.invalidate(); return }
+                let fast = self.backendBusy || self.searchInProgress || self.fileFilterInProgress
+                if fast || Date().timeIntervalSince(self.lastIdlePoll) >= 0.25 {
+                    self.poll()
+                    self.lastIdlePoll = Date()
+                }
+                self.core.diagnosticUiHeartbeat()
+            }
+        }
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func openDevtools() {
+        if !core.openDevtools() { errorMessage = "Developer Tools are busy. Try again after the current operation finishes." }
+    }
     func beginSidebarDrop() {
         sidebarDropTrace = core.devtoolsEnabled() ? core.beginSidebarDrop(origin: 1) : nil
         sidebarDropAccepting = true
@@ -81,515 +95,131 @@ final class WorkspaceStore: ObservableObject {
     func sidebarDropRowReady(_ path: String) {
         if sidebarDropTarget == path { sidebarDropTrace?.sidebarReady() }
     }
-
-    init(core: WorkspaceApplication = WorkspaceApplication(),
-         operationQueue: DispatchQueue = DispatchQueue(label: "workspace.backend", qos: .userInitiated),
-         persistence: Bool = true) {
-        self.core = core
-        self.diagnosticsEnabled = core.devtoolsAvailable()
-        self.operationQueue = operationQueue
-        if diagnosticsEnabled {
-            let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] timer in
-                MainActor.assumeIsolated {
-                    guard let self else { timer.invalidate(); return }
-                    self.core.diagnosticUiHeartbeat()
-                }
-            }
-            diagnosticHeartbeat = timer
-            RunLoop.main.add(timer, forMode: .common)
-        }
-        do {
-            apply(try persistence ? core.enablePersistence() : core.snapshot())
-        } catch {
-            errorMessage = error.localizedDescription
-            if let snapshot = try? core.snapshot() { apply(snapshot) }
-        }
-    }
-
-    func openDevtools() {
-        if !core.openDevtools() { errorMessage = "Developer Tools are busy. Try again after the current operation finishes." }
-    }
-
-    func presentationPath(_ path: String) -> String { pendingRelocation?.path(path) ?? path }
-
-    var sidebarDirectories: [String] { directories.map(presentationPath) }
-    var sidebarDocuments: [DocumentSummary] {
-        documents.map { document in
-            var displayed = document
-            displayed.id = presentationPath(document.id)
-            displayed.title = displayed.id.split(separator: "/").last.map(String.init) ?? displayed.id
-            return displayed
-        }
-    }
-    var sidebarSearchResults: [SearchResult] {
-        searchResults.map { result in
-            var displayed = result
-            displayed.id = presentationPath(result.id)
-            displayed.title = displayed.id.split(separator: "/").last.map(String.init) ?? displayed.id
-            return displayed
-        }
-    }
-
     func canMoveEntry(_ source: String, directory: String) -> Bool {
-        guard pendingRelocation == nil else { return false }
-        let name = source.split(separator: "/").last.map(String.init) ?? source
-        let target = directory.isEmpty ? name : directory + "/" + name
-        return target != source && !target.hasPrefix(source + "/") && !protectedPaths.contains(target)
+        core.canMoveEntry(path: source, directory: directory)
     }
-
-    func beginSidebarDrag() { sidebarDragging = true }
-    func endSidebarDrag() { sidebarDragging = false }
-    func setSidebarRenaming(_ value: Bool) { sidebarRenaming = value }
-
-    private func deferUntilReady(_ action: @escaping () -> Void) -> Bool {
-        guard backendBusy else { return false }
-        deferredActions.append(action)
-        return true
+    func sidebarRows(search: Bool, expanded: Set<String>) -> [SidebarRow] {
+        (try? core.sidebarRows(search: search, expanded: Array(expanded))) ?? []
     }
-
-    private func deferredPath(_ path: String) -> String {
-        if documents.contains(where: { $0.id == path }) || directories.contains(path) { return path }
-        if let failedRelocation {
-            let original = Relocation(source: failedRelocation.target, target: failedRelocation.source).path(path)
-            if documents.contains(where: { $0.id == original }) || directories.contains(original) { return original }
-        }
-        return committedRelocation?.path(path) ?? path
-    }
-
-    /// Serialize expensive FFI snapshots and filesystem work away from AppKit.
-    /// Edits typed while a job runs stay in the editor and are flushed under the final path.
-    private func performInBackground(relocation: Relocation? = nil, trace: WorkspaceDropTrace? = nil, clearError: Bool = true, _ operation: @escaping @Sendable (WorkspaceApplication) throws -> WorkspaceSnapshot?) {
-        guard !backendBusy else { return }
-        let document = activeDocument
-        let submittedText = editorText
-        let core = core
-        backendBusy = true
-        operationQueue.async { [weak self] in
-            var snapshot: WorkspaceSnapshot?
-            var failure: String?
-            do {
-                if let document, submittedText != document.content {
-                    snapshot = try core.changeDocument(id: document.id, content: submittedText)
-                }
-                if let outcome = try operation(core) { snapshot = outcome }
-            } catch {
-                if let workspaceError = error as? WorkspaceError, case .DeleteUnsavedChanges = workspaceError {
-                    failure = "Save all modified documents in this file or folder before deleting it."
-                } else {
-                    failure = error.localizedDescription
-                }
-                snapshot = try? core.snapshot()
-            }
-            let finishedSnapshot = snapshot
-            let finishedFailure = failure
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let preserveEdits = self.editorText != submittedText
-                if let snapshot = finishedSnapshot { self.apply(snapshot, preserveEditorText: preserveEdits) }
-                if let relocation {
-                    trace?.confirmed(success: finishedFailure == nil)
-                    if finishedFailure == nil { self.committedRelocation = relocation }
-                    else { self.failedRelocation = relocation; self.relocationFailure = finishedFailure }
-                    if self.pendingRelocation == relocation { self.pendingRelocation = nil }
-                }
-                if let failure = finishedFailure { self.errorMessage = failure }
-                else if clearError && finishedSnapshot != nil { self.errorMessage = nil }
-                self.backendBusy = false
-                self.deletionPending = false
-                if preserveEdits, let active = self.activeDocument, self.editorText != active.content {
-                    self.performInBackground(clearError: false) { _ in nil }
-                }
-                while !self.backendBusy && !self.deferredActions.isEmpty {
-                    self.deferredActions.removeFirst()()
-                }
-                if let failure = self.relocationFailure { self.errorMessage = failure }
-            }
-        }
-    }
-
-    func increment() {
-        if deferUntilReady({ [weak self] in self?.increment() }) { return }
-        do {
-            apply(try core.increment())
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    /// Typing never waits on the FFI snapshot. One query at a time goes to the core,
-    /// whose worker debounces and searches; later keystrokes replace the queued one.
+    func filterFiles(_ query: String) { request { try core.filterFiles(query: query) } }
     func setSearchQuery(_ query: String) {
         guard query != searchFieldText else { return }
         searchFieldText = query
-        selectedSearchResultIndex = nil
-        queuedSearchQuery = query
-        submitQueuedSearch()
+        clearSearchSelection()
+        request { try core.setSearchQuery(query: query) }
     }
-
-    private func submitQueuedSearch() {
-        guard let query = queuedSearchQuery else { return }
-        if backendBusy {
-            if !searchSubmissionDeferred {
-                searchSubmissionDeferred = true
-                deferredActions.append { [weak self] in
-                    self?.searchSubmissionDeferred = false
-                    self?.submitQueuedSearch()
-                }
+    func openWorkspace(_ url: URL) { request { try core.openWorkspace(path: url.path) } }
+    func refreshWorkspace() { request { try core.refreshWorkspace() } }
+    @discardableResult func moveEntry(_ path: String, directory: String) -> Bool {
+        let accepted = request {
+            if sidebarDropAccepting, let trace = sidebarDropTrace {
+                return try core.moveEntryTraced(path: path, directory: directory, trace: trace)
             }
-            return
+            return try core.moveEntry(path: path, directory: directory)
         }
-        queuedSearchQuery = nil
-        performInBackground { try $0.setSearchQuery(query: query) }
+        sidebarDropTarget = pendingRelocation?.target
+        return accepted
     }
-
-    var hasDirtyActiveDocument: Bool {
-        guard let activeDocument else { return false }
-        return activeDocument.dirty || editorText != activeDocument.content
+    @discardableResult func renameEntry(_ path: String, newName: String) -> Bool {
+        request { try core.renameEntry(path: path, newName: newName) }
     }
-
-    var canSaveActiveDocument: Bool {
-        guard let activeDocument else { return false }
-        return hasDirtyActiveDocument || previewDocument == activeDocument.id
-    }
-
-    func openWorkspace(_ url: URL) {
-        if deferUntilReady({ [weak self] in self?.openWorkspace(url) }) { return }
-        do {
-            try flushLocalEdits()
-            apply(try core.openWorkspace(path: url.path))
-            committedRelocation = nil
-            failedRelocation = nil
-            relocationFailure = nil
-            selectedSearchResultIndex = nil
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func refreshWorkspace() {
-        if deferUntilReady({ [weak self] in self?.refreshWorkspace() }) { return }
-        performInBackground { try $0.refreshWorkspace() }
-    }
-
-    @discardableResult
-    func moveEntry(_ path: String, directory: String) -> Bool {
-        guard canMoveEntry(path, directory: directory) else { return false }
-        let name = path.split(separator: "/").last.map(String.init) ?? path
-        let target = directory.isEmpty ? name : directory + "/" + name
-        let relocation = Relocation(source: path, target: target)
-        let trace = sidebarDropAccepting ? sidebarDropTrace : nil
-        if trace != nil { sidebarDropTarget = target }
-        failedRelocation = nil
-        relocationFailure = nil
-        pendingRelocation = relocation
-        errorMessage = nil
-        selectedSearchResultIndex = nil
-        let requestedRoot = workspaceRoot
-        let action: () -> Void = { [weak self] in
-            guard let self else { return }
-            guard self.workspaceRoot == requestedRoot else {
-                trace?.confirmed(success: false)
-                if self.pendingRelocation == relocation { self.pendingRelocation = nil }
-                self.errorMessage = "Workspace changed before the move could be confirmed"
-                return
-            }
-            self.performInBackground(relocation: relocation, trace: trace) {
-                if let trace { return try $0.moveEntryTraced(path: path, directory: directory, trace: trace) }
-                return try $0.moveEntry(path: path, directory: directory)
-            }
-        }
-        if !deferUntilReady({ action() }) { action() }
-        return true
-    }
-
-    @discardableResult
-    func renameEntry(_ path: String, newName: String) -> Bool {
-        guard pendingRelocation == nil else { return false }
-        guard !newName.isEmpty, newName != ".", newName != "..",
-              !newName.contains("/"), !newName.contains("\\") else {
-            errorMessage = "Enter a single file or folder name"
-            return false
-        }
-        let parent = path.split(separator: "/").dropLast().joined(separator: "/")
-        let target = parent.isEmpty ? newName : parent + "/" + newName
-        if target == path { errorMessage = nil; return true }
-        guard !protectedPaths.contains(target) else {
-            errorMessage = "An entry with that name already exists"
-            return false
-        }
-        let relocation = Relocation(source: path, target: target)
-        failedRelocation = nil
-        relocationFailure = nil
-        pendingRelocation = relocation
-        errorMessage = nil
-        selectedSearchResultIndex = nil
-        let requestedRoot = workspaceRoot
-        let action: () -> Void = { [weak self] in
-            guard let self else { return }
-            guard self.workspaceRoot == requestedRoot else {
-                if self.pendingRelocation == relocation { self.pendingRelocation = nil }
-                self.errorMessage = "Workspace changed before the rename could be confirmed"
-                return
-            }
-            self.performInBackground(relocation: relocation) { try $0.renameEntry(path: path, newName: newName) }
-        }
-        if !deferUntilReady({ action() }) { action() }
-        return true
-    }
-
-    func deleteEntry(_ path: String) {
-        let requestedRoot = workspaceRoot
-        let action: () -> Void = { [weak self] in
-            guard let self, self.workspaceRoot == requestedRoot else { return }
-            self.relocationFailure = nil
-            self.errorMessage = nil
-            self.deletionPending = true
-            self.performInBackground { try $0.deleteEntry(path: path) }
-        }
-        if !deferUntilReady(action) { action() }
-    }
-
+    func deleteEntry(_ path: String) { request { try core.deleteEntry(path: path) } }
     func createEntry(_ path: String, directory: Bool) {
-        if deferUntilReady({ [weak self] in self?.createEntry(path, directory: directory) }) { return }
-        do {
-            try flushLocalEdits()
-            apply(try core.createEntry(path: path, directory: directory))
-            errorMessage = nil
-            if !directory { openDocument(path) }
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        if request({ try core.createEntry(path: path, directory: directory) }), !directory { openDocument(path) }
     }
-
-    func pollWorkspaceChanges() {
-        guard workspaceName != nil, !backendBusy, !sidebarRenaming else { return }
-        if sidebarDragging && NSEvent.pressedMouseButtons & 1 != 0 { return }
-        sidebarDragging = false
-        performInBackground { try $0.pollWorkspaceChanges() }
+    func poll() {
+        do { if let update = try core.poll() { apply(update) } }
+        catch { errorMessage = error.localizedDescription }
     }
-
-    func pollSearchResults() {
-        guard searchInProgress, !backendBusy, !sidebarRenaming else { return }
-        if sidebarDragging && NSEvent.pressedMouseButtons & 1 != 0 { return }
-        performInBackground { try $0.pollSearchResults() }
-    }
-
     func openDocument(_ id: String, preview: Bool = false) {
-        if deferUntilReady({ [weak self] in guard let self else { return }; self.openDocument(self.deferredPath(id), preview: preview) }) { return }
-        do {
-            try flushLocalEdits()
-            if searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                let opened = try preview ? core.previewDocumentFast(id: id) : core.openDocumentFast(id: id)
-                revision = opened.revision
-                if previewDocument != opened.previewDocument { previewDocument = opened.previewDocument }
-                if openDocuments != opened.openDocuments { openDocuments = opened.openDocuments }
-                if activeDocument?.id != opened.document.id {
-                    editorDocumentIdentity &+= 1
-                    clearSearchSelection()
-                }
-                activeDocument = opened.document
-                if editorText != opened.document.content {
-                    editorContentRevision &+= 1
-                    editorText = opened.document.content
-                }
-            } else {
-                apply(try preview ? core.previewDocument(id: id) : core.openDocument(id: id))
-            }
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        request { try preview ? core.previewDocument(id: id) : core.openDocument(id: id) }
     }
-
     func openSearchResult(_ result: SearchResult, at index: Int) {
-        if deferUntilReady({ [weak self] in
-            guard let self else { return }
-            let path = self.deferredPath(result.id)
-            if let updatedIndex = self.searchResults.firstIndex(where: { $0.id == path && $0.location == result.location }) {
-                self.openSearchResult(self.searchResults[updatedIndex], at: updatedIndex)
-            } else { self.openSearchFile(path) }
-        }) { return }
         openDocument(result.id, preview: true)
-        guard activeDocument?.id == result.id else { return }
         selectedSearchLocation = result.location
         selectedSearchResultIndex = index
         searchNavigationRevision &+= 1
     }
-
     func openSearchFile(_ id: String) {
-        if deferUntilReady({ [weak self] in guard let self else { return }; self.openSearchFile(self.deferredPath(id)) }) { return }
         openDocument(id, preview: true)
-        guard activeDocument?.id == id else { return }
-        selectedSearchLocation = nil
-        selectedSearchResultIndex = nil
-        searchNavigationRevision &+= 1
+        clearSearchSelection()
     }
-
-    func keepDocumentOpen(_ id: String) {
-        if deferUntilReady({ [weak self] in guard let self else { return }; self.keepDocumentOpen(self.deferredPath(id)) }) { return }
-        do {
-            try flushLocalEdits()
-            apply(try core.keepDocumentOpen(id: id))
-            errorMessage = nil
-        } catch { errorMessage = error.localizedDescription }
-    }
-
+    func keepDocumentOpen(_ id: String) { request { try core.keepDocumentOpen(id: id) } }
     func changeDocument(_ content: String) {
-        guard !deletionPending else { return }
         guard let id = activeDocument?.id, content != editorText else { return }
-        editorContentRevision &+= 1
-        editorText = content
-        if previewDocument == id { previewDocument = nil }
         selectedSearchResultIndex = nil
-        // Never wait on the FFI mutex while a relocation or reconciliation runs.
-        if backendBusy { return }
-        do {
-            apply(try core.changeDocument(id: id, content: content))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
+        request { try core.changeDocument(id: id, content: content) }
     }
-
     func closeDocument(_ id: String) {
-        if deferUntilReady({ [weak self] in guard let self else { return }; self.closeDocument(self.deferredPath(id)) }) { return }
-        do {
-            try flushLocalEdits()
-            if documents.first(where: { $0.id == id })?.dirty == true {
-                let alert = NSAlert()
-                alert.messageText = "Save changes to “\((id as NSString).lastPathComponent)”?"
-                alert.informativeText = "Your changes will be lost if you close without saving."
-                alert.addButton(withTitle: "Save")
-                alert.addButton(withTitle: "Cancel")
-                alert.addButton(withTitle: "Discard Changes")
-                switch alert.runModal() {
-                case .alertFirstButtonReturn: apply(try core.saveDocument(id: id))
-                case .alertThirdButtonReturn:
-                    apply(try core.discardAndCloseDocument(id: id))
-                    errorMessage = nil
-                    return
-                default: return
-                }
-            }
-            apply(try core.closeDocument(id: id))
-            errorMessage = nil
-        } catch { errorMessage = "Save changes before closing this tab. \(error.localizedDescription)" }
-    }
-
-    func saveAllDocuments() {
-        if deferUntilReady({ [weak self] in self?.saveAllDocuments() }) { return }
-        do {
-            try flushLocalEdits()
-            apply(try core.saveAllDocuments())
-            errorMessage = nil
-        } catch {
-            if let snapshot = try? core.snapshot() { apply(snapshot) }
-            errorMessage = error.localizedDescription
+        guard documents.first(where: { $0.id == id })?.dirty == true else {
+            request { try core.closeDocument(id: id) }
+            return
+        }
+        let prompt = workspaceCloseConfirmation(value: id)
+        let alert = NSAlert()
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.body
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: prompt.cancel)
+        alert.addButton(withTitle: prompt.discard)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: request { try core.saveAndCloseDocument(id: id) }
+        case .alertThirdButtonReturn: request { try core.discardAndCloseDocument(id: id) }
+        default: break
         }
     }
-
-    func saveDocument() {
-        if deferUntilReady({ [weak self] in self?.saveDocument() }) { return }
-        guard let id = activeDocument?.id else { return }
-        do {
-            try flushLocalEdits()
-            apply(try core.saveDocument(id: id))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func reloadDocument() {
-        if deferUntilReady({ [weak self] in self?.reloadDocument() }) { return }
-        guard let id = activeDocument?.id else { return }
-        do {
-            apply(try core.reloadDocument(id: id))
-            selectedSearchLocation = nil
-            selectedSearchResultIndex = nil
-            searchNavigationRevision &+= 1
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
-    func overwriteDocument() {
-        if deferUntilReady({ [weak self] in self?.overwriteDocument() }) { return }
-        guard let id = activeDocument?.id else { return }
-        do {
-            try flushLocalEdits()
-            apply(try core.overwriteDocument(id: id))
-            errorMessage = nil
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-
+    func saveAllDocuments() { request { try core.saveAllDocuments() } }
+    func saveDocument() { if let id = activeDocument?.id { request { try core.saveDocument(id: id) } } }
+    func reloadDocument() { if let id = activeDocument?.id { request { try core.reloadDocument(id: id) }; clearSearchSelection() } }
+    func overwriteDocument() { if let id = activeDocument?.id { request { try core.overwriteDocument(id: id) } } }
     private func clearSearchSelection() {
         guard selectedSearchLocation != nil || selectedSearchResultIndex != nil else { return }
         selectedSearchLocation = nil
         selectedSearchResultIndex = nil
         searchNavigationRevision &+= 1
     }
-
-    private func flushLocalEdits() throws {
-        guard let activeDocument, editorText != activeDocument.content else { return }
-        apply(try core.changeDocument(id: activeDocument.id, content: editorText))
-    }
-
-    private func apply(_ snapshot: WorkspaceSnapshot, preserveEditorText: Bool = false) {
-        let diagnosticStarted: UInt64? = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
-        defer {
-            if let started = diagnosticStarted {
-                core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started)
-            }
+    @discardableResult private func request(_ operation: () throws -> WorkspaceUpdate) -> Bool {
+        do { apply(try operation()); return true }
+        catch {
+            // Composite commands may have committed steps before failing.
+            if let update = try? core.snapshot() { apply(update) }
+            errorMessage = error.localizedDescription
+            return false
         }
-        let pathsChanged = directories != snapshot.directories || (documents.count != snapshot.documents.count || zip(documents, snapshot.documents).contains { $0.id != $1.id })
-        let sidebarChanged = searchQuery != snapshot.searchQuery
-            || searchResults != snapshot.searchResults
-            || directories != snapshot.directories
-            || documents != snapshot.documents
+    }
+    private func apply(_ snapshot: WorkspaceUpdate) {
+        let started = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
+        defer { if let started { core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started) } }
+        let sidebarChanged = snapshot.documents != nil || snapshot.directories != nil || snapshot.searchResults != nil
+            || snapshot.fileFilterFiles != nil || fileFilterQuery != snapshot.fileFilterQuery
         revision = snapshot.revision
-        if counter != snapshot.counter { counter = snapshot.counter }
         if workspaceName != snapshot.workspaceName { workspaceName = snapshot.workspaceName }
         if workspaceRoot != snapshot.workspaceRoot { workspaceRoot = snapshot.workspaceRoot }
         if recentWorkspaces != snapshot.recentWorkspaces { recentWorkspaces = snapshot.recentWorkspaces }
         if searchQuery != snapshot.searchQuery { searchQuery = snapshot.searchQuery }
-        // Keep text typed after the submitted query; follow resets such as a new workspace.
-        if queuedSearchQuery == nil && searchFieldText != snapshot.searchQuery { searchFieldText = snapshot.searchQuery }
-        if searchResults != snapshot.searchResults { searchResults = snapshot.searchResults }
+        // While busy, a queued query may not be applied yet.
+        if !snapshot.activity.busy && searchFieldText != snapshot.searchQuery { searchFieldText = snapshot.searchQuery }
+        if let results = snapshot.searchResults { searchResults = results }
+        if let folders = snapshot.directories { directories = folders }
+        if let files = snapshot.documents {
+            documents = files
+            externalChangeIDs = Set(files.lazy.filter(\.externalChange).map(\.id))
+        }
         if searchInProgress != snapshot.searchInProgress { searchInProgress = snapshot.searchInProgress }
         if searchTruncated != snapshot.searchTruncated { searchTruncated = snapshot.searchTruncated }
-        if directories != snapshot.directories { directories = snapshot.directories }
         if openDocuments != snapshot.openDocuments { openDocuments = snapshot.openDocuments }
         if previewDocument != snapshot.previewDocument { previewDocument = snapshot.previewDocument }
-        if documents != snapshot.documents { documents = snapshot.documents }
-        if pathsChanged {
-            var protected = Set(snapshot.directories)
-            for document in snapshot.documents {
-                let parts = document.id.split(separator: "/")
-                for count in 1...parts.count { protected.insert(parts.prefix(count).joined(separator: "/")) }
-            }
-            protectedPaths = protected
-        }
-        let changedIDs = Set(snapshot.documents.lazy.filter(\.externalChange).map(\.id))
-        if changedIDs != externalChangeIDs { externalChangeIDs = changedIDs }
-        if activeDocument?.id != snapshot.activeDocument?.id {
-            let relocated = activeDocument.map { pendingRelocation?.path($0.id) == snapshot.activeDocument?.id } ?? false
-            if !relocated {
-                editorDocumentIdentity &+= 1
-                clearSearchSelection()
-            }
-        }
+        if editorDocumentIdentity != snapshot.editorGeneration { editorDocumentIdentity = snapshot.editorGeneration; clearSearchSelection() }
         if activeDocument != snapshot.activeDocument { activeDocument = snapshot.activeDocument }
         let content = snapshot.activeDocument?.content ?? ""
-        if !preserveEditorText && content != editorText {
-            editorContentRevision &+= 1
-            editorText = content
-        }
+        if content != editorText { editorContentRevision &+= 1; editorText = content }
+        backendBusy = snapshot.activity.busy
+        if deletionPending != snapshot.activity.deleting { deletionPending = snapshot.activity.deleting }
+        if pendingRelocation != snapshot.activity.relocation { pendingRelocation = snapshot.activity.relocation }
+        if relocationSlow != snapshot.activity.relocationSlow { relocationSlow = snapshot.activity.relocationSlow }
+        if fileFilterQuery != snapshot.fileFilterQuery { fileFilterQuery = snapshot.fileFilterQuery }
+        if fileFilterInProgress != snapshot.fileFilterInProgress { fileFilterInProgress = snapshot.fileFilterInProgress }
+        if errorMessage != snapshot.error { errorMessage = snapshot.error }
         if sidebarChanged { sidebarRevision &+= 1 }
     }
 }

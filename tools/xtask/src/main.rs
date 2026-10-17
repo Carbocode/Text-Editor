@@ -3,6 +3,7 @@ use std::{
     process::{Command, ExitCode},
 };
 
+mod architecture;
 #[cfg(any(target_os = "macos", test))]
 mod qt;
 mod tasks;
@@ -232,6 +233,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     match args.as_slice() {
+        [cmd] if cmd == "architecture" => architecture::check(),
         [cmd] if cmd == "doctor" => doctor(None),
         [cmd, flag, target] if cmd == "doctor" && flag == "--strict" => doctor(Some(target)),
         [cmd] if cmd == "devtools" => devtools(false),

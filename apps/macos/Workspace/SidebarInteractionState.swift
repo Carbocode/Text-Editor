@@ -77,7 +77,7 @@ final class SidebarDragState: ObservableObject {
     private func restoreTemporaryFolders(exceptAncestorsOf destination: String?) {
         let closing = temporaryFolders.keys.filter { folder in
             guard let destination else { return true }
-            return destination != folder && !destination.hasPrefix(folder + "/")
+            return !workspacePathIsWithin(value: destination, ancestor: folder)
         }.sorted { $0.count > $1.count }
         for folder in closing {
             let collapse = temporaryFolders.removeValue(forKey: folder)
@@ -117,7 +117,7 @@ final class SidebarRenameDraft: ObservableObject {
     func begin(_ path: String) {
         previewJob?.cancel()
         self.path = path
-        name = path.split(separator: "/").last.map(String.init) ?? path
+        name = workspacePathName(value: path)
         previewPath = path
     }
 
@@ -127,8 +127,8 @@ final class SidebarRenameDraft: ObservableObject {
         guard let path else { return }
         let job = DispatchWorkItem { [weak self] in
             guard let self, self.path == path else { return }
-            let parent = path.split(separator: "/").dropLast().joined(separator: "/")
-            self.previewPath = parent.isEmpty ? name : parent + "/" + name
+            let parent = workspacePathParent(value: path)
+            self.previewPath = workspacePathJoin(directory: parent, name: name)
         }
         previewJob = job
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: job)

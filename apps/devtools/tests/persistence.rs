@@ -175,7 +175,9 @@ fn resources_analysis_and_offline_namespace_round_trip() {
         written_bytes: Counter(2048),
         alive: true,
     };
-    store.persist_samples(&[sample.clone()]).unwrap();
+    store
+        .persist_samples(std::slice::from_ref(&sample))
+        .unwrap();
     let read = store.resource_samples(batch.session.id, 0).unwrap();
     assert_eq!(read, vec![sample.clone()]);
     let stats = store.analysis(batch.session.id).unwrap();

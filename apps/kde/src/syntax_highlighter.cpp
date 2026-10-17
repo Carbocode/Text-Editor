@@ -12,12 +12,11 @@ class CodeHighlighter final : public QSyntaxHighlighter {
 public:
     explicit CodeHighlighter(QTextDocument* document) : QSyntaxHighlighter(document) {}
 
-    void setSpans(const QStringList& spans) {
+    void setSpans(const QVariantList& spans) {
         spans_.clear();
-        for (const QString& encoded : spans) {
-            const auto parts = encoded.split(':');
-            if (parts.size() != 3) continue;
-            spans_.append({parts[0].toInt(), parts[1].toInt(), parts[2].toInt()});
+        for (const QVariant& value : spans) {
+            const auto span = value.toMap();
+            spans_.append({span.value("start").toInt(), span.value("end").toInt(), span.value("kind").toInt()});
         }
         rehighlight();
     }
@@ -65,7 +64,7 @@ void EditorSyntaxHighlighter::clearUndoHistory() {
     if (document_ && document_->textDocument()) document_->textDocument()->clearUndoRedoStacks();
 }
 
-void EditorSyntaxHighlighter::setSpans(const QStringList& spans) {
+void EditorSyntaxHighlighter::setSpans(const QVariantList& spans) {
     if (spans_ == spans) return;
     spans_ = spans;
     if (highlighter_) static_cast<CodeHighlighter*>(highlighter_)->setSpans(spans_);

@@ -1,6 +1,8 @@
 //! This adapter compiles to no-ops without the `devtools` feature.
 #[cfg(feature = "devtools")]
-use native_workspace_devtools_producer::{EventKind as Kind, EventOutcome as Outcome, Producer};
+use native_workspace_devtools_producer::{
+    EventKind as Kind, EventOutcome as ProducerOutcome, Producer,
+};
 
 #[derive(Default)]
 pub(crate) struct Diagnostics {
@@ -58,25 +60,6 @@ impl Diagnostics {
             producer: self.producer.clone(),
         }
     }
-    pub fn snapshot_applied(&self, operation: u64, revision: u64, duration: u64) {
-        #[cfg(feature = "devtools")]
-        if let Some(p) = &self.producer {
-            p.emit(
-                "frontend",
-                "ui",
-                "snapshot.apply",
-                Kind::Event,
-                Outcome::Ok,
-                operation,
-                0,
-                revision,
-                duration,
-                0,
-            );
-        }
-        #[cfg(not(feature = "devtools"))]
-        let _ = (operation, revision, duration);
-    }
     pub fn enabled(&self) -> bool {
         #[cfg(feature = "devtools")]
         {
@@ -97,65 +80,37 @@ impl Drop for Diagnostics {
     }
 }
 impl Context {
-    pub fn begin(&self, name: &'static str, lane: &'static str) -> u64 {
+    /// Starts a span; [`Span::end`] records its outcome.
+    pub fn span(&self, name: &'static str, lane: &'static str) -> Span<'_> {
         #[cfg(feature = "devtools")]
-        if let Some(p) = &self.producer
-            && p.enabled()
-        {
-            let id = p.id();
-            p.emit(
-                "core",
-                lane,
-                name,
-                Kind::SpanStart,
-                Outcome::Ok,
-                self.operation,
-                id,
-                0,
-                0,
-                self.generation,
-            );
-            return id;
-        }
+        let id = self
+            .producer
+            .as_ref()
+            .filter(|p| p.enabled())
+            .map_or(0, |p| {
+                let id = p.id();
+                p.emit(
+                    "core",
+                    lane,
+                    name,
+                    Kind::SpanStart,
+                    ProducerOutcome::Ok,
+                    self.operation,
+                    id,
+                    0,
+                    0,
+                    self.generation,
+                );
+                id
+            });
         #[cfg(not(feature = "devtools"))]
-        let _ = (name, lane);
-        0
-    }
-    pub fn end(
-        &self,
-        name: &'static str,
-        lane: &'static str,
-        span: u64,
-        outcome: &'static str,
-        revision: u64,
-        value: u64,
-    ) {
-        #[cfg(feature = "devtools")]
-        if let Some(p) = &self.producer
-            && span != 0
-        {
-            let outcome = match outcome {
-                "error" => Outcome::Error,
-                "noop" => Outcome::Noop,
-                "cancelled" => Outcome::Cancelled,
-                "discarded" => Outcome::Discarded,
-                _ => Outcome::Ok,
-            };
-            p.emit(
-                "core",
-                lane,
-                name,
-                Kind::SpanEnd,
-                outcome,
-                self.operation,
-                span,
-                revision,
-                value,
-                self.generation,
-            );
+        let id = 0;
+        Span {
+            context: self,
+            name,
+            lane,
+            id,
         }
-        #[cfg(not(feature = "devtools"))]
-        let _ = (name, lane, span, outcome, revision, value);
     }
     pub fn error(&self, name: &'static str, lane: &'static str, revision: u64) {
         #[cfg(feature = "devtools")]
@@ -165,7 +120,7 @@ impl Context {
                 lane,
                 name,
                 Kind::Event,
-                Outcome::Error,
+                ProducerOutcome::Error,
                 self.operation,
                 0,
                 revision,
@@ -184,7 +139,7 @@ impl Context {
                 lane,
                 name,
                 Kind::Event,
-                Outcome::Ok,
+                ProducerOutcome::Ok,
                 self.operation,
                 0,
                 revision,
@@ -264,7 +219,11 @@ impl DiagnosticObserver {
                 } else {
                     Kind::SpanStart
                 },
-                if success { Outcome::Ok } else { Outcome::Error },
+                if success {
+                    ProducerOutcome::Ok
+                } else {
+                    ProducerOutcome::Error
+                },
                 operation,
                 span,
                 0,
@@ -309,7 +268,7 @@ impl DiagnosticObserver {
                 "ui",
                 "snapshot.apply",
                 Kind::Event,
-                Outcome::Ok,
+                ProducerOutcome::Ok,
                 operation,
                 0,
                 revision,
@@ -319,5 +278,60 @@ impl DiagnosticObserver {
         }
         #[cfg(not(feature = "devtools"))]
         let _ = (operation, revision, duration);
+    }
+}
+
+/// How a diagnostic span ended.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Outcome {
+    Ok,
+    Noop,
+    Error,
+    Cancelled,
+}
+
+/// An open diagnostic span of a [`Context`].
+#[must_use = "a span records nothing until it ends"]
+pub(crate) struct Span<'a> {
+    context: &'a Context,
+    name: &'static str,
+    lane: &'static str,
+    id: u64,
+}
+
+impl Span<'_> {
+    pub fn end(self, outcome: Outcome, revision: u64, value: u64) {
+        #[cfg(feature = "devtools")]
+        if let Some(p) = &self.context.producer
+            && self.id != 0
+        {
+            p.emit(
+                "core",
+                self.lane,
+                self.name,
+                Kind::SpanEnd,
+                match outcome {
+                    Outcome::Ok => ProducerOutcome::Ok,
+                    Outcome::Noop => ProducerOutcome::Noop,
+                    Outcome::Error => ProducerOutcome::Error,
+                    Outcome::Cancelled => ProducerOutcome::Cancelled,
+                },
+                self.context.operation,
+                self.id,
+                revision,
+                value,
+                self.context.generation,
+            );
+        }
+        #[cfg(not(feature = "devtools"))]
+        let _ = (
+            self.context,
+            self.name,
+            self.lane,
+            self.id,
+            outcome,
+            revision,
+            value,
+        );
     }
 }

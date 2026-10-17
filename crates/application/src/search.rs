@@ -2,8 +2,13 @@
 //! every core in priority order: open buffers, then shallow files before deep
 //! ones. Matches stream to the UI as they are found, and a newer query or an
 //! emptied field cancels the remaining work within one file per thread.
-use crate::{DocumentEntry, SearchLocation, SearchResult, diagnostics::Context};
+use crate::{
+    AppEvent, DocumentEntry, SearchLocation, SearchResult,
+    diagnostics::{Context, Outcome},
+    worker::{Cancellation, DebouncedWorker},
+};
 use ignore::{Match, gitignore::Gitignore, gitignore::GitignoreBuilder};
+use native_workspace_domain::{DocumentId, path};
 use native_workspace_filesystem::WorkspaceFilesystem;
 use regex::{Regex, RegexBuilder};
 use std::{
@@ -11,15 +16,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
     },
     thread,
     time::{Duration, Instant},
 };
 
-/// Typing within this interval replaces the pending query without searching.
-const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Streamed matches are published at most this often after the first batch.
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 /// Frontends rebuild the whole result list on each publish, so larger lists
@@ -30,7 +33,6 @@ pub(crate) const RESULT_LIMIT: usize = 20_000;
 
 pub(crate) struct SearchJob {
     pub diagnostic: Context,
-    pub generation: u64,
     pub root: PathBuf,
     pub documents: Vec<DocumentEntry>,
     pub query: String,
@@ -39,14 +41,160 @@ pub(crate) struct SearchJob {
     pub stream: bool,
 }
 
-pub(crate) struct SearchBatch {
-    pub diagnostic: Context,
-    pub generation: u64,
-    pub results: Vec<SearchResult>,
+struct SearchBatch {
+    diagnostic: Context,
+    generation: u64,
+    results: Vec<SearchResult>,
     /// Replace every current result instead of appending.
-    pub replace: bool,
-    pub finished: bool,
-    pub truncated: bool,
+    replace: bool,
+    finished: bool,
+    truncated: bool,
+}
+
+/// The search worker and its stream of result batches.
+pub(crate) struct SearchService {
+    worker: DebouncedWorker<SearchJob>,
+    batches: Receiver<SearchBatch>,
+}
+
+impl SearchService {
+    pub fn new(filesystem: Arc<dyn WorkspaceFilesystem>) -> Self {
+        let (sender, batches) = mpsc::channel();
+        let worker = DebouncedWorker::spawn(
+            |superseded: SearchJob, mut newer: SearchJob| {
+                superseded
+                    .diagnostic
+                    .event("search.superseded", "search-worker", 0, 0);
+                // A refresh queued after typing must still stream.
+                newer.stream |= superseded.stream;
+                newer
+            },
+            move |job, cancellation| execute(&*filesystem, job, cancellation, &sender),
+        );
+        Self { worker, batches }
+    }
+
+    /// Searches `job` after the debounce, superseding earlier jobs.
+    pub fn submit(&self, job: SearchJob) -> u64 {
+        self.worker.submit(job)
+    }
+
+    /// Discards running and pending searches.
+    pub fn cancel(&self) {
+        self.worker.cancel();
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.worker.current()
+    }
+
+    /// Merges the current search's delivered batches into one event and
+    /// returns the diagnostics context of the search that produced it.
+    pub fn collect(&self, revision: u64) -> Option<(AppEvent, Context)> {
+        let current = self.worker.current();
+        let mut merged: Option<(AppEvent, Context)> = None;
+        while let Ok(batch) = self.batches.try_recv() {
+            if batch.generation != current {
+                batch.diagnostic.event(
+                    "search.stale_generation",
+                    "main",
+                    revision,
+                    batch.generation,
+                );
+                continue;
+            }
+            batch.diagnostic.event(
+                "search.delivered",
+                "main",
+                revision,
+                batch.results.len() as u64,
+            );
+            match &mut merged {
+                Some((
+                    AppEvent::SearchResultsUpdated {
+                        results,
+                        replace,
+                        finished,
+                        truncated,
+                    },
+                    context,
+                )) => {
+                    if batch.replace {
+                        *results = batch.results;
+                        *replace = true;
+                    } else {
+                        results.extend(batch.results);
+                    }
+                    *finished |= batch.finished;
+                    *truncated |= batch.truncated;
+                    *context = batch.diagnostic;
+                }
+                _ => {
+                    merged = Some((
+                        AppEvent::SearchResultsUpdated {
+                            results: batch.results,
+                            replace: batch.replace,
+                            finished: batch.finished,
+                            truncated: batch.truncated,
+                        },
+                        batch.diagnostic,
+                    ));
+                }
+            }
+        }
+        merged
+    }
+}
+
+fn execute(
+    filesystem: &dyn WorkspaceFilesystem,
+    job: SearchJob,
+    cancellation: &Cancellation,
+    batches: &Sender<SearchBatch>,
+) {
+    let generation = cancellation.generation();
+    let span = job.diagnostic.span("search.execute", "search-worker");
+    let mut found = Vec::new();
+    let mut published = 0u64;
+    let truncated = run_search(
+        filesystem,
+        &job.root,
+        &job.documents,
+        &job.query,
+        &|| cancellation.is_cancelled(),
+        |batch| {
+            published += batch.len() as u64;
+            if job.stream {
+                let _ = batches.send(SearchBatch {
+                    diagnostic: job.diagnostic.clone(),
+                    generation,
+                    results: batch,
+                    replace: false,
+                    finished: false,
+                    truncated: false,
+                });
+            } else {
+                found.extend(batch);
+            }
+        },
+    );
+    if cancellation.is_cancelled() {
+        span.end(Outcome::Cancelled, 0, published);
+        job.diagnostic
+            .event("search.superseded", "search-worker", 0, 0);
+        return;
+    }
+    span.end(Outcome::Ok, 0, published);
+    job.diagnostic
+        .event("search.published", "search-worker", 0, published);
+    let _ = batches.send(SearchBatch {
+        diagnostic: job.diagnostic,
+        generation,
+        results: found,
+        replace: !job.stream,
+        finished: true,
+        truncated,
+    });
 }
 
 /// Case-insensitive matching with Rust's lowercase semantics. A regex rules
@@ -93,12 +241,7 @@ impl Matcher {
     }
 
     /// Every occurrence in `content`, including overlapping ones.
-    pub fn content_results(
-        &self,
-        entry: &DocumentEntry,
-        content: &str,
-        results: &mut Vec<SearchResult>,
-    ) {
+    pub fn content_results(&self, id: &DocumentId, content: &str, results: &mut Vec<SearchResult>) {
         let needle = self.needle.as_str();
         if needle.is_empty() || !self.may_match(content) {
             return;
@@ -111,18 +254,16 @@ impl Matcher {
                         start: (usize, usize),
                         end: (usize, usize)| {
             results.push(SearchResult {
-                id: entry.id.clone(),
-                title: entry.id.as_str().to_owned(),
-                dirty: entry.dirty(),
-                snippet: Some(preview.snippet(column - 1)),
-                location: Some(SearchLocation {
+                id: id.clone(),
+                snippet: preview.snippet(column - 1),
+                location: SearchLocation {
                     line: (line_index + 1) as u64,
                     column: column as u64,
                     start_char: start.0 as u64,
                     end_char: end.0 as u64,
                     start_utf16: start.1 as u64,
                     end_utf16: end.1 as u64,
-                }),
+                },
             });
         };
         for (line_index, raw_line) in content.split_inclusive('\n').enumerate() {
@@ -271,8 +412,8 @@ impl IgnoreRules {
     fn load(root: &Path, documents: &[DocumentEntry]) -> Self {
         let mut builders: HashMap<String, GitignoreBuilder> = HashMap::new();
         for entry in documents {
-            let path = entry.id.as_str();
-            let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
+            let path = entry.id().as_str();
+            let (directory, name) = (path::parent(path), path::name(path));
             if name == ".gitignore" && !in_git_directory(path) {
                 builders
                     .entry(directory.to_owned())
@@ -300,7 +441,7 @@ impl IgnoreRules {
             return true;
         }
         // The nearest `.gitignore` decides, as in Git.
-        let mut directory = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        let mut directory = path::parent(path);
         loop {
             if let Some(rules) = self.by_directory.get(directory) {
                 let relative = if directory.is_empty() {
@@ -317,7 +458,7 @@ impl IgnoreRules {
             if directory.is_empty() {
                 return false;
             }
-            directory = directory.rsplit_once('/').map_or("", |(parent, _)| parent);
+            directory = path::parent(directory);
         }
     }
 }
@@ -334,15 +475,12 @@ fn search_order(root: &Path, documents: &[DocumentEntry]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..documents.len())
         .filter(|&index| {
             let entry = &documents[index];
-            entry.content.is_some() || !rules.ignored(entry.id.as_str())
+            entry.is_loaded() || !rules.ignored(entry.id().as_str())
         })
         .collect();
     order.sort_by_key(|&index| {
         let entry = &documents[index];
-        (
-            entry.content.is_none(),
-            entry.id.as_str().matches('/').count(),
-        )
+        (!entry.is_loaded(), path::depth(entry.id().as_str()))
     });
     order
 }
@@ -383,12 +521,12 @@ pub(crate) fn run_search(
                     };
                     let entry = &documents[index];
                     let disk;
-                    let content = match &entry.content {
-                        Some(content) => content.as_str(),
+                    let content = match entry.content() {
+                        Some(content) => &**content,
                         None => {
-                            disk = filesystem.read_document_for_search_in(
+                            disk = filesystem.read_document_for_search(
                                 root,
-                                &entry.id,
+                                entry.id(),
                                 &mut verified,
                             );
                             match &disk {
@@ -398,7 +536,7 @@ pub(crate) fn run_search(
                         }
                     };
                     let mut found = Vec::new();
-                    matcher.content_results(entry, content, &mut found);
+                    matcher.content_results(entry.id(), content, &mut found);
                     if !found.is_empty() && sender.send(found).is_err() {
                         return;
                     }
@@ -440,158 +578,30 @@ pub(crate) fn run_search(
     truncated
 }
 
-/// Results in workspace order, grouped by file.
-pub(crate) fn sort_by_document(results: &mut [SearchResult]) {
-    results.sort_by(|left, right| left.id.cmp(&right.id));
-}
-
-pub(crate) fn search_worker(
-    jobs: Receiver<SearchJob>,
-    results: Sender<SearchBatch>,
-    filesystem: Arc<dyn WorkspaceFilesystem>,
-    generation: Arc<AtomicU64>,
-) {
-    while let Ok(mut job) = jobs.recv() {
-        let mut debounce_span = job.diagnostic.begin("search.debounce", "search-worker");
-        loop {
-            match jobs.recv_timeout(DEBOUNCE) {
-                Ok(newer) => {
-                    job.diagnostic.end(
-                        "search.debounce",
-                        "search-worker",
-                        debounce_span,
-                        "cancelled",
-                        0,
-                        0,
-                    );
-                    job.diagnostic
-                        .event("search.superseded", "search-worker", 0, 0);
-                    // A refresh queued after typing must still stream.
-                    let stream = job.stream || newer.stream;
-                    job = newer;
-                    job.stream = stream;
-                    debounce_span = job.diagnostic.begin("search.debounce", "search-worker");
-                }
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => {
-                    job.diagnostic.end(
-                        "search.debounce",
-                        "search-worker",
-                        debounce_span,
-                        "cancelled",
-                        0,
-                        0,
-                    );
-                    return;
-                }
-            }
-        }
-        let cancelled = || generation.load(Ordering::Relaxed) != job.generation;
-        if cancelled() {
-            job.diagnostic.end(
-                "search.debounce",
-                "search-worker",
-                debounce_span,
-                "cancelled",
-                0,
-                0,
-            );
-            job.diagnostic
-                .event("search.superseded", "search-worker", 0, 0);
-            continue;
-        }
-        job.diagnostic.end(
-            "search.debounce",
-            "search-worker",
-            debounce_span,
-            "ok",
-            0,
-            0,
-        );
-        let span = job.diagnostic.begin("search.execute", "search-worker");
-        let mut found = Vec::new();
-        let mut published = 0u64;
-        let mut disconnected = false;
-        let truncated = run_search(
-            filesystem.as_ref(),
-            &job.root,
-            &job.documents,
-            &job.query,
-            &cancelled,
-            |batch| {
-                published += batch.len() as u64;
-                if job.stream {
-                    disconnected |= results
-                        .send(SearchBatch {
-                            diagnostic: job.diagnostic.clone(),
-                            generation: job.generation,
-                            results: batch,
-                            replace: false,
-                            finished: false,
-                            truncated: false,
-                        })
-                        .is_err();
-                } else {
-                    found.extend(batch);
-                }
-            },
-        );
-        let current = !cancelled();
-        job.diagnostic.end(
-            "search.execute",
-            "search-worker",
-            span,
-            if current { "ok" } else { "cancelled" },
-            0,
-            published,
-        );
-        if !current {
-            job.diagnostic
-                .event("search.superseded", "search-worker", 0, 0);
-            continue;
-        }
-        job.diagnostic
-            .event("search.published", "search-worker", 0, published);
-        sort_by_document(&mut found);
-        if disconnected
-            || results
-                .send(SearchBatch {
-                    diagnostic: job.diagnostic,
-                    generation: job.generation,
-                    results: found,
-                    replace: !job.stream,
-                    finished: true,
-                    truncated,
-                })
-                .is_err()
-        {
-            return;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use native_workspace_domain::DocumentId;
     use std::fs;
 
     fn entry(path: &str, content: Option<&str>) -> DocumentEntry {
-        DocumentEntry {
-            id: DocumentId::parse(path).unwrap(),
-            content: content.map(str::to_owned),
-            saved_content: content.map(str::to_owned),
-            external_change: false,
+        let mut entry = DocumentEntry::new(DocumentId::parse(path).unwrap());
+        if let Some(content) = content {
+            entry.load(content.into());
         }
+        entry
     }
 
     fn matches(query: &str, content: &str) -> Vec<(u64, u64, u64)> {
         let mut results = Vec::new();
-        Matcher::new(query).content_results(&entry("a.txt", None), content, &mut results);
+        Matcher::new(query).content_results(
+            &DocumentId::parse("a.txt").unwrap(),
+            content,
+            &mut results,
+        );
         results
             .iter()
             .map(|result| {
-                let location = result.location.as_ref().unwrap();
+                let location = &result.location;
                 (location.line, location.start_char, location.start_utf16)
             })
             .collect()
@@ -631,7 +641,7 @@ mod tests {
         ];
         let order: Vec<&str> = search_order(dir.path(), &documents)
             .into_iter()
-            .map(|index| documents[index].id.as_str())
+            .map(|index| documents[index].id().as_str())
             .collect();
         assert_eq!(
             order,

@@ -1,0 +1,103 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask verify core
+      - run: cargo xtask verify xtask
+      - run: cargo check -p native-workspace-application --no-default-features --all-targets
+      - run: cargo test -p native-workspace-application --features devtools
+  devtools:
+    runs-on: ubuntu-26.04
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: devtools
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - run: cargo xtask verify devtools
+  macos:
+    runs-on: macos-26
+    env:
+      NATIVE_WORKSPACE_DEVTOOLS_BUILD: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask verify macos
+  linux:
+    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        frontend: [gnome, kde]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.frontend }}
+      - name: Install GNOME dependencies
+        if: matrix.frontend == 'gnome'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev xvfb dbus-x11
+      - name: Install Qt and KDE dependencies
+        if: matrix.frontend == 'kde'
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          qt6-base-dev qt6-declarative-dev qt6-tools-dev qt6-tools-dev-tools
+          libkf6colorscheme-dev qml6-module-org-kde-kirigami qml6-module-org-kde-breeze
+          qml6-module-qtquick-dialogs qml6-module-qt-labs-qmlmodels qml6-module-qttest breeze-icon-theme
+          fonts-dejavu-core xvfb dbus-x11
+      - run: cargo xtask verify ${{ matrix.frontend }}
+      - run: cargo build -p native-workspace-${{ matrix.frontend }}
+      - name: Prepare native smoke workspaces
+        run: |
+          for fixture in workspace sidebar drag; do
+            mkdir -p "$RUNNER_TEMP/editor-smoke/$fixture/src"
+            printf 'Smoke workspace\n' > "$RUNNER_TEMP/editor-smoke/$fixture/README.md"
+            printf 'fn main() { println!("sidebar needle"); }\n' > "$RUNNER_TEMP/editor-smoke/$fixture/src/main.rs"
+          done
+      - name: GNOME workspace smoke
+        if: matrix.frontend == 'gnome'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env
+          NATIVE_WORKSPACE_NEW_INSTANCE=1 NATIVE_WORKSPACE_SMOKE=1
+          NATIVE_WORKSPACE_SMOKE_WORKSPACE="$RUNNER_TEMP/editor-smoke/workspace"
+          target/debug/native-workspace-gnome
+      - name: KDE workspace smoke
+        if: matrix.frontend == 'kde'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
+          target/debug/native-workspace-kde --smoke-workspace="$RUNNER_TEMP/editor-smoke/workspace"
+      - name: KDE sidebar smoke
+        if: matrix.frontend == 'kde'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
+          target/debug/native-workspace-kde --smoke-sidebar="$RUNNER_TEMP/editor-smoke/sidebar"
+      - name: KDE delayed drag smoke
+        if: matrix.frontend == 'kde'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
+          target/debug/native-workspace-kde --smoke-drag="$RUNNER_TEMP/editor-smoke/drag" --smoke-drag-delay-ms=1000

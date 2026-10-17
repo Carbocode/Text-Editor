@@ -3,6 +3,7 @@ mod bridge;
 unsafe extern "C" {
     fn register_editor_syntax_highlighter();
     fn register_editor_fonts();
+    fn register_search_results_model();
     fn configure_kde_desktop();
 }
 
@@ -16,6 +17,7 @@ fn main() -> std::process::ExitCode {
     unsafe {
         register_editor_syntax_highlighter();
         register_editor_fonts();
+        register_search_results_model();
     }
     if std::env::var_os("QT_QUICK_CONTROLS_STYLE").is_none() {
         QQuickStyle::set_style(&"org.kde.breeze".into());
@@ -34,7 +36,14 @@ fn main() -> std::process::ExitCode {
     }
     unsafe { configure_kde_desktop() };
     let mut engine = QQmlApplicationEngine::new();
-    let qml = if std::env::args().any(|argument| argument.starts_with("--smoke-cursors=")) {
+    let qml = if cfg!(debug_assertions)
+        && std::env::args().any(|a| {
+            a == "--smoke"
+                || a.starts_with("--smoke-workspace=")
+                || a.starts_with("--benchmark-workspace=")
+        }) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/WorkspaceSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-cursors=")) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/CursorSmoke.qml"
     } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar-layout=")) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SidebarLayoutSmoke.qml"

@@ -1,20 +1,18 @@
 //! Name filtering for the Files sidebar. Matching every path of a large
-//! workspace on each keystroke froze the UI, so a worker debounces queries
-//! and lists matches off the UI thread; frontends poll for the result.
-use crate::DocumentSummary;
+//! workspace on each keystroke froze the UI, so the shared debounced worker
+//! lists matches off the UI thread and the session publishes the result.
+use crate::{
+    DocumentSummary,
+    worker::{Cancellation, DebouncedWorker},
+};
+use native_workspace_domain::path;
 use std::{
     collections::BTreeSet,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Receiver},
     },
-    thread,
-    time::Duration,
 };
-
-/// Typing within this interval replaces the pending query without filtering.
-const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// The entries to list for one name query.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -28,39 +26,35 @@ pub struct PathFilterResult {
     pub directories: Vec<String>,
 }
 
+impl PathFilterResult {
+    pub fn is_active(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
+}
+
 struct Job {
-    generation: u64,
     query: String,
     documents: Arc<Vec<DocumentSummary>>,
     directories: Arc<Vec<String>>,
 }
 
-pub struct PathFilter {
-    jobs: Sender<Job>,
+pub(crate) struct PathFilter {
+    worker: DebouncedWorker<Job>,
     results: Receiver<(u64, PathFilterResult)>,
-    generation: Arc<AtomicU64>,
-    pending: bool,
-}
-
-impl Default for PathFilter {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl PathFilter {
     pub fn new() -> Self {
-        let (jobs, jobs_rx) = mpsc::channel();
-        let (results_tx, results) = mpsc::channel();
-        let generation = Arc::new(AtomicU64::new(0));
-        let worker_generation = Arc::clone(&generation);
-        thread::spawn(move || worker(jobs_rx, results_tx, worker_generation));
-        Self {
-            jobs,
-            results,
-            generation,
-            pending: false,
-        }
+        let (sender, results) = mpsc::channel();
+        let worker = DebouncedWorker::spawn(
+            |_superseded, newer| newer,
+            move |job: Job, cancellation: &Cancellation| {
+                if let Some(result) = filter_paths(&job, || cancellation.is_cancelled()) {
+                    let _ = sender.send((cancellation.generation(), result));
+                }
+            },
+        );
+        Self { worker, results }
     }
 
     /// Replaces any pending query. An empty query needs no work, so its
@@ -71,17 +65,14 @@ impl PathFilter {
         documents: Arc<Vec<DocumentSummary>>,
         directories: Arc<Vec<String>>,
     ) -> Option<PathFilterResult> {
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         if query.trim().is_empty() {
-            self.pending = false;
+            self.worker.cancel();
             return Some(PathFilterResult {
                 query: query.to_owned(),
                 ..Default::default()
             });
         }
-        self.pending = true;
-        let _ = self.jobs.send(Job {
-            generation,
+        self.worker.submit(Job {
             query: query.to_owned(),
             documents,
             directories,
@@ -89,115 +80,48 @@ impl PathFilter {
         None
     }
 
-    /// Filters on the calling thread, discarding any pending query. Meant for
-    /// smoke tests that need the result before returning.
-    pub fn filter_now(
-        &mut self,
-        query: &str,
-        documents: Arc<Vec<DocumentSummary>>,
-        directories: Arc<Vec<String>>,
-    ) -> PathFilterResult {
-        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.pending = false;
-        let job = Job {
-            generation,
-            query: query.to_owned(),
-            documents,
-            directories,
-        };
-        filter_paths(&job, || false).expect("an uncancellable filter completes")
-    }
-
-    /// Whether a queued query has not published its result yet.
-    pub fn in_progress(&self) -> bool {
-        self.pending
-    }
-
     /// The result of the latest query, once and only if it is current.
     pub fn poll(&mut self) -> Option<PathFilterResult> {
-        let current = self.generation.load(Ordering::Relaxed);
+        let current = self.worker.current();
         let mut latest = None;
         while let Ok((generation, result)) = self.results.try_recv() {
             if generation == current {
                 latest = Some(result);
             }
         }
-        if latest.is_some() {
-            self.pending = false;
-        }
         latest
-    }
-}
-
-fn worker(
-    jobs: Receiver<Job>,
-    results: Sender<(u64, PathFilterResult)>,
-    generation: Arc<AtomicU64>,
-) {
-    while let Ok(mut job) = jobs.recv() {
-        loop {
-            match jobs.recv_timeout(DEBOUNCE) {
-                Ok(newer) => job = newer,
-                Err(mpsc::RecvTimeoutError::Timeout) => break,
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            }
-        }
-        let cancelled = || generation.load(Ordering::Relaxed) != job.generation;
-        if cancelled() {
-            continue;
-        }
-        let Some(result) = filter_paths(&job, cancelled) else {
-            continue;
-        };
-        if results.send((job.generation, result)).is_err() {
-            return;
-        }
     }
 }
 
 fn filter_paths(job: &Job, cancelled: impl Fn() -> bool) -> Option<PathFilterResult> {
     let needle = job.query.trim().to_lowercase();
-    if needle.is_empty() {
-        return Some(PathFilterResult {
-            query: job.query.clone(),
-            ..Default::default()
-        });
-    }
-    let name_matches = |path: &str| {
-        path.rsplit('/')
-            .next()
-            .unwrap_or(path)
-            .to_lowercase()
-            .contains(&needle)
-    };
+    let name_matches = |entry: &str| path::name(entry).to_lowercase().contains(&needle);
     let mut files = Vec::new();
     let mut directories = BTreeSet::new();
-    let add_ancestors = |path: &str, directories: &mut BTreeSet<String>| {
-        let mut end = path.len();
-        while let Some(separator) = path[..end].rfind('/') {
+    let add_ancestors = |entry: &str, directories: &mut BTreeSet<String>| {
+        for ancestor in path::ancestors(entry) {
             // Ancestors of a listed folder are already listed.
-            if !directories.insert(path[..separator].to_owned()) {
+            if !directories.insert(ancestor.to_owned()) {
                 break;
             }
-            end = separator;
         }
     };
     for (index, document) in job.documents.iter().enumerate() {
         if index % 1024 == 0 && cancelled() {
             return None;
         }
-        let path = document.id.as_str();
-        if name_matches(path) {
-            files.push(path.to_owned());
-            add_ancestors(path, &mut directories);
+        let entry = document.id.as_str();
+        if name_matches(entry) {
+            files.push(entry.to_owned());
+            add_ancestors(entry, &mut directories);
         }
     }
-    for (index, path) in job.directories.iter().enumerate() {
+    for (index, entry) in job.directories.iter().enumerate() {
         if index % 1024 == 0 && cancelled() {
             return None;
         }
-        if name_matches(path) && directories.insert(path.clone()) {
-            add_ancestors(path, &mut directories);
+        if name_matches(entry) && directories.insert(entry.clone()) {
+            add_ancestors(entry, &mut directories);
         }
     }
     Some(PathFilterResult {
@@ -210,8 +134,12 @@ fn filter_paths(job: &Job, cancelled: impl Fn() -> bool) -> Option<PathFilterRes
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker::DEBOUNCE;
     use native_workspace_domain::DocumentId;
-    use std::time::Instant;
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
 
     fn documents(paths: &[&str]) -> Arc<Vec<DocumentSummary>> {
         Arc::new(
@@ -219,7 +147,6 @@ mod tests {
                 .iter()
                 .map(|path| DocumentSummary {
                     id: DocumentId::parse(*path).unwrap(),
-                    title: path.to_string(),
                     dirty: false,
                     external_change: false,
                 })
@@ -264,9 +191,7 @@ mod tests {
                 .queue("MAIN", documents.clone(), directories.clone())
                 .is_none()
         );
-        assert!(filter.in_progress());
         let result = wait(&mut filter);
-        assert!(!filter.in_progress());
         assert_eq!(result.query, "MAIN");
         assert_eq!(result.files, ["src/app/main.rs", "tests/main_test.rs"]);
         assert_eq!(
@@ -290,7 +215,6 @@ mod tests {
         let cleared = filter.queue(" ", documents, directories).unwrap();
         assert_eq!(cleared.query, " ");
         assert!(cleared.files.is_empty() && cleared.directories.is_empty());
-        assert!(!filter.in_progress());
         thread::sleep(DEBOUNCE * 2);
         assert_eq!(filter.poll(), None);
     }

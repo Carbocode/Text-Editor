@@ -47,6 +47,9 @@ fn main() {
         QmlModule::new("org.nativeworkspace.Diagnostic")
             .qml_file("qml/Main.qml")
             .qml_file("qml/WorkspacePane.qml")
+            .qml_file("qml/WorkspaceHome.qml")
+            .qml_file("qml/EntryDialogs.qml")
+            .qml_file("tests/WorkspaceSmoke.qml")
             .qml_file("tests/SidebarSmoke.qml")
             .qml_file("tests/SidebarLayoutSmoke.qml")
             .qml_file("tests/CursorSmoke.qml")
@@ -60,6 +63,8 @@ fn main() {
         "tests/cursor_probe.h",
         "src/syntax_highlighter.h",
         "src/syntax_highlighter.cpp",
+        "src/search_results_model.h",
+        "src/search_results_model.cpp",
         "src/editor_fonts.h",
         "src/editor_fonts.cpp",
         "src/desktop_integration.h",
