@@ -248,3 +248,46 @@ After editing one document, switch to another with identical text and try Undo: 
 `cargo xtask architecture` validates the Cargo dependency graph. `verify` runs it before formatting, type checking, warnings-denied Clippy and tests. Check, lint and test include all targets, so examples and test binaries cannot retain obsolete APIs. CI runs the same tasks for core, xtask, Developer Tools and each native adapter; native workspace, sidebar and delayed-drag smoke tests also run on Linux. The workflow is defined in `.github/workflows/verify.yml`; branch protection must be configured in the repository host to require its jobs before merging.
 
 Use the repository's `.agents/skills/editor-change/SKILL.md` when extending editor behavior. `AGENTS.md` and ADR 0004 describe ownership. GTK code is split into window construction, presentation controller, sidebar materialization and a debug-only smoke driver. Qt keeps Home and entry dialogs in separate components and its smoke entrypoint under `tests/`. Neither production adapter exposes synchronous search/filter shortcuts.
+
+## Integrated terminal verification
+
+Terminal builds require **Zig 0.16.x**, on PATH or selected with `ZIG=/absolute/path/to/zig`.
+The pinned Rust bindings download and checksum-verify Ghostty's official source
+archive on the first build. `GHOSTTY_SOURCE_DIR` and `GHOSTTY_ZIG_SYSTEM_DIR` support
+offline builds; the source must match the pinned revision in
+[attribution](../assets/GHOSTTY_ATTRIBUTION.md). Runtime use needs no Zig installation.
+`cargo xtask doctor` reports the build prerequisite.
+
+Open **Terminal** in the workspace toolbar/menu. Create two tabs, run `pwd` in
+both, change directory in one, and verify independent shells. Hide/show the panel
+and switch documents without restarting them. Resize while running an interactive
+program such as `vi`; check arrows, Tab, Ctrl-C, Unicode, colors and the alternate
+screen. Select text with the mouse; use Cmd-C/V on macOS or Ctrl-Shift-C/V on Linux.
+Scroll to inspect retained output. The first version uses a native CPU renderer;
+Kitty graphics, terminal search UI, shell integration and process restoration are
+not exposed. Each window permits at most 16 tabs. Ghostty scrollback budgets are configured to
+10,000 lines and 8 MiB per terminal, enforced at its allocation-page granularity; individual input messages are limited to 64 KiB.
+
+Generate sustained output in one tab while typing in another and editing a file.
+Filesystem moves must not pause terminal input/output. Close a running tab:
+Cancel retains it; Terminate closes it and its foreground processes. Try changing
+workspace through both the chooser and OS requests with live terminals: the core
+must reject the switch and preserve documents. Exit with terminals active:
+Cancel keeps the app open; confirmation waits asynchronously for termination.
+Shell startup failures and nonzero exit statuses must remain visible in the panel.
+
+`cargo xtask verify core` includes real PTY tests, Ghostty mode/Unicode/style tests,
+tab lifecycle and filesystem concurrency tests. Run the adapter checks and native
+terminal smoke modes on supported desktops; macOS GTK/Qt checks do not establish
+Linux desktop behavior.
+
+Native terminal smoke modes use disposable workspaces:
+
+```sh
+NATIVE_WORKSPACE_NEW_INSTANCE=1 NATIVE_WORKSPACE_SMOKE_TERMINAL=/path/to/fixture target/debug/native-workspace-gnome
+target/debug/native-workspace-kde --smoke-terminal=/path/to/fixture
+```
+
+The macOS `TerminalSmoke` is included in `cargo xtask test macos`. These drivers
+exercise native input callbacks, rendered snapshots, tab isolation and confirmed
+termination through the same asynchronous Session API as normal interaction.

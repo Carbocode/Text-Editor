@@ -10,13 +10,14 @@ import org.nativeworkspace.Editor 1.0
 
 Item {
     id: root
-    enabled: !controller || !controller.editing_paused
+    enabled: !controller || (!controller.editing_paused && !terminalQuitPending)
     SearchResultsModel { id: searchResults; rows: root.controller ? root.controller.search_results : [] }
     SystemPalette { id: systemColors; colorGroup: SystemPalette.Active }
     // Keep selection accented when focus moves to the editor or another window.
     // The host's accent may differ from Breeze's default selection blue.
     Kirigami.Theme.highlightColor: systemColors.accent
     Kirigami.Theme.highlightedTextColor: systemColors.highlightedText
+    signal terminalRequested()
     property var controller
     property bool enableBrowse: false
     property bool showingHome: true
@@ -227,7 +228,7 @@ Item {
     }
 
     function finishQuit(save) {
-        if (flushEditor() && controller.prepare_to_quit(save)) ApplicationLifecycle.finishQuit()
+        if (flushEditor() && controller.prepare_to_quit(save)) requestTerminalQuit()
     }
 
     Connections {
@@ -1001,14 +1002,14 @@ Item {
     }
 
     Timer {
-        interval: root.controller && (root.controller.move_pending || root.controller.search_in_progress || root.controller.file_filter_in_progress) ? 16 : 250
+        interval: root.controller && (root.controller.move_pending || root.controller.search_in_progress || root.controller.file_filter_in_progress || root.controller.terminals_running) ? 16 : 250
         repeat: true
         running: root.controller !== null && root.controller !== undefined
         onTriggered: if (root.flushEditor()) root.controller.poll()
     }
 
-    readonly property list<Action> applicationActions: [homeAction, openAction, developerAction, quitAction]
-    readonly property list<Action> pageActions: [textZoomAction, saveAction, saveAllAction]
+    readonly property list<Action> applicationActions: [homeAction, openAction, terminalAction, developerAction, quitAction]
+    readonly property list<Action> pageActions: [textZoomAction, saveAction, saveAllAction, terminalAction]
     readonly property var syntaxColors: [Kirigami.Theme.textColor, Kirigami.Theme.linkColor,
         Kirigami.Theme.neutralTextColor, Kirigami.Theme.positiveTextColor,
         Kirigami.Theme.disabledTextColor, Kirigami.Theme.activeTextColor]
@@ -1017,6 +1018,13 @@ Item {
         minimap.requestPaint()
     })
 
+    Kirigami.Action {
+        id: terminalAction
+        text: "Terminal"
+        icon.name: "utilities-terminal"
+        shortcut: "Ctrl+`"
+        onTriggered: root.terminalRequested()
+    }
     Kirigami.Action {
         id: textZoomAction
         text: "Text Zoom"
@@ -1117,6 +1125,40 @@ Item {
         icon.name: "tools-report-bug"
         visible: root.controller.devtools_available
         onTriggered: root.controller.open_devtools()
+    }
+    readonly property bool terminalQuitPending: terminalQuitWait.running
+    function requestTerminalQuit() {
+        if (!controller.terminals_running) { ApplicationLifecycle.finishQuit(); return }
+        terminalQuitDialog.open()
+    }
+    Dialog {
+        id: terminalQuitDialog
+        width: 420
+        parent: root.showingHome ? homeWindow.Overlay.overlay : root.Overlay.overlay
+        anchors.centerIn: parent
+        modal: true
+        readonly property var prompt: root.controller.terminal_confirmation()
+        title: prompt.title
+        contentItem: Label { text: terminalQuitDialog.prompt.body; wrapMode: Text.WordWrap; width: 360 }
+        footer: DialogButtonBox {
+            Button { text: terminalQuitDialog.prompt.cancel; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+            Button { text: terminalQuitDialog.prompt.confirm; DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole }
+            onRejected: terminalQuitDialog.close()
+            onAccepted: {
+                terminalQuitDialog.close()
+                root.controller.terminal_action("close_all",0,true)
+                terminalQuitWait.start()
+            }
+        }
+    }
+    Timer {
+        id: terminalQuitWait
+        interval: 16
+        repeat: true
+        onTriggered: {
+            root.controller.poll()
+            if (!root.controller.terminals_running) { stop(); ApplicationLifecycle.finishQuit() }
+        }
     }
     Kirigami.Action {
         id: quitAction

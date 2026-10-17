@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/filesystem", "crates/storage", "crates/application", "crates/syntax", "crates/ffi-swift", "apps/gnome", "apps/kde", "tools/xtask", "crates/devtools-protocol", "crates/devtools", "apps/devtools", "apps/devtools-ui"]
+members = ["crates/domain", "crates/filesystem", "crates/storage", "crates/application", "crates/syntax", "crates/terminal", "crates/ffi-swift", "apps/gnome", "apps/kde", "tools/xtask", "crates/devtools-protocol", "crates/devtools", "apps/devtools", "apps/devtools-ui"]
 default-members = ["crates/domain", "crates/filesystem", "crates/storage", "crates/application"]
 
 [workspace.package]

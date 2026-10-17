@@ -9,6 +9,7 @@ mod smoke;
 mod syntax;
 #[cfg(debug_assertions)]
 mod system_open_smoke;
+mod terminal;
 
 use adw::prelude::*;
 use gtk::{gio, glib};

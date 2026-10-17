@@ -42,6 +42,18 @@ impl Application {
             documents,
             directories,
         } = self.filesystem.open_workspace(path)?;
+        if self
+            .live_terminals
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+            && self
+                .state()
+                .workspace
+                .as_ref()
+                .is_none_or(|w| w.root != workspace.root)
+        {
+            return Err(AppError::TerminalsRunning);
+        }
         let recent_workspaces = self.storage.record_workspace(&workspace)?;
         self.pending_reconcile = None;
         self.watcher = WorkspaceWatcher::new(&workspace.root).ok();

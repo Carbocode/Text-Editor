@@ -15,6 +15,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify core
       - run: cargo xtask verify xtask
@@ -29,6 +32,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: devtools
@@ -43,6 +49,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify macos
   linux:
@@ -56,6 +65,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.frontend }}
@@ -74,7 +86,7 @@ jobs:
       - run: cargo build -p native-workspace-${{ matrix.frontend }}
       - name: Prepare native smoke workspaces
         run: |
-          for fixture in workspace sidebar drag system-open; do
+          for fixture in workspace sidebar drag system-open terminal; do
             mkdir -p "$RUNNER_TEMP/editor-smoke/$fixture/src"
             printf 'Smoke workspace\n' > "$RUNNER_TEMP/editor-smoke/$fixture/README.md"
             printf 'fn main() { println!("sidebar needle"); }\n' > "$RUNNER_TEMP/editor-smoke/$fixture/src/main.rs"
@@ -119,3 +131,16 @@ jobs:
         run: >-
           timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
           target/debug/native-workspace-kde --smoke-drag="$RUNNER_TEMP/editor-smoke/drag" --smoke-drag-delay-ms=1000
+
+      - name: GNOME terminal smoke
+        if: matrix.frontend == 'gnome'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env
+          NATIVE_WORKSPACE_NEW_INSTANCE=1
+          NATIVE_WORKSPACE_SMOKE_TERMINAL="$RUNNER_TEMP/editor-smoke/terminal"
+          target/debug/native-workspace-gnome
+      - name: KDE terminal smoke
+        if: matrix.frontend == 'kde'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
+          target/debug/native-workspace-kde --smoke-terminal="$RUNNER_TEMP/editor-smoke/terminal"

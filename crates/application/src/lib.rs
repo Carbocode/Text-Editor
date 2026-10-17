@@ -25,7 +25,12 @@ mod session;
 pub mod sidebar;
 mod snapshot;
 mod state;
+mod terminal;
 mod worker;
+pub use terminal::{
+    TerminalCell, TerminalCommand, TerminalFrame, TerminalInput, TerminalKey, TerminalSnapshot,
+    TerminalTab, terminal_close_confirmation,
+};
 
 #[cfg(test)]
 mod tests;

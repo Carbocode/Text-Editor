@@ -7,6 +7,10 @@ use native_workspace_storage::StorageError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("Terminate running terminals before changing workspace or closing the application.")]
+    TerminalsRunning,
+    #[error("{0}")]
+    Terminal(String),
     #[error("No workspace is open.")]
     WorkspaceNotOpen,
     #[error("Enter a single file or folder name.")]
@@ -50,6 +54,7 @@ pub enum AppError {
 /// A payload-free classification for adapters and diagnostics.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppErrorKind {
+    Terminal,
     IncompleteSearch,
     InvalidSearch,
     StaleReplacement,
@@ -73,6 +78,7 @@ pub enum AppErrorKind {
 impl AppError {
     pub fn kind(&self) -> AppErrorKind {
         match self {
+            Self::Terminal(_) | Self::TerminalsRunning => AppErrorKind::Terminal,
             Self::IncompleteSearch => AppErrorKind::IncompleteSearch,
             Self::InvalidSearch(_) => AppErrorKind::InvalidSearch,
             Self::StaleReplacement(_) => AppErrorKind::StaleReplacement,
@@ -98,6 +104,7 @@ impl AppError {
 impl AppErrorKind {
     pub(crate) fn diagnostic_name(self) -> &'static str {
         match self {
+            Self::Terminal => "error.terminal",
             Self::ExternalChanges => "error.save_conflict",
             Self::UnsavedChanges | Self::DeleteUnsavedChanges => "error.unsaved_changes",
             Self::Filesystem => "error.filesystem",

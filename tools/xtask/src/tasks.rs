@@ -53,6 +53,7 @@ fn packages(target: &str) -> Option<&'static [&'static str]> {
             "native-workspace-storage",
             "native-workspace-application",
             "native-workspace-syntax",
+            "native-workspace-terminal",
         ]),
         "macos" => Some(&["native-workspace-ffi-swift"]),
         "gnome" => Some(&["native-workspace-gnome"]),
