@@ -1053,11 +1053,27 @@ pub(super) fn run(widgets: Widgets<'_>) {
                 assert!(adjustment.value() > position + 12.1 && adjustment.value() <= upper);
                 scroll.begin();
                 assert_eq!(
-                    scroll.scroll(gtk::gdk::ScrollUnit::Wheel, 1.0, 0.0),
+                    scroll.scroll(gtk::gdk::ScrollUnit::Wheel, 0.0, 1.0),
                     glib::Propagation::Proceed
                 );
+                for (start, delta, boundary) in
+                    [(upper - 5.0, 1.0, upper), (lower + 5.0, -1.0, lower)]
+                {
+                    adjustment.set_value(start);
+                    for _ in 0..10 {
+                        assert_eq!(
+                            scroll.scroll(gtk::gdk::ScrollUnit::Wheel, delta, 0.0),
+                            glib::Propagation::Stop
+                        );
+                    }
+                    settle();
+                    assert!((adjustment.value() - boundary).abs() < 0.01);
+                    scroll.scroll(gtk::gdk::ScrollUnit::Wheel, -delta, 0.0);
+                    let step = adjustment.page_size().powf(2.0 / 3.0);
+                    assert!((adjustment.value() - (boundary - delta * step)).abs() < 0.01);
+                }
                 println!(
-                    "GTK touchpad boundary/reverse/axis lock/kinetic scrolling smoke test passed"
+                    "GTK touchpad and horizontal wheel boundary/reverse/axis lock/kinetic scrolling smoke test passed"
                 );
             }
             if let Some(capture) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_SCREENSHOT") {
