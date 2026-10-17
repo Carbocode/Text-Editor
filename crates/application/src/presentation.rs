@@ -9,6 +9,16 @@ pub struct Confirmation {
     pub discard: &'static str,
 }
 
+pub fn quit_confirmation() -> Confirmation {
+    Confirmation {
+        title: "Save changes before quitting?".into(),
+        body: "Unsaved changes will be lost. Your workspace and open tabs will reopen next time.",
+        confirm: "Save All",
+        cancel: "Cancel",
+        discard: "Discard Changes",
+    }
+}
+
 pub fn close_confirmation(value: &str) -> Confirmation {
     Confirmation {
         title: format!("Save changes to “{}”?", path::name(value)),

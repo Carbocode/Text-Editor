@@ -6,6 +6,7 @@ mod delete;
 mod document_tabs;
 mod external_files;
 mod replacement;
+mod restore;
 mod search;
 mod session;
 mod system_open;

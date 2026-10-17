@@ -1,4 +1,5 @@
 import QtQuick
+import org.nativeworkspace.Desktop
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQml.Models
@@ -212,6 +213,45 @@ Item {
     function scheduleSidebarUpdate() {
         sidebarEntriesDirty = true
         sidebarUpdate.restart()
+    }
+
+    function requestQuit() {
+        if (!flushEditor()) return
+        if (controller.move_pending) {
+            controller.prepare_to_quit(false)
+        } else if (controller.dirty_document_ids.length > 0) {
+            quitDialog.open()
+        } else {
+            finishQuit(false)
+        }
+    }
+
+    function finishQuit(save) {
+        if (flushEditor() && controller.prepare_to_quit(save)) ApplicationLifecycle.finishQuit()
+    }
+
+    Connections {
+        target: ApplicationLifecycle
+        function onQuitRequested() { root.requestQuit() }
+    }
+
+    Kirigami.Dialog {
+        id: quitDialog
+        objectName: "quitDialog"
+        parent: root.showingHome ? homeWindow.Overlay.overlay : root.Overlay.overlay
+        modal: true
+        title: root.controller.quit_confirmation().title
+        preferredWidth: Kirigami.Units.gridUnit * 26
+        standardButtons: Kirigami.Dialog.NoButton
+        Label {
+            text: root.controller.quit_confirmation().body
+            wrapMode: Text.WordWrap
+        }
+        customFooterActions: [
+            Kirigami.Action { objectName: "cancelQuitAction"; text: root.controller.quit_confirmation().cancel; onTriggered: quitDialog.close() },
+            Kirigami.Action { objectName: "discardQuitAction"; text: root.controller.quit_confirmation().discard; onTriggered: { quitDialog.close(); root.finishQuit(false) } },
+            Kirigami.Action { objectName: "saveQuitAction"; text: root.controller.quit_confirmation().confirm; onTriggered: { quitDialog.close(); root.finishQuit(true) } }
+        ]
     }
 
     function flushEditor() {
@@ -1083,7 +1123,7 @@ Item {
         text: "Quit"
         icon.name: "application-exit"
         shortcut: StandardKey.Quit
-        onTriggered: Qt.quit()
+        onTriggered: root.requestQuit()
     }
 
     WorkspaceHome {

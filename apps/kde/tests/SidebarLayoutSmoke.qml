@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtQuick.Controls
 import QtTest
 import org.kde.kirigami as Kirigami
@@ -208,13 +210,13 @@ Kirigami.ApplicationWindow {
                         "Native tab selection did not follow the new preview: " + pane.documentTabBar.currentItem.path + " vs " + controller.active_document_id)
                     running = false
                     var capture = Qt.application.arguments.find(value => value.startsWith("--smoke-screenshot="))
-                    if (!capture) { Qt.quit(); return }
+                    if (!capture) { SmokeLifecycle.quit(controller, ApplicationLifecycle, 0); return }
                     check(window.pageStack.grabToImage(function(result) {
-                        if (result.saveToFile(capture.substring("--smoke-screenshot=".length))) Qt.quit()
-                        else Qt.exit(1)
+                        if (result.saveToFile(capture.substring("--smoke-screenshot=".length))) SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
+                        else SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
                     }), "Could not capture the native sidebar layout")
                 }
-            } catch (error) { console.error(error); Qt.exit(1) }
+            } catch (error) { console.error(error); SmokeLifecycle.quit(controller, ApplicationLifecycle, 1) }
         }
     }
 }

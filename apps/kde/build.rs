@@ -57,9 +57,16 @@ fn main() {
             .qml_file("tests/AppearanceSmoke.qml")
             .qml_file("tests/DragSmoke.qml")
             .qml_file("tests/ExternalDropSmoke.qml")
-            .qml_file("tests/SystemOpenSmoke.qml"),
+            .qml_file("tests/SystemOpenSmoke.qml")
+            .qml_file("tests/SessionRestoreSmoke.qml"),
     )
-    .qrc_resources(QResources::new().resource(resources))
+    .qrc_resources(
+        QResources::new().resource(resources).resource(
+            QResource::new()
+                .prefix("/qt/qml/org/nativeworkspace/Diagnostic/tests")
+                .file(QResourceFile::new("tests/SmokeLifecycle.js").alias("SmokeLifecycle.js")),
+        ),
+    )
     .qt_module("Network")
     .qt_module("Quick")
     .cpp_files([
@@ -74,6 +81,7 @@ fn main() {
         "src/editor_fonts.cpp",
         "src/desktop_integration.h",
         "src/system_open.h",
+        "src/application_lifecycle.h",
         "src/desktop_integration.cpp",
     ])
     .files(["src/bridge.rs"]);

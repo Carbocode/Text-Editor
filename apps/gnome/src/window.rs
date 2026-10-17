@@ -920,16 +920,16 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
         });
     }
     {
-        let app = app.clone();
+        let ui = ui.clone();
         home_window.connect_close_request(move |_| {
-            app.quit();
-            glib::Propagation::Proceed
+            ui.request_quit();
+            glib::Propagation::Stop
         });
     }
     {
-        let application = app.clone();
+        let ui = ui.clone();
         let action = gio::SimpleAction::new("quit", None);
-        action.connect_activate(move |_, _| application.quit());
+        action.connect_activate(move |_, _| ui.request_quit());
         app.add_action(&action);
         app.set_accels_for_action("app.quit", &[&primary_accelerator("q")]);
     }
@@ -1051,7 +1051,7 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     {
         let ui = ui.clone();
         ui.search.clone().connect_search_changed(move |search| {
-            if !ui.updating.get() {
+            if !ui.updating.get() && search.text().as_str() != ui.snapshot.borrow().search_query {
                 ui.dispatch(AppCommand::QueueSearchQuery(search.text().to_string()));
             }
         });

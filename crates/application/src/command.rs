@@ -12,6 +12,12 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     OpenWorkspace(PathBuf),
+    /// Restore the last confirmed layout only when no workspace has been opened.
+    RestoreSession,
+    /// Validate that no worker is running, optionally saving all dirty tabs.
+    PrepareToQuit {
+        save: bool,
+    },
     /// Ordered OS open requests: folders select a workspace; files open permanent tabs.
     /// Without a workspace, the first file selects its parent folder.
     OpenPaths(Vec<PathBuf>),
@@ -115,6 +121,8 @@ pub enum BusyPolicy {
 impl AppCommand {
     pub(crate) fn diagnostic_name(&self) -> &'static str {
         match self {
+            Self::RestoreSession => "command.session_restore",
+            Self::PrepareToQuit { .. } => "command.quit_prepare",
             Self::OpenWorkspace(_) => "command.workspace_open",
             Self::OpenPaths(_) => "command.paths_open",
             Self::OpenFiles(_) => "command.files_open",
@@ -176,6 +184,8 @@ impl AppCommand {
             Self::OpenPaths(_)
             | Self::OpenFiles(_)
             | Self::OpenFile(_)
+            | Self::RestoreSession
+            | Self::PrepareToQuit { .. }
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
@@ -251,6 +261,8 @@ impl AppCommand {
             | Self::OpenFile(_)
             | Self::MoveFiles { .. }
             | Self::MoveFile { .. }
+            | Self::RestoreSession
+            | Self::PrepareToQuit { .. }
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
@@ -294,7 +306,8 @@ impl AppCommand {
                     })
                     .collect(),
             ),
-            Self::SaveAllDocuments => {
+            Self::PrepareToQuit { save: false } => Some(Vec::new()),
+            Self::SaveAllDocuments | Self::PrepareToQuit { save: true } => {
                 Some(dirty_tabs().into_iter().map(Self::SaveDocument).collect())
             }
             Self::SaveAndCloseDocument(id) => Some(vec![
@@ -304,6 +317,7 @@ impl AppCommand {
             Self::OpenPaths(_)
             | Self::OpenFile(_)
             | Self::MoveFile { .. }
+            | Self::RestoreSession
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
@@ -345,6 +359,8 @@ impl AppCommand {
             Self::OpenPaths(_)
             | Self::OpenFiles(_)
             | Self::OpenFile(_)
+            | Self::RestoreSession
+            | Self::PrepareToQuit { .. }
             | Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
@@ -374,7 +390,8 @@ impl AppCommand {
     pub(crate) fn schedule(&self) -> Schedule {
         match self {
             Self::RenameEntry { .. } | Self::MoveEntry { .. } => Schedule::Relocation,
-            Self::OpenPaths(_)
+            Self::RestoreSession
+            | Self::OpenPaths(_)
             | Self::MoveFiles { .. }
             | Self::MoveFile { .. }
             | Self::DeleteEntry(_)
@@ -383,7 +400,8 @@ impl AppCommand {
             | Self::OpenFile(_)
             | Self::RefreshWorkspace
             | Self::PrepareReplacement { .. } => Schedule::Background,
-            Self::OpenWorkspace(_)
+            Self::PrepareToQuit { .. }
+            | Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
             | Self::ConfigureSearch(_)
@@ -411,7 +429,10 @@ impl AppCommand {
     pub(crate) fn while_busy(&self, running: Schedule) -> BusyPolicy {
         let exclusive = running == Schedule::Exclusive;
         match self {
-            Self::PollWorkspaceChanges | Self::PollSearchResults => BusyPolicy::Skip,
+            Self::RestoreSession | Self::PollWorkspaceChanges | Self::PollSearchResults => {
+                BusyPolicy::Skip
+            }
+            Self::PrepareToQuit { .. } => BusyPolicy::Reject,
             Self::OpenPaths(_) => BusyPolicy::Defer,
             // Exclusive operations may remove or relocate the edited document.
             Self::ChangeDocument { .. } if exclusive => BusyPolicy::Reject,

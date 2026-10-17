@@ -91,6 +91,10 @@ pub fn workspace_close_confirmation(value: String) -> Confirmation {
     native_workspace_application::close_confirmation(&value).into()
 }
 #[uniffi::export]
+pub fn workspace_quit_confirmation() -> Confirmation {
+    native_workspace_application::quit_confirmation().into()
+}
+#[uniffi::export]
 pub fn workspace_delete_confirmation(value: String) -> Confirmation {
     native_workspace_application::delete_confirmation(&value).into()
 }
@@ -450,6 +454,12 @@ impl WorkspaceApplication {
         let mut bridge = self.lock()?;
         bridge.session.enable_persistence_default()?;
         Ok(bridge.deliver(false))
+    }
+    pub fn restore_session(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::RestoreSession)
+    }
+    pub fn prepare_to_quit(&self, save: bool) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::PrepareToQuit { save })
     }
     pub fn poll(&self) -> Result<Option<WorkspaceUpdate>, WorkspaceError> {
         let mut bridge = self.lock()?;

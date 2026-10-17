@@ -105,6 +105,10 @@ jobs:
           target/debug/native-workspace-kde
           --smoke-system-open="$RUNNER_TEMP/editor-smoke/system-open"
           "$RUNNER_TEMP/editor-smoke/system-open/README.md"
+      - name: Session restart smoke
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
+          tools/smoke-session-restore.sh ${{ matrix.frontend }}
       - name: KDE sidebar smoke
         if: matrix.frontend == 'kde'
         run: >-

@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtQuick.Controls
 import QtTest
 import org.kde.kirigami as Kirigami
@@ -114,9 +116,9 @@ Kirigami.ApplicationWindow {
                 case 13:
                     expectCursor("plain header", Qt.ArrowCursor)
                     console.log("KDE native cursor feedback smoke test passed")
-                    Qt.quit()
+                    SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
                 }
-            } catch (error) { console.error(error); Qt.exit(1) }
+            } catch (error) { console.error(error); SmokeLifecycle.quit(controller, ApplicationLifecycle, 1) }
         }
     }
 }

@@ -80,7 +80,13 @@ pub mod qobject {
         #[qinvokable]
         fn drop_sidebar_ready(self: Pin<&mut Self>);
         #[qinvokable]
-        fn initialize_persistence(self: Pin<&mut Self>);
+        fn initialize_persistence(self: Pin<&mut Self>) -> bool;
+        #[qinvokable]
+        fn restore_session(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn prepare_to_quit(self: Pin<&mut Self>, save: bool) -> bool;
+        #[qinvokable]
+        fn quit_confirmation(self: Pin<&mut Self>) -> QVariant;
         #[qinvokable]
         fn search_files(self: Pin<&mut Self>, query: &QString);
         #[qinvokable]
@@ -490,16 +496,41 @@ impl qobject::AppController {
             .application
             .delay_next_background_job(std::time::Duration::from_millis(milliseconds));
     }
-    pub fn initialize_persistence(mut self: Pin<&mut Self>) {
+    pub fn initialize_persistence(mut self: Pin<&mut Self>) -> bool {
         self.as_mut().rust_mut().application.enable_devtools("qt");
         self.as_mut()
             .set_devtools_available(Session::devtools_supported());
-        let _ = self
+        let ready = self
             .as_mut()
             .rust_mut()
             .application
-            .enable_persistence_default();
+            .enable_persistence_default()
+            .is_ok();
         self.publish();
+        ready
+    }
+    pub fn restore_session(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::RestoreSession);
+    }
+    pub fn prepare_to_quit(mut self: Pin<&mut Self>, save: bool) -> bool {
+        let ready = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .dispatch(AppCommand::PrepareToQuit { save })
+            .is_ok();
+        self.publish();
+        ready
+    }
+    pub fn quit_confirmation(self: Pin<&mut Self>) -> QVariant {
+        let prompt = native_workspace_application::quit_confirmation();
+        object([
+            ("title", text(&prompt.title)),
+            ("body", text(prompt.body)),
+            ("confirm", text(prompt.confirm)),
+            ("cancel", text(prompt.cancel)),
+            ("discard", text(prompt.discard)),
+        ])
     }
     pub fn diagnostic_ui_heartbeat(self: Pin<&mut Self>) {
         self.rust().application.diagnostic_observer().ui_heartbeat();

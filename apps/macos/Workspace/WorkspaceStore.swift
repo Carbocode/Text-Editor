@@ -51,6 +51,7 @@ final class WorkspaceStore: ObservableObject {
     private(set) var backendBusy = false
     private let core: WorkspaceApplication
     let diagnosticsEnabled: Bool
+    private(set) var persistenceEnabled = false
     private var timer: Timer?
     private var lastIdlePoll = Date.distantPast
     private var sidebarDropTrace: WorkspaceDropTrace?
@@ -72,7 +73,11 @@ final class WorkspaceStore: ObservableObject {
     init(core: WorkspaceApplication = WorkspaceApplication(), persistence: Bool = true) {
         self.core = core
         diagnosticsEnabled = core.devtoolsAvailable()
-        request { try persistence ? core.enablePersistence() : core.snapshot() }
+        if persistence {
+            persistenceEnabled = request { try core.enablePersistence() }
+        } else {
+            request { try core.snapshot() }
+        }
         let timer = Timer(timeInterval: 0.016, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
@@ -90,6 +95,10 @@ final class WorkspaceStore: ObservableObject {
 
     func openDevtools() {
         if !core.openDevtools() { errorMessage = "Developer Tools are busy. Try again after the current operation finishes." }
+    }
+    func restoreSession() { request { try core.restoreSession() } }
+    @discardableResult func prepareToQuit(save: Bool) -> Bool {
+        request { try core.prepareToQuit(save: save) }
     }
     func beginSidebarDrop() {
         sidebarDropTrace = core.devtoolsEnabled() ? core.beginSidebarDrop(origin: 1) : nil
