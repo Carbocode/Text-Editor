@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtQuick.Controls
 import QtQml.Models
 import org.kde.kirigami as Kirigami
@@ -96,7 +98,7 @@ Kirigami.ApplicationWindow {
         if (capture) {
             capturing = true
             check(preview.grabToImage(function(result) {
-                if (!result.saveToFile(capture.substring("--smoke-screenshot=".length) + (dark ? "-dark.png" : "-light.png"))) Qt.exit(1)
+                if (!result.saveToFile(capture.substring("--smoke-screenshot=".length) + (dark ? "-dark.png" : "-light.png"))) SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
                 capturing = false
             }), "Could not capture appearance")
         }
@@ -177,9 +179,9 @@ Kirigami.ApplicationWindow {
                 case 10:
                     Qt.styleHints.colorScheme = Qt.Unknown
                     console.log("KDE system appearance/icons/selection smoke test passed")
-                    Qt.quit()
+                    SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
                 }
-            } catch (error) { console.error(error); Qt.exit(1) }
+            } catch (error) { console.error(error); SmokeLifecycle.quit(controller, ApplicationLifecycle, 1) }
         }
     }
 }

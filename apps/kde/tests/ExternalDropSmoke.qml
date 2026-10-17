@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtQuick.Controls
 import QtTest
 import org.nativeworkspace.Diagnostic
@@ -95,11 +97,11 @@ ApplicationWindow {
                     if (controller.editing_paused) { --step; break }
                     check(controller.active_document_id === source.split("/").pop(), "Tree background did not move into the workspace root")
                     console.log("Qt native URI-list editor/folder/root drop/hover/cancel/dirty-buffer smoke test passed")
-                    Qt.quit()
+                    SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
                     break
                 }
                 if (Date.now() - started > 10000) throw new Error("External drop smoke timed out")
-            } catch (error) { console.error(error); Qt.exit(1) }
+            } catch (error) { console.error(error); SmokeLifecycle.quit(controller, ApplicationLifecycle, 1) }
         }
     }
 }

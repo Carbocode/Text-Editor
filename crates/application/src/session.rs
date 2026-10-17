@@ -32,6 +32,7 @@ use std::{
 const SLOW_RELOCATION: Duration = Duration::from_millis(300);
 
 pub struct Session {
+    terminals: crate::terminal::Terminals,
     /// `None` while the worker owns the application.
     core: Option<Application>,
     published: AppSnapshot,
@@ -87,6 +88,7 @@ impl Session {
 
     pub(crate) fn with_application(core: Application) -> Self {
         Self {
+            terminals: crate::terminal::Terminals::new(core.live_terminals.clone()),
             published: core.snapshot(),
             core_revision: core.revision(),
             error_version: 0,
@@ -100,6 +102,22 @@ impl Session {
             #[cfg(debug_assertions)]
             next_job_delay: Duration::ZERO,
         }
+    }
+
+    pub fn terminal_snapshot(&self) -> Arc<crate::TerminalSnapshot> {
+        self.terminals.snapshot()
+    }
+
+    pub fn terminal_command(&mut self, command: crate::TerminalCommand) -> Result<(), AppError> {
+        if matches!(command, crate::TerminalCommand::New) && self.worker.is_some() {
+            return Err(AppError::OperationInProgress);
+        }
+        self.terminals
+            .dispatch(command, self.published.workspace_root())
+    }
+
+    pub fn has_running_terminals(&self) -> bool {
+        self.terminals.running()
     }
 
     /// The latest published snapshot. Cheap: lists and text are shared.
@@ -225,6 +243,7 @@ impl Session {
     /// Collects worker, watcher, search and filter results. Call it on a
     /// timer: every 16 ms while [`Session::wants_fast_poll`], else 250 ms.
     pub fn poll(&mut self) {
+        self.terminals.poll();
         if self.worker.is_some() {
             self.collect_worker();
         } else {
@@ -242,7 +261,8 @@ impl Session {
 
     /// Whether results are streaming in and should be polled promptly.
     pub fn wants_fast_poll(&self) -> bool {
-        self.worker.is_some()
+        self.terminals.running()
+            || self.worker.is_some()
             || self.published.search_in_progress
             || self.published.file_filter_in_progress
     }
@@ -426,7 +446,9 @@ impl Session {
             },
         };
         let worker = self.worker.take().expect("collecting a running worker");
-        let failed = reply.error.is_some();
+        // A metadata failure may follow a committed relocation. Only an
+        // uncommitted move rolls projected paths and deferred commands back.
+        let failed = reply.error.is_some() && reply.core.revision() == self.core_revision;
         if worker.relocation.is_some() {
             worker.trace.confirmed(!failed);
         }

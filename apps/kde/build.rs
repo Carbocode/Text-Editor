@@ -46,10 +46,12 @@ fn main() {
     let builder = CxxQtBuilder::new_qml_module(
         QmlModule::new("org.nativeworkspace.Diagnostic")
             .qml_file("qml/Main.qml")
+            .qml_file("qml/TerminalPanel.qml")
             .qml_file("qml/WorkspacePane.qml")
             .qml_file("qml/WorkspaceHome.qml")
             .qml_file("qml/EntryDialogs.qml")
             .qml_file("qml/SearchPanel.qml")
+            .qml_file("tests/TerminalSmoke.qml")
             .qml_file("tests/WorkspaceSmoke.qml")
             .qml_file("tests/SidebarSmoke.qml")
             .qml_file("tests/SidebarLayoutSmoke.qml")
@@ -57,12 +59,20 @@ fn main() {
             .qml_file("tests/AppearanceSmoke.qml")
             .qml_file("tests/DragSmoke.qml")
             .qml_file("tests/ExternalDropSmoke.qml")
-            .qml_file("tests/SystemOpenSmoke.qml"),
+            .qml_file("tests/SystemOpenSmoke.qml")
+            .qml_file("tests/SessionRestoreSmoke.qml"),
     )
-    .qrc_resources(QResources::new().resource(resources))
+    .qrc_resources(
+        QResources::new().resource(resources).resource(
+            QResource::new()
+                .prefix("/qt/qml/org/nativeworkspace/Diagnostic/tests")
+                .file(QResourceFile::new("tests/SmokeLifecycle.js").alias("SmokeLifecycle.js")),
+        ),
+    )
     .qt_module("Network")
     .qt_module("Quick")
     .cpp_files([
+        "tests/terminal_probe.h",
         "tests/cursor_probe.h",
         "tests/file_drop_probe.h",
         "tests/system_open_probe.h",
@@ -70,10 +80,13 @@ fn main() {
         "src/syntax_highlighter.cpp",
         "src/search_results_model.h",
         "src/search_results_model.cpp",
+        "src/terminal_surface.h",
+        "src/terminal_surface.cpp",
         "src/editor_fonts.h",
         "src/editor_fonts.cpp",
         "src/desktop_integration.h",
         "src/system_open.h",
+        "src/application_lifecycle.h",
         "src/desktop_integration.cpp",
     ])
     .files(["src/bridge.rs"]);

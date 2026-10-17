@@ -103,6 +103,10 @@ pub struct AppSnapshot {
 }
 
 impl AppSnapshot {
+    pub fn has_unsaved_documents(&self) -> bool {
+        self.documents.iter().any(|document| document.dirty)
+    }
+
     /// Resolve a native selection before sending a replacement intention.
     pub fn replacement_target(
         &self,

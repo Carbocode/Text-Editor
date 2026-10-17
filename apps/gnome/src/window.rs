@@ -91,6 +91,7 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     let persistence_error = if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_none()
         && std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE").is_none()
         && std::env::var_os("NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN").is_none()
+        && std::env::var_os("NATIVE_WORKSPACE_SMOKE_TERMINAL").is_none()
     {
         core.enable_persistence_default()
             .err()
@@ -409,7 +410,22 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     editor_stack.set_vexpand(true);
     editor_stack.add_named(&empty_editor_page, Some("empty"));
     editor_stack.add_named(&document_tabs, Some("documents"));
-    content_body.append(&editor_stack);
+    let core = Rc::new(RefCell::new(core));
+    let terminal = crate::terminal::TerminalPanel::new(core.clone(), &window);
+    let terminal_split = gtk::Paned::new(gtk::Orientation::Vertical);
+    terminal_split.set_start_child(Some(&editor_stack));
+    terminal_split.set_end_child(Some(&terminal.root));
+    terminal_split.set_resize_start_child(true);
+    terminal_split.set_resize_end_child(false);
+    terminal_split.set_shrink_start_child(false);
+    terminal_split.set_position(450);
+    let terminal_toggle = icon_button("Terminal", "utilities-terminal-symbolic");
+    {
+        let terminal = terminal.clone();
+        terminal_toggle.connect_clicked(move |_| terminal.toggle());
+    }
+    content_header.pack_end(&terminal_toggle);
+    content_body.append(&terminal_split);
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
     let sidebar_frame = gtk::Overlay::new();
@@ -501,7 +517,8 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
 
     let ui = Ui {
         window: window.clone(),
-        core: Rc::new(RefCell::new(core)),
+        core,
+        terminal,
         snapshot: current_snapshot,
         sidebars,
         sidebar_pages,
@@ -920,16 +937,16 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
         });
     }
     {
-        let app = app.clone();
+        let ui = ui.clone();
         home_window.connect_close_request(move |_| {
-            app.quit();
-            glib::Propagation::Proceed
+            ui.request_quit();
+            glib::Propagation::Stop
         });
     }
     {
-        let application = app.clone();
+        let ui = ui.clone();
         let action = gio::SimpleAction::new("quit", None);
-        action.connect_activate(move |_, _| application.quit());
+        action.connect_activate(move |_, _| ui.request_quit());
         app.add_action(&action);
         app.set_accels_for_action("app.quit", &[&primary_accelerator("q")]);
     }
@@ -1051,7 +1068,7 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     {
         let ui = ui.clone();
         ui.search.clone().connect_search_changed(move |search| {
-            if !ui.updating.get() {
+            if !ui.updating.get() && search.text().as_str() != ui.snapshot.borrow().search_query {
                 ui.dispatch(AppCommand::QueueSearchQuery(search.text().to_string()));
             }
         });
@@ -1218,6 +1235,11 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
         });
     }
     home_window.present();
+    #[cfg(debug_assertions)]
+    if let Some(fixture) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_TERMINAL") {
+        crate::terminal::smoke(ui.terminal.clone(), fixture.into());
+    }
+
     #[cfg(feature = "devtools")]
     {
         let core = Rc::downgrade(&ui.core);

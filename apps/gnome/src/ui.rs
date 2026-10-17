@@ -43,6 +43,7 @@ impl SidebarTab {
 pub(super) struct Ui {
     pub(super) window: adw::ApplicationWindow,
     pub(super) core: Rc<RefCell<Session>>,
+    pub(super) terminal: crate::terminal::TerminalPanel,
     pub(super) snapshot: Rc<RefCell<AppSnapshot>>,
     // Keep Files and Search models, selections and scroll positions alive across tab switches.
     pub(super) sidebars: [SidebarView; 2],
@@ -196,8 +197,60 @@ impl Ui {
 
     pub(super) fn poll_core(&self) {
         self.core.borrow_mut().poll();
+        self.terminal.refresh();
         if self.core.borrow().revision() != self.snapshot.borrow().revision {
             self.render_current();
+        }
+    }
+
+    pub(super) fn request_quit(&self) {
+        if self.window.visible_dialog().is_some() || self.home_window.visible_dialog().is_some() {
+            return;
+        }
+        if self.core.borrow().snapshot().activity.busy {
+            self.dispatch(AppCommand::PrepareToQuit { save: false });
+            return;
+        }
+        if !self.core.borrow().snapshot().has_unsaved_documents() {
+            self.finish_quit(false);
+            return;
+        }
+        let prompt = native_workspace_application::quit_confirmation();
+        let dialog = adw::AlertDialog::builder()
+            .heading(&prompt.title)
+            .body(prompt.body)
+            .build();
+        dialog.add_responses(&[
+            ("cancel", prompt.cancel),
+            ("discard", prompt.discard),
+            ("save", prompt.confirm),
+        ]);
+        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("save"));
+        dialog.set_close_response("cancel");
+        let ui = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "save" || response == "discard" {
+                ui.finish_quit(response == "save");
+            }
+        });
+        let parent = if self.window.is_visible() {
+            &self.window
+        } else {
+            &self.home_window
+        };
+        dialog.present(Some(parent));
+    }
+
+    fn finish_quit(&self, save: bool) {
+        let ready = self
+            .core
+            .borrow_mut()
+            .dispatch(AppCommand::PrepareToQuit { save })
+            .is_ok();
+        self.render_current();
+        if ready {
+            self.terminal.request_quit();
         }
     }
 

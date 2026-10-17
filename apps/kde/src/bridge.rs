@@ -24,6 +24,8 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(bool, devtools_available)]
         #[qproperty(u64, revision)]
+        #[qproperty(QString, terminal_json)]
+        #[qproperty(bool, terminals_running)]
         #[qproperty(QString, workspace_name)]
         #[qproperty(QString, workspace_root)]
         #[qproperty(bool, search_match_case)]
@@ -80,7 +82,13 @@ pub mod qobject {
         #[qinvokable]
         fn drop_sidebar_ready(self: Pin<&mut Self>);
         #[qinvokable]
-        fn initialize_persistence(self: Pin<&mut Self>);
+        fn initialize_persistence(self: Pin<&mut Self>) -> bool;
+        #[qinvokable]
+        fn restore_session(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn prepare_to_quit(self: Pin<&mut Self>, save: bool) -> bool;
+        #[qinvokable]
+        fn quit_confirmation(self: Pin<&mut Self>) -> QVariant;
         #[qinvokable]
         fn search_files(self: Pin<&mut Self>, query: &QString);
         #[qinvokable]
@@ -139,6 +147,23 @@ pub mod qobject {
         #[qinvokable]
         fn can_move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString) -> bool;
         #[qinvokable]
+        fn terminal_action(self: Pin<&mut Self>, action: &QString, id: u64, confirmed: bool);
+        #[qinvokable]
+        fn terminal_input(
+            self: Pin<&mut Self>,
+            id: u64,
+            key: &QString,
+            text: &QString,
+            modifiers: u16,
+            paste: bool,
+        );
+        #[qinvokable]
+        fn terminal_resize(self: Pin<&mut Self>, id: u64, cols: u16, rows: u16);
+        #[qinvokable]
+        fn terminal_scroll(self: Pin<&mut Self>, id: u64, lines: i32);
+        #[qinvokable]
+        fn terminal_confirmation(self: Pin<&mut Self>) -> QVariant;
+        #[qinvokable]
         fn poll(self: Pin<&mut Self>);
         #[qinvokable]
         fn confirmation(self: Pin<&mut Self>, path: &QString, deleting: bool) -> QVariant;
@@ -190,6 +215,9 @@ pub mod qobject {
 #[derive(Default)]
 pub struct AppControllerRust {
     revision: u64,
+    terminal_json: QString,
+    terminals_running: bool,
+    terminal_revision: u64,
     workspace_name: QString,
     workspace_root: QString,
     search_match_case: bool,
@@ -286,8 +314,93 @@ impl qobject::AppController {
             }
         }
     }
+    fn publish_terminal(mut self: Pin<&mut Self>) {
+        let snapshot = self.rust().application.terminal_snapshot();
+        let running = self.rust().application.has_running_terminals();
+        self.as_mut().set_terminals_running(running);
+        if self.rust().terminal_revision != snapshot.revision {
+            self.as_mut().rust_mut().terminal_revision = snapshot.revision;
+            self.as_mut().set_terminal_json(QString::from(
+                serde_json::to_string(&*snapshot).expect("terminal serializes"),
+            ));
+        }
+    }
+    fn terminal_dispatch(
+        mut self: Pin<&mut Self>,
+        command: native_workspace_application::TerminalCommand,
+    ) {
+        if let Err(error) = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .terminal_command(command)
+        {
+            self.as_mut().rust_mut().application.report(error);
+        }
+        self.as_mut().publish_terminal();
+        if self.rust().revision != self.rust().application.revision() {
+            self.publish();
+        }
+    }
+    pub fn terminal_action(self: Pin<&mut Self>, action: &QString, id: u64, confirmed: bool) {
+        use native_workspace_application::TerminalCommand as T;
+        let command = match action.to_string().as_str() {
+            "new" => T::New,
+            "activate" => T::Activate(id),
+            "close" => T::Close { id, confirmed },
+            "close_all" => T::CloseAll { confirmed },
+            _ => return,
+        };
+        self.terminal_dispatch(command);
+    }
+    pub fn terminal_input(
+        self: Pin<&mut Self>,
+        id: u64,
+        key: &QString,
+        text: &QString,
+        modifiers: u16,
+        paste: bool,
+    ) {
+        use native_workspace_application::{TerminalCommand as T, TerminalInput as I, TerminalKey};
+        let key = key.to_string();
+        let text = text.to_string();
+        let input = if paste {
+            I::Paste(text)
+        } else if key.is_empty() {
+            I::Text(text)
+        } else {
+            I::Key(TerminalKey {
+                key,
+                text,
+                modifiers,
+            })
+        };
+        self.terminal_dispatch(T::Input { id, input });
+    }
+    pub fn terminal_resize(self: Pin<&mut Self>, id: u64, cols: u16, rows: u16) {
+        self.terminal_dispatch(native_workspace_application::TerminalCommand::Input {
+            id,
+            input: native_workspace_application::TerminalInput::Resize { cols, rows },
+        });
+    }
+    pub fn terminal_scroll(self: Pin<&mut Self>, id: u64, lines: i32) {
+        self.terminal_dispatch(native_workspace_application::TerminalCommand::Input {
+            id,
+            input: native_workspace_application::TerminalInput::Scroll(lines),
+        });
+    }
+    pub fn terminal_confirmation(self: Pin<&mut Self>) -> QVariant {
+        let prompt = native_workspace_application::terminal_close_confirmation();
+        object([
+            ("title", text(&prompt.title)),
+            ("body", text(prompt.body)),
+            ("confirm", text(prompt.confirm)),
+            ("cancel", text(prompt.cancel)),
+        ])
+    }
     pub fn poll(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().application.poll();
+        self.as_mut().publish_terminal();
         if self.rust().revision != self.rust().application.revision() {
             self.publish();
         }
@@ -490,16 +603,41 @@ impl qobject::AppController {
             .application
             .delay_next_background_job(std::time::Duration::from_millis(milliseconds));
     }
-    pub fn initialize_persistence(mut self: Pin<&mut Self>) {
+    pub fn initialize_persistence(mut self: Pin<&mut Self>) -> bool {
         self.as_mut().rust_mut().application.enable_devtools("qt");
         self.as_mut()
             .set_devtools_available(Session::devtools_supported());
-        let _ = self
+        let ready = self
             .as_mut()
             .rust_mut()
             .application
-            .enable_persistence_default();
+            .enable_persistence_default()
+            .is_ok();
         self.publish();
+        ready
+    }
+    pub fn restore_session(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::RestoreSession);
+    }
+    pub fn prepare_to_quit(mut self: Pin<&mut Self>, save: bool) -> bool {
+        let ready = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .dispatch(AppCommand::PrepareToQuit { save })
+            .is_ok();
+        self.publish();
+        ready
+    }
+    pub fn quit_confirmation(self: Pin<&mut Self>) -> QVariant {
+        let prompt = native_workspace_application::quit_confirmation();
+        object([
+            ("title", text(&prompt.title)),
+            ("body", text(prompt.body)),
+            ("confirm", text(prompt.confirm)),
+            ("cancel", text(prompt.cancel)),
+            ("discard", text(prompt.discard)),
+        ])
     }
     pub fn diagnostic_ui_heartbeat(self: Pin<&mut Self>) {
         self.rust().application.diagnostic_observer().ui_heartbeat();

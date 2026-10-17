@@ -33,7 +33,7 @@ cargo xtask test xtask        # command composition and Qt discovery regression 
 cargo xtask fmt               # check formatting across the workspace
 ```
 
-`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the eight Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
+`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the nine Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
 
 Inspect composition without running it:
 
@@ -54,9 +54,52 @@ GNOME's `NATIVE_WORKSPACE_SMOKE=1` and `NATIVE_WORKSPACE_SMOKE_WORKSPACE=/path/t
 
 The initial vertical slice covers opening a directory, listing files, opening, editing, and saving UTF-8 documents. The frontends now collect queued `notify` events every 250 ms and reconcile periodically for external changes. Clean open documents reload automatically. If local edits and disk content diverge, normal Save refuses to overwrite the disk; the user can reload or explicitly overwrite it. All frontends use the shared Session runtime.
 
-Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
+Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata, except the session restart suite, which requires an isolated temporary database. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
 
 The Search sidebar matches UTF-8 file contents; the Files field filters entry names. Both ignore case and surrounding whitespace by default. Search offers explicit case, whole-word and regex controls. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty content query clears matches; an empty name filter restores the complete file tree. Search runs in a worker and does not use SQLite.
+
+## Session restoration verification
+
+Normal launches reopen the last saved workspace layout. An upgraded schema-1
+metadata database preserves recents but has no session layout until a workspace
+is opened. Use an isolated `NATIVE_WORKSPACE_STATE_DB` for manual checks:
+
+1. Open a workspace, two permanent tabs, a preview and a file outside the workspace.
+   Reorder the tabs and activate a different document. Quit and restart: the
+   workspace, tab order, active document, preview and external tab must return.
+2. Close every tab, quit and restart: the workspace returns with its empty editor.
+3. Remove one saved file while the app is closed: other tabs reopen with an error.
+   Quit without changing the layout, return the file and restart: its tab returns.
+   Remove the workspace instead: Home stays visible and reports the error.
+4. Launch through Open With or a file/folder argument while another workspace is
+   saved: the explicit request takes precedence. Deliver another OS open while
+   restoration is pending and verify the final workspace follows that request.
+5. Edit active and inactive tabs, then quit through menus, shortcuts and Home's
+   terminating window close. Cancel retains the text. Save All writes every dirty
+   tab; a changed disk baseline keeps the app open and preserves remaining edits.
+   Discard quits while preserving tab layout and leaving disk contents unchanged.
+   Quitting during a pending filesystem operation must keep the app open.
+
+`cargo xtask verify macos` includes `SessionRestoreSmoke`: it drives the launch
+delegate, asynchronous store and native alert buttons against temporary SQLite
+metadata. GNOME and KDE restart drivers run separate processes using the actual
+startup path. After building the selected frontend:
+
+```sh
+tools/smoke-session-restore.sh gnome
+tools/smoke-session-restore.sh kde
+```
+
+The script creates and removes disposable files and a temporary database. On
+headless Linux, run it under `dbus-run-session -- xvfb-run -a`; KDE can use
+`QT_QUICK_BACKEND=software`. CI runs both suites. GNOME covers native Cancel and a
+save conflict; KDE covers Cancel, Save All and Discard through its real dialog.
+Existing KDE regression drivers explicitly choose discard through quit preparation
+when ending a test, so unsaved-buffer scenarios do not stop at a production quit
+confirmation. Core tests cover migration, atomic checkpoints, missing or invalid paths, partial
+restore, relocation rollback, metadata write retries, quit conflicts and worker
+ordering. Restoring does not recover unsaved text, Undo, cursor/scroll positions or
+expanded folders. Concurrent instances share one last-writer-wins layout.
 
 ## Search and replacement verification
 
@@ -205,3 +248,46 @@ After editing one document, switch to another with identical text and try Undo: 
 `cargo xtask architecture` validates the Cargo dependency graph. `verify` runs it before formatting, type checking, warnings-denied Clippy and tests. Check, lint and test include all targets, so examples and test binaries cannot retain obsolete APIs. CI runs the same tasks for core, xtask, Developer Tools and each native adapter; native workspace, sidebar and delayed-drag smoke tests also run on Linux. The workflow is defined in `.github/workflows/verify.yml`; branch protection must be configured in the repository host to require its jobs before merging.
 
 Use the repository's `.agents/skills/editor-change/SKILL.md` when extending editor behavior. `AGENTS.md` and ADR 0004 describe ownership. GTK code is split into window construction, presentation controller, sidebar materialization and a debug-only smoke driver. Qt keeps Home and entry dialogs in separate components and its smoke entrypoint under `tests/`. Neither production adapter exposes synchronous search/filter shortcuts.
+
+## Integrated terminal verification
+
+Terminal builds require **Zig 0.16.x**, on PATH or selected with `ZIG=/absolute/path/to/zig`.
+The pinned Rust bindings download and checksum-verify Ghostty's official source
+archive on the first build. `GHOSTTY_SOURCE_DIR` and `GHOSTTY_ZIG_SYSTEM_DIR` support
+offline builds; the source must match the pinned revision in
+[attribution](../assets/GHOSTTY_ATTRIBUTION.md). Runtime use needs no Zig installation.
+`cargo xtask doctor` reports the build prerequisite.
+
+Open **Terminal** in the workspace toolbar/menu. Create two tabs, run `pwd` in
+both, change directory in one, and verify independent shells. Hide/show the panel
+and switch documents without restarting them. Resize while running an interactive
+program such as `vi`; check arrows, Tab, Ctrl-C, Unicode, colors and the alternate
+screen. Select text with the mouse; use Cmd-C/V on macOS or Ctrl-Shift-C/V on Linux.
+Scroll to inspect retained output. The first version uses a native CPU renderer;
+Kitty graphics, terminal search UI, shell integration and process restoration are
+not exposed. Each window permits at most 16 tabs. Ghostty scrollback budgets are configured to
+10,000 lines and 8 MiB per terminal, enforced at its allocation-page granularity; individual input messages are limited to 64 KiB.
+
+Generate sustained output in one tab while typing in another and editing a file.
+Filesystem moves must not pause terminal input/output. Close a running tab:
+Cancel retains it; Terminate closes it and its foreground processes. Try changing
+workspace through both the chooser and OS requests with live terminals: the core
+must reject the switch and preserve documents. Exit with terminals active:
+Cancel keeps the app open; confirmation waits asynchronously for termination.
+Shell startup failures and nonzero exit statuses must remain visible in the panel.
+
+`cargo xtask verify core` includes real PTY tests, Ghostty mode/Unicode/style tests,
+tab lifecycle and filesystem concurrency tests. Run the adapter checks and native
+terminal smoke modes on supported desktops; macOS GTK/Qt checks do not establish
+Linux desktop behavior.
+
+Native terminal smoke modes use disposable workspaces:
+
+```sh
+NATIVE_WORKSPACE_NEW_INSTANCE=1 NATIVE_WORKSPACE_SMOKE_TERMINAL=/path/to/fixture target/debug/native-workspace-gnome
+target/debug/native-workspace-kde --smoke-terminal=/path/to/fixture
+```
+
+The macOS `TerminalSmoke` is included in `cargo xtask test macos`. These drivers
+exercise native input callbacks, rendered snapshots, tab isolation and confirmed
+termination through the same asynchronous Session API as normal interaction.

@@ -37,12 +37,30 @@ file rejects a stale preview, and incomplete searches must be refreshed or narro
 See [search and replacement verification](docs/development.md#search-and-replacement-verification)
 for supported syntax and checks.
 
+Phase 11 restores the last workspace automatically on normal launch, including
+ordered tabs, the active document, the preview tab and open external files. Files
+are read from their current disk contents. Unavailable tabs are skipped with an
+error while the rest reopen; an unavailable workspace returns to Home. Initial
+OS file/folder requests take precedence over restoration. Normal quit offers
+Save All, Cancel or Discard Changes for unsaved documents, and failed saves or
+running filesystem operations keep the app open. SQLite stores only the confirmed
+layout, never buffer contents; unsaved crash recovery, undo history, cursor/scroll
+positions and expanded folders are not restored. See
+[session restoration verification](docs/development.md#session-restoration-verification)
+and [ADR 0007](docs/adr/0007-session-restoration.md).
+
+Phase 12 adds an integrated terminal panel with independent tabs in each native
+frontend. New shells start in the workspace root; hiding the panel retains them.
+Ghostty's libghostty-vt provides shared emulation, with native rendering and shared
+PTY/process ownership through Session. Live terminal closure and application exit
+require confirmation. Close running terminals before changing workspace. Restarting
+the app does not restore processes. See [terminal verification](docs/development.md#integrated-terminal-verification).
+
 ## Planned phases
 
 The following work is planned:
 
-11. **Restore sessions:** reopen the last workspace and its open documents after restarting the app.
-12. **Integrated terminal:** run commands in the current workspace from each native frontend.
+
 13. **Basic Git integration:** show changed files and diffs before committing.
 14. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
 

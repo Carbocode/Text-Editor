@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtQuick.Controls
 import QtTest
 import org.kde.kirigami as Kirigami
@@ -123,7 +125,7 @@ ApplicationWindow {
             tree.model.modelReset.connect(function() { ++treeResets })
         } catch (error) {
             console.error(error)
-            Qt.exit(1)
+            SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
         }
     }
 
@@ -151,7 +153,7 @@ ApplicationWindow {
                         pane.grabToImage(function(result) {
                             screenshotCaptured = result.saveToFile(capture.substring("--smoke-screenshot=".length))
                             screenshotPending = false
-                            if (!screenshotCaptured) Qt.exit(1)
+                            if (!screenshotCaptured) SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
                         })
                         --step
                         break
@@ -546,11 +548,11 @@ ApplicationWindow {
                     check(controller.open_document_ids.indexOf("tab-review-a.txt") === -1, "Discard kept the tab open")
                     check(controller.active_document_id === "tab-review-renamed.txt", "Closing the active tab did not select its neighbor")
                     console.log("KDE document tabs/undo isolation/rename/save-all/cancel/discard smoke test passed")
-                    Qt.quit()
+                    SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
                 }
             } catch (error) {
                 console.error(error)
-                Qt.exit(1)
+                SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
             }
         }
     }

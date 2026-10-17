@@ -465,8 +465,12 @@ struct ContentView: View {
                 }
             }
             .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 480)
+            .disabled(store.editingPaused || store.terminalQuitPending)
         } detail: {
-            editorDetail
+            VSplitView {
+                editorDetail.disabled(store.editingPaused || store.terminalQuitPending)
+                if store.terminalVisible { TerminalPanel(store: store).disabled(store.terminalQuitPending).frame(minHeight: 100, idealHeight: 240) }
+            }
                 .onDrop(of: [.fileURL], delegate: ExternalFileDrop(entered: { !$0.isEmpty },
                     exited: {}, dropped: { store.openFiles($0) }, operation: .copy))
                 .toolbar {
@@ -499,6 +503,11 @@ struct ContentView: View {
                     }
                     ToolbarSpacer(.fixed, placement: .primaryAction)
                     ToolbarItem(placement: .primaryAction) {
+                        Button("Terminal", systemImage: "terminal") {
+                            if store.terminals.tabs.isEmpty { store.terminalAction("new") }
+                            else { store.terminalVisible.toggle() }
+                        }
+                        .keyboardShortcut("`", modifiers: .control)
                         ApplicationMenu(store: store, openFolder: { choosingWorkspace = true })
                     }
                 }
@@ -506,7 +515,7 @@ struct ContentView: View {
         }
         }
         }
-        .disabled(store.editingPaused)
+
         .onChange(of: store.searchFocusRevision) { _, _ in sidebarTab = .search }
         .confirmationDialog("Delete \"\(deletePath)\"?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button(workspaceDeleteConfirmation(value: deletePath).confirm, role: .destructive) { store.deleteEntry(deletePath) }

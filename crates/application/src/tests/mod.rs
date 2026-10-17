@@ -6,9 +6,11 @@ mod delete;
 mod document_tabs;
 mod external_files;
 mod replacement;
+mod restore;
 mod search;
 mod session;
 mod system_open;
+mod terminal;
 
 use crate::*;
 use native_workspace_domain::DocumentId;

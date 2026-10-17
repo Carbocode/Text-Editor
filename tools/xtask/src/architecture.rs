@@ -14,9 +14,12 @@ fn permitted(from: &str, to: &str) -> bool {
         "native-workspace-domain"
         | "native-workspace-syntax"
         | "native-workspace-devtools-protocol" => false,
-        "native-workspace-filesystem" | "native-workspace-storage" => to == domain,
+        "native-workspace-filesystem"
+        | "native-workspace-storage"
+        | "native-workspace-terminal" => to == domain,
         "native-workspace-application" => [
             domain,
+            "native-workspace-terminal",
             "native-workspace-filesystem",
             "native-workspace-storage",
             "native-workspace-devtools-producer",
@@ -42,6 +45,7 @@ fn violations(metadata: &Value) -> Result<Vec<String>, &'static str> {
         let known = matches!(
             name,
             "native-workspace-domain"
+                | "native-workspace-terminal"
                 | "native-workspace-syntax"
                 | "native-workspace-devtools-protocol"
                 | "native-workspace-filesystem"
@@ -86,6 +90,7 @@ fn violations(metadata: &Value) -> Result<Vec<String>, &'static str> {
                     | "native-workspace-domain"
                     | "native-workspace-filesystem"
                     | "native-workspace-storage"
+                    | "native-workspace-terminal"
                     | "native-workspace-syntax"
             ) && [
                 "gtk4",

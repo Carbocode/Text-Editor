@@ -12,7 +12,7 @@ use crate::{
     search::{SearchJob, SearchService},
 };
 use native_workspace_filesystem::{RealFilesystem, WorkspaceFilesystem, WorkspaceWatcher};
-use native_workspace_storage::{MemoryStorage, MetadataStorage, SqliteStorage};
+use native_workspace_storage::{MemoryStorage, MetadataStorage, SqliteStorage, WorkspaceSession};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -20,9 +20,11 @@ use std::{
 };
 
 pub(crate) struct Application {
+    pub(crate) live_terminals: Arc<std::sync::atomic::AtomicUsize>,
     state: AppState,
     pub(crate) filesystem: Arc<dyn WorkspaceFilesystem>,
     pub(crate) storage: Box<dyn MetadataStorage>,
+    session_save_pending: bool,
     pub(crate) watcher: Option<WorkspaceWatcher>,
     pub(crate) last_reconcile: Instant,
     pub(crate) pending_reconcile: Option<crate::handlers::workspace::PendingReconcile>,
@@ -52,9 +54,11 @@ impl Application {
         let filesystem: Arc<dyn WorkspaceFilesystem> = filesystem.into();
         Self {
             state: AppState::default(),
+            live_terminals: Arc::default(),
             search: SearchService::new(Arc::clone(&filesystem)),
             filesystem,
             storage: Box::new(MemoryStorage::default()),
+            session_save_pending: false,
             watcher: None,
             last_reconcile: Instant::now(),
             pending_reconcile: None,
@@ -128,7 +132,18 @@ impl Application {
         self.command_context = context.clone();
         let span = context.span(command.diagnostic_name(), "dispatch");
         let revision = self.state.revision;
-        let result = match command {
+        let restoring = matches!(command, AppCommand::RestoreSession);
+        let polling = matches!(
+            command,
+            AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults
+        );
+        let previous_session = if restoring || polling {
+            None
+        } else {
+            self.workspace_session()
+        };
+        let mut result = match command {
+            AppCommand::RestoreSession => self.restore_session(),
             AppCommand::OpenPaths(paths) => self.execute_open_paths(paths),
             AppCommand::ApplyReplacement => self.apply_replacement(),
             command => match command.steps(|| self.state.dirty_tabs()) {
@@ -136,6 +151,21 @@ impl Application {
                 None => self.execute_one(command),
             },
         };
+        // Persist only confirmed state, including successful earlier composite steps.
+        // A partial restore must not erase the unavailable tabs in the saved layout.
+        if !restoring && !polling {
+            let current_session = self.workspace_session();
+            self.session_save_pending |= current_session != previous_session;
+            if self.session_save_pending
+                && let Some(session) = current_session
+            {
+                match self.storage.save_session(&session) {
+                    Ok(()) => self.session_save_pending = false,
+                    Err(error) if result.is_ok() => result = Err(error.into()),
+                    Err(_) => {}
+                }
+            }
+        }
         self.record(&context, revision, &result);
         let outcome = match &result {
             Ok(events) if events.is_empty() => Outcome::Noop,
@@ -145,6 +175,20 @@ impl Application {
         let count = result.as_ref().map_or(0, |events| events.len() as u64);
         span.end(outcome, self.state.revision, count);
         result
+    }
+
+    fn workspace_session(&self) -> Option<WorkspaceSession> {
+        let state = self.state();
+        Some(WorkspaceSession {
+            root: state.workspace.as_ref()?.root.clone(),
+            documents: state
+                .open_documents
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            active_document: state.active_document.as_ref().map(ToString::to_string),
+            preview_document: state.preview_document.as_ref().map(ToString::to_string),
+        })
     }
 
     fn execute_open_paths(&mut self, paths: Vec<PathBuf>) -> Result<Vec<AppEvent>, AppError> {

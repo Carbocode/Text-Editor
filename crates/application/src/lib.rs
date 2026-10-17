@@ -25,7 +25,12 @@ mod session;
 pub mod sidebar;
 mod snapshot;
 mod state;
+mod terminal;
 mod worker;
+pub use terminal::{
+    TerminalCell, TerminalCommand, TerminalFrame, TerminalInput, TerminalKey, TerminalSnapshot,
+    TerminalTab, terminal_close_confirmation,
+};
 
 #[cfg(test)]
 mod tests;
@@ -40,7 +45,8 @@ pub use icons::{file_icon_name, folder_icon_name};
 pub use native_workspace_storage::RecentWorkspace;
 pub use path_filter::PathFilterResult;
 pub use presentation::{
-    Confirmation, close_confirmation, delete_confirmation, replacement_confirmation,
+    Confirmation, close_confirmation, delete_confirmation, quit_confirmation,
+    replacement_confirmation,
 };
 pub use replacement::{ReplacementPreview, ReplacementTarget};
 pub use search_options::SearchOptions;

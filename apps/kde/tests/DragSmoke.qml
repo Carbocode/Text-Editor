@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtQuick.Controls
 import QtTest
 import org.nativeworkspace.Diagnostic
@@ -211,9 +213,9 @@ ApplicationWindow {
                     controller.change_document(originalText)
                     controller.save_document()
                     console.log("KDE native pointer drag smoke passed")
-                    Qt.exit(0)
+                    SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
                 }
-            } catch (error) { console.error(error); Qt.exit(1) }
+            } catch (error) { console.error(error); SmokeLifecycle.quit(controller, ApplicationLifecycle, 1) }
         }
     }
 }

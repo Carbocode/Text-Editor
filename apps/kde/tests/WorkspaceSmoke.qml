@@ -1,4 +1,6 @@
 import QtQuick
+import org.nativeworkspace.Desktop
+import "SmokeLifecycle.js" as SmokeLifecycle
 import QtTest
 import "../qml"
 import QtQuick.Controls
@@ -17,14 +19,14 @@ Kirigami.ApplicationWindow {
     function finishSmoke(window) {
         var capture = Qt.application.arguments.find(argument => argument.startsWith("--smoke-screenshot="))
         if (!capture) {
-            Qt.quit()
+            SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
             return
         }
         var capturing = window.pageStack.grabToImage(function(result) {
-            if (result.saveToFile(capture.substring("--smoke-screenshot=".length))) Qt.quit()
-            else Qt.exit(1)
+            if (result.saveToFile(capture.substring("--smoke-screenshot=".length))) SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
+            else SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
         })
-        if (!capturing) Qt.exit(1)
+        if (!capturing) SmokeLifecycle.quit(controller, ApplicationLifecycle, 1)
     }
 
     globalDrawer: Kirigami.GlobalDrawer {
@@ -158,7 +160,7 @@ Kirigami.ApplicationWindow {
                             Qt.callLater(function() {
                                 if (!workspacePane.treeMatchesSidebarEntries())
                                     throw new Error("Native tree did not show filtered files")
-                                Qt.quit()
+                                SmokeLifecycle.quit(controller, ApplicationLifecycle, 0)
                             })
                         })
                     })
