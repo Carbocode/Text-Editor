@@ -26,11 +26,21 @@ Phase 8 accepts operating-system file drops in all three frontends. Dropping loc
 
 Phase 9 opens local files and folders through operating-system requests. macOS accepts drops onto the Dock or Finder application icon and Open With, including cold launch. GNOME handles file-manager/launcher requests through GApplication, forwarding later opens to the running instance. KDE accepts launch paths and Qt file-open events on platforms that deliver them; Linux launcher opens start a new KDE process. Desktop entry templates are provided for both Linux frontends. Each instance retains one workspace: folders select it in delivery order, and files open permanent tabs; without a workspace, the first file opens its parent as the workspace. Reopening the current folder preserves its tabs, and switching folders refuses unsaved changes. Ordered requests run on the shared worker and retain successful earlier steps if a later item fails. See [desktop integration and verification](docs/development.md#application-icon-and-open-with-verification).
 
+Phase 10 adds find and replace to the **Search** sidebar in all three frontends.
+The `Aa`, whole-word and `.*` controls configure case sensitivity, word boundaries
+and regular expressions. Search details provide include/exclude globs, an ignore-file
+toggle and an Open Editors scope. Searches can be refreshed, cleared or cancelled.
+Replace supports preserving case, regex capture references and replacing one match,
+one file or all results. Every replacement first shows a shared preview. Open buffers
+remain unsaved; closed files are written on confirmation. A changed buffer or disk
+file rejects a stale preview, and incomplete searches must be refreshed or narrowed.
+See [search and replacement verification](docs/development.md#search-and-replacement-verification)
+for supported syntax and checks.
+
 ## Planned phases
 
 The following work is planned:
 
-10. **Find and replace:** replace matches in the current document and across the workspace, with a preview before workspace-wide changes.
 11. **Restore sessions:** reopen the last workspace and its open documents after restarting the app.
 12. **Integrated terminal:** run commands in the current workspace from each native frontend.
 13. **Basic Git integration:** show changed files and diffs before committing.

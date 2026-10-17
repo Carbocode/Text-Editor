@@ -26,6 +26,17 @@ pub mod qobject {
         #[qproperty(u64, revision)]
         #[qproperty(QString, workspace_name)]
         #[qproperty(QString, workspace_root)]
+        #[qproperty(bool, search_match_case)]
+        #[qproperty(bool, search_whole_word)]
+        #[qproperty(bool, search_regex)]
+        #[qproperty(QString, search_include)]
+        #[qproperty(QString, search_exclude)]
+        #[qproperty(bool, search_ignore)]
+        #[qproperty(bool, search_open_editors)]
+        #[qproperty(QString, search_error)]
+        #[qproperty(QString, replacement_preview)]
+        #[qproperty(u64, replacement_occurrences)]
+        #[qproperty(u64, replacement_files)]
         #[qproperty(QString, search_query)]
         #[qproperty(bool, search_in_progress)]
         #[qproperty(bool, search_truncated)]
@@ -72,6 +83,35 @@ pub mod qobject {
         fn initialize_persistence(self: Pin<&mut Self>);
         #[qinvokable]
         fn search_files(self: Pin<&mut Self>, query: &QString);
+        #[qinvokable]
+        fn configure_search(self: Pin<&mut Self>, match_case: bool, whole_word: bool, regex: bool);
+        #[qinvokable]
+        fn configure_search_files(
+            self: Pin<&mut Self>,
+            include: &QString,
+            exclude: &QString,
+            ignore: bool,
+            open_editors: bool,
+        );
+        #[qinvokable]
+        fn refresh_search(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn replacement_confirmation(self: Pin<&mut Self>, occurrences: u64, files: u64)
+        -> QVariant;
+        #[qinvokable]
+        fn cancel_search(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn prepare_replacement(
+            self: Pin<&mut Self>,
+            replacement: &QString,
+            preserve: bool,
+            path: &QString,
+            result_index: i32,
+        );
+        #[qinvokable]
+        fn apply_replacement(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn discard_replacement(self: Pin<&mut Self>);
         #[qinvokable]
         fn filter_files(self: Pin<&mut Self>, query: &QString);
         #[qinvokable]
@@ -152,6 +192,17 @@ pub struct AppControllerRust {
     revision: u64,
     workspace_name: QString,
     workspace_root: QString,
+    search_match_case: bool,
+    search_whole_word: bool,
+    search_regex: bool,
+    search_include: QString,
+    search_exclude: QString,
+    search_ignore: bool,
+    search_open_editors: bool,
+    search_error: QString,
+    replacement_preview: QString,
+    replacement_occurrences: u64,
+    replacement_files: u64,
     search_query: QString,
     search_in_progress: bool,
     search_truncated: bool,
@@ -313,6 +364,41 @@ impl qobject::AppController {
         self.as_mut()
             .set_file_filter_in_progress(snapshot.file_filter_in_progress);
         self.as_mut()
+            .set_search_match_case(snapshot.search_options.match_case);
+        self.as_mut()
+            .set_search_whole_word(snapshot.search_options.whole_word);
+        self.as_mut()
+            .set_search_regex(snapshot.search_options.regex);
+        self.as_mut()
+            .set_search_include(QString::from(&snapshot.search_options.include));
+        self.as_mut()
+            .set_search_exclude(QString::from(&snapshot.search_options.exclude));
+        self.as_mut()
+            .set_search_ignore(snapshot.search_options.use_ignore_files);
+        self.as_mut()
+            .set_search_open_editors(snapshot.search_options.only_open_editors);
+        self.as_mut().set_search_error(QString::from(
+            snapshot.search_error.as_deref().unwrap_or_default(),
+        ));
+        self.as_mut().set_replacement_occurrences(
+            snapshot
+                .replacement_preview
+                .as_ref()
+                .map_or(0, |preview| preview.occurrences),
+        );
+        self.as_mut().set_replacement_files(
+            snapshot
+                .replacement_preview
+                .as_ref()
+                .map_or(0, |preview| preview.file_count),
+        );
+        self.as_mut().set_replacement_preview(QString::from(
+            snapshot
+                .replacement_preview
+                .as_ref()
+                .map_or("", |preview| preview.text.as_str()),
+        ));
+        self.as_mut()
             .set_search_query(QString::from(&snapshot.search_query));
         self.as_mut()
             .set_search_in_progress(snapshot.search_in_progress);
@@ -446,6 +532,76 @@ impl qobject::AppController {
     }
     pub fn search_files(self: Pin<&mut Self>, query: &QString) {
         self.dispatch(AppCommand::QueueSearchQuery(query.to_string()));
+    }
+    pub fn configure_search(self: Pin<&mut Self>, match_case: bool, whole_word: bool, regex: bool) {
+        let mut options = self.rust().application.snapshot().search_options;
+        options.match_case = match_case;
+        options.whole_word = whole_word;
+        options.regex = regex;
+        self.dispatch(AppCommand::ConfigureSearch(options));
+    }
+    pub fn configure_search_files(
+        self: Pin<&mut Self>,
+        include: &QString,
+        exclude: &QString,
+        ignore: bool,
+        open_editors: bool,
+    ) {
+        let mut options = self.rust().application.snapshot().search_options;
+        options.include = include.to_string();
+        options.exclude = exclude.to_string();
+        options.use_ignore_files = ignore;
+        options.only_open_editors = open_editors;
+        self.dispatch(AppCommand::ConfigureSearch(options));
+    }
+    pub fn replacement_confirmation(
+        self: Pin<&mut Self>,
+        occurrences: u64,
+        files: u64,
+    ) -> QVariant {
+        let prompt = native_workspace_application::replacement_confirmation(occurrences, files);
+        object([
+            ("title", text(&prompt.title)),
+            ("body", text(prompt.body)),
+            ("confirm", text(prompt.confirm)),
+            ("cancel", text(prompt.cancel)),
+        ])
+    }
+    pub fn refresh_search(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::RefreshSearch);
+    }
+    pub fn cancel_search(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::CancelSearch);
+    }
+    pub fn prepare_replacement(
+        mut self: Pin<&mut Self>,
+        replacement: &QString,
+        preserve: bool,
+        path: &QString,
+        result_index: i32,
+    ) {
+        let path = path.to_string();
+        let target = self.rust().application.snapshot().replacement_target(
+            (!path.is_empty()).then_some(path.as_str()),
+            u64::try_from(result_index).ok(),
+        );
+        match target {
+            Ok(target) => self.dispatch(AppCommand::PrepareReplacement {
+                replacement: replacement.to_string(),
+                preserve_case: preserve,
+                target,
+            }),
+            Err(error) => {
+                self.as_mut().rust_mut().application.report(error);
+                self.publish();
+            }
+        }
+    }
+    pub fn apply_replacement(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::ApplyReplacement);
+    }
+    pub fn discard_replacement(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::DiscardReplacement);
     }
     pub fn filter_files(mut self: Pin<&mut Self>, query: &QString) {
         self.as_mut()

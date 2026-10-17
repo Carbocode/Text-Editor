@@ -56,7 +56,46 @@ The initial vertical slice covers opening a directory, listing files, opening, e
 
 Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
 
-The Search sidebar matches UTF-8 file contents; the Files field filters entry names. Both ignore case and surrounding whitespace. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty content query clears matches; an empty name filter restores the complete file tree. Search runs in a worker and does not use SQLite.
+The Search sidebar matches UTF-8 file contents; the Files field filters entry names. Both ignore case and surrounding whitespace by default. Search offers explicit case, whole-word and regex controls. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty content query clears matches; an empty name filter restores the complete file tree. Search runs in a worker and does not use SQLite.
+
+## Search and replacement verification
+
+In the **Search** tab, search `cat` in `cat CAT Cat concatenate cat_ caté`.
+`Aa` must restrict case; whole-word must reject `concatenate`, `cat_` and `caté`.
+Enable `.*` to use Rust regex syntax, including captures, Unicode classes, anchors
+and explicit newline patterns. Unsupported look-around/backreferences and malformed
+expressions display an inline error and clear prior results. This engine does not
+provide full VS Code/PCRE regex compatibility or capture case-conversion escapes.
+
+Expand **Search details** and try `*.rs, *.{md,txt}`, an anchored `./src/**`, and an
+excluded `target` folder. Commas separate patterns except inside brace alternatives;
+unanchored patterns can match at any depth. The ignore toggle controls `.gitignore`
+and `.git/info/exclude`; loaded buffers are still searchable. Open Editors restricts
+the scope to loaded tabs and includes external tabs. Check that changing these
+settings during a running search discards older batches and that buffer edits keep
+the same scope. Cancel keeps incomplete results; Refresh searches again.
+
+Expand **Replace**, enter replacement text (empty text deletes matches) and enable
+**Preserve Case** to map `cat CAT Cat` to `dog DOG Dog`. In regex mode, `$1`,
+`${name}` and `$$` expand capture groups and a literal dollar sign. Choose all
+results, the selected file, or a single occurrence. macOS/KDE also expose replacement
+in result context menus. All actions prepare a preview; Cancel must change nothing.
+The preview shows matched/replacement excerpts, limited to 240 characters per side.
+Replace applies to unsaved buffers for open tabs and saves closed files to disk.
+Existing overlapping literal occurrences are replaced leftmost, without overlap.
+
+After previewing, change a buffer or its disk file and try Replace. The entire
+preflight must refuse before changing any other file. A write failure during a
+batch retains earlier successful files and restarts search. A cancelled or truncated
+search cannot prepare replacement until refreshed/narrowed. Ordinary Save after an
+open-buffer replacement must still protect external conflicts.
+
+Core tests live in `application/src/tests/replacement.rs`; macOS's
+`WorkspaceStoreSmoke` and the GNOME workspace smoke drive asynchronous search,
+option changes, replacement preparation/application and stale-buffer rejection.
+KDE's `--smoke-workspace` covers the same flow through CXX-Qt/QML. Open the Search
+tab with Command-Shift-F on macOS or Ctrl-Shift-F on Linux; Command/Ctrl-Shift-H
+opens the replacement field.
 
 Normal run commands launch the selected editor. Developer Tools open only through the editor button and run in separate service/console processes. The console interface is in English. See [implementation and verification](devtools/IMPLEMENTATION.md) for standalone diagnostics commands, protocol budgets and coverage still pending.
 

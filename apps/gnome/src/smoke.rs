@@ -117,7 +117,8 @@ pub(super) fn run(widgets: Widgets<'_>) {
         assert_eq!(pending_row.opacity(), 1.0);
         assert!(ui.window != ui.home_window);
         assert_eq!(ui.home_window.default_width(), 640);
-        assert_eq!(ui.window.default_width(), 900);
+        assert_eq!(ui.window.default_width(), 1280);
+        assert_eq!(ui.window.default_height(), 800);
         app.activate_action("home", None);
         assert!(ui.home_window.is_visible());
         assert!(!ui.window.is_visible());
@@ -197,7 +198,7 @@ pub(super) fn run(widgets: Widgets<'_>) {
             settle();
             assert!(sidebar_frame.width() >= 220);
             assert_eq!(sidebar_resize.height(), sidebar_frame.height());
-            ui.window.set_default_size(900, 600);
+            ui.window.set_default_size(1280, 800);
             toggle_sidebar.emit_clicked();
             settle();
             assert!(!split.shows_sidebar());
@@ -1100,6 +1101,7 @@ pub(super) fn run(widgets: Widgets<'_>) {
             }
         }
         external_file_drops(ui);
+        search_and_replace(ui);
         if std::env::var_os("NATIVE_WORKSPACE_SMOKE_RECORD_DROP").is_some() {
             let app = app.clone();
             glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || app.quit());
@@ -1204,4 +1206,119 @@ fn finish_external_drop(ui: &Ui, expected: &str) {
         drop(snapshot);
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
+}
+
+/// Drive the real Search widgets and the asynchronous preview/apply callbacks.
+fn search_and_replace(ui: &Ui) {
+    let document = DocumentId::parse("search-panel.txt").unwrap();
+    dispatch(
+        ui,
+        AppCommand::CreateEntry {
+            id: document.clone(),
+            directory: false,
+        },
+    );
+    dispatch(ui, AppCommand::OpenDocument(document.clone()));
+    ui.buffer.set_text("cat CAT Cat concatenate 💡 cat");
+    dispatch(ui, AppCommand::SaveDocument(document.clone()));
+    ui.switch_sidebar(SidebarTab::Search);
+    ui.search.set_text("cat");
+    ui.search.emit_by_name::<()>("search-changed", &[]);
+    settle(ui);
+    ui.search_controls.word.set_active(true);
+    settle(ui);
+    assert_eq!(ui.snapshot.borrow().search_results.len(), 4);
+    ui.search_controls.case.set_active(true);
+    settle(ui);
+    assert_eq!(ui.snapshot.borrow().search_results.len(), 2);
+    ui.search_controls.case.set_active(false);
+    ui.search_controls.regex.set_active(true);
+    ui.search.set_text("[");
+    ui.search.emit_by_name::<()>("search-changed", &[]);
+    settle(ui);
+    assert!(ui.snapshot.borrow().search_error.is_some());
+    ui.search_controls.regex.set_active(false);
+    ui.search.set_text("cat");
+    ui.search.emit_by_name::<()>("search-changed", &[]);
+    settle(ui);
+    ui.search_controls.replacement.set_text("dog");
+    ui.search_controls.preserve.set_active(true);
+    ui.search_controls.all.emit_clicked();
+    settle(ui);
+    assert_eq!(
+        ui.snapshot
+            .borrow()
+            .replacement_preview
+            .as_ref()
+            .unwrap()
+            .occurrences,
+        4
+    );
+    assert_eq!(
+        &*ui.snapshot
+            .borrow()
+            .active_document
+            .as_ref()
+            .unwrap()
+            .content,
+        "cat CAT Cat concatenate 💡 cat"
+    );
+    let apply = ui
+        .search_controls
+        .preview
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .apply
+        .clone();
+    apply.emit_clicked();
+    settle(ui);
+    assert!(ui.snapshot.borrow().replacement_preview.is_none());
+    assert!(ui.snapshot.borrow().active_document.as_ref().unwrap().dirty);
+    assert_eq!(
+        &*ui.snapshot
+            .borrow()
+            .active_document
+            .as_ref()
+            .unwrap()
+            .content,
+        "dog DOG Dog concatenate 💡 dog"
+    );
+    dispatch(ui, AppCommand::SaveDocument(document.clone()));
+    dispatch(ui, AppCommand::QueueSearchQuery("dog".into()));
+    ui.search_controls.replacement.set_text("fox");
+    ui.search_controls.all.emit_clicked();
+    settle(ui);
+    ui.buffer.set_text("dog typed after preview");
+    let apply = ui
+        .search_controls
+        .preview
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .apply
+        .clone();
+    apply.emit_clicked();
+    settle(ui);
+    assert!(ui.snapshot.borrow().error.is_some());
+    assert_eq!(
+        &*ui.snapshot
+            .borrow()
+            .active_document
+            .as_ref()
+            .unwrap()
+            .content,
+        "dog typed after preview"
+    );
+    let preview_window = ui
+        .search_controls
+        .preview
+        .borrow()
+        .as_ref()
+        .unwrap()
+        .window
+        .clone();
+    preview_window.close();
+    assert!(ui.snapshot.borrow().replacement_preview.is_none());
+    println!("GTK Search options/Unicode/replace preview/stale buffer smoke test passed");
 }

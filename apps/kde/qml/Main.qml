@@ -8,8 +8,8 @@ import org.nativeworkspace.Desktop
 Kirigami.ApplicationWindow {
     id: window
     visible: !workspacePane.showingHome
-    width: Kirigami.Units.gridUnit * 60
-    height: Kirigami.Units.gridUnit * 40
+    width: Kirigami.Units.gridUnit * 72
+    height: Kirigami.Units.gridUnit * 46
     minimumWidth: Kirigami.Units.gridUnit * 36
     minimumHeight: Kirigami.Units.gridUnit * 24
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"

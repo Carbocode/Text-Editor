@@ -11,6 +11,7 @@ mod system_open_smoke;
 use adw::prelude::*;
 use gtk::{gio, glib};
 mod document_tabs;
+mod search_panel;
 mod sidebar;
 mod ui;
 mod window;

@@ -103,8 +103,8 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Native Workspace")
-        .default_width(900)
-        .default_height(600)
+        .default_width(1280)
+        .default_height(800)
         .build();
     let sidebar_header = adw::HeaderBar::new();
     sidebar_header.set_title_widget(Some(&gtk::Label::new(None)));
@@ -207,17 +207,12 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
         empty_tabs.push(tab);
     }
     sidebar_content.append(&tab_row);
-    let text_search_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    text_search_row.set_margin_start(8);
-    text_search_row.set_margin_end(8);
-    text_search_row.set_margin_bottom(6);
-    search.set_hexpand(true);
-    text_search_row.append(&search);
-    text_search_row.append(&search_spinner);
+    let search_controls = crate::search_panel::SearchControls::new(&search, &search_spinner);
+    let text_search_row = search_controls.root.clone();
     text_search_row.set_visible(false);
     sidebar_content.append(&text_search_row);
     let search_truncated = gtk::Label::new(Some(
-        "Showing the first 20,000 matches. Refine the search to see the rest.",
+        "Results are incomplete. Refresh or refine the search before replacing.",
     ));
     search_truncated.set_wrap(true);
     search_truncated.set_xalign(0.0);
@@ -516,6 +511,7 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
         file_query,
         file_search_row: search_row,
         text_search_row,
+        search_controls,
         search_spinner,
         search_truncated,
         conflict_banner,
@@ -1059,6 +1055,26 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
                 ui.dispatch(AppCommand::QueueSearchQuery(search.text().to_string()));
             }
         });
+    }
+    ui.search_controls.connect(&ui);
+    for (name, key, replace) in [
+        ("find-in-files", "<Shift>f", false),
+        ("replace-in-files", "<Shift>h", true),
+    ] {
+        let action = gio::SimpleAction::new(name, None);
+        ui.window.add_action(&action);
+        let ui = ui.clone();
+        let text_tab = text_tab.clone();
+        action.connect_activate(move |_, _| {
+            text_tab.set_active(true);
+            if replace {
+                ui.search_controls.replace_expander.set_expanded(true);
+                ui.search_controls.replacement.grab_focus();
+            } else {
+                ui.search.grab_focus();
+            }
+        });
+        app.set_accels_for_action(&format!("win.{name}"), &[&primary_accelerator(key)]);
     }
     for (mode, sidebar) in ui.sidebars.iter().enumerate() {
         {

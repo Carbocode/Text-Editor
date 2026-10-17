@@ -19,7 +19,7 @@ struct NativeWorkspaceApp: App {
                 .modifier(SystemOpenPresentation(delegate: delegate))
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1000, height: 700)
+        .defaultSize(width: 1280, height: 800)
         .defaultLaunchBehavior(.suppressed)
         .commands { WorkspaceCommands(store: store) }
     }
@@ -36,6 +36,14 @@ private struct WorkspaceCommands: Commands {
             }
         }
         CommandGroup(replacing: .newItem) { }
+        CommandMenu("Search") {
+            Button("Find in Files") { store.focusSearch(replace: false) }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(store.workspaceName == nil)
+            Button("Replace in Files") { store.focusSearch(replace: true) }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+                .disabled(store.workspaceName == nil)
+        }
         CommandGroup(replacing: .saveItem) {
             Button("Save All") { store.saveAllDocuments() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])

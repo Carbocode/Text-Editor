@@ -625,6 +625,17 @@ Item {
         enabled: false
     }
 
+    Shortcut {
+        sequence: "Ctrl+Shift+F"
+        enabled: root.controller && root.controller.workspace_root.length > 0
+        onActivated: { root.sidebarTab = WorkspacePane.Search; textSearchField.forceActiveFocus() }
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+H"
+        enabled: root.controller && root.controller.workspace_root.length > 0
+        onActivated: { root.sidebarTab = WorkspacePane.Search; searchControls.focusReplace() }
+    }
+
     function openSearchResult(index, id) {
         selectedDirectoryPath = ""
         if (!flushEditor()) return
@@ -1225,13 +1236,21 @@ Item {
                                         Layout.preferredHeight: Kirigami.Units.iconSizes.smallMedium
                                     }
                                 }
+                                SearchPanel {
+                                    id: searchControls
+                                    workspace: root
+                                    visible: root.sidebarTab === WorkspacePane.Search
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: Kirigami.Units.smallSpacing
+                                    Layout.rightMargin: Kirigami.Units.smallSpacing
+                                }
                                 Label {
                                     objectName: "searchTruncated"
                                     Layout.fillWidth: true
                                     Layout.leftMargin: Kirigami.Units.smallSpacing
                                     Layout.rightMargin: Kirigami.Units.smallSpacing
                                     visible: root.sidebarTab === WorkspacePane.Search && root.controller.search_truncated
-                                    text: "Showing the first 20,000 matches. Refine the search to see the rest."
+                                    text: "Results are incomplete. Refresh or refine the search before replacing."
                                     wrapMode: Text.Wrap
                                     font: Kirigami.Theme.smallFont
                                     opacity: 0.7
@@ -1562,6 +1581,11 @@ Item {
                                         Menu {
                                             id: searchEntryMenu
                                             MenuItem {
+                                                text: "Replace All in File…"
+                                                enabled: !fileGroup.isDirectory && !root.controller.search_in_progress && !root.controller.search_truncated
+                                                onTriggered: searchControls.replace(fileGroup.fileId, -1)
+                                            }
+                                            MenuItem {
                                                 text: "Rename…"
                                                 icon.name: "edit-rename"
                                                 onTriggered: root.beginRename(fileGroup.fileId)
@@ -1606,6 +1630,21 @@ Item {
                                             highlighted: root.selectedResultIndex === resultIndex
                                             onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)
                                             onDoubleClicked: if (root.flushEditor()) root.controller.keep_document_open(fileGroup.fileId)
+                                            TapHandler {
+                                                acceptedButtons: Qt.RightButton
+                                                onTapped: matchReplaceMenu.popup()
+                                            }
+                                            Menu {
+                                                id: matchReplaceMenu
+                                                MenuItem {
+                                                    text: "Replace…"
+                                                    onTriggered: searchControls.replace("", resultIndex)
+                                                }
+                                                MenuItem {
+                                                    text: "Replace All in File…"
+                                                    onTriggered: searchControls.replace(fileGroup.fileId, -1)
+                                                }
+                                            }
                                         }
                                     }
                                 }

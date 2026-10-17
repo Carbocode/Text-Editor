@@ -3,8 +3,9 @@
 //! ones. Matches stream to the UI as they are found, and a newer query or an
 //! emptied field cancels the remaining work within one file per thread.
 use crate::{
-    AppEvent, DocumentEntry, SearchLocation, SearchResult,
+    AppEvent, DocumentEntry, SearchLocation, SearchOptions, SearchResult,
     diagnostics::{Context, Outcome},
+    search_options::FilePatterns,
     worker::{Cancellation, DebouncedWorker},
 };
 use ignore::{Match, gitignore::Gitignore, gitignore::GitignoreBuilder};
@@ -36,6 +37,7 @@ pub(crate) struct SearchJob {
     pub root: PathBuf,
     pub documents: Vec<DocumentEntry>,
     pub query: String,
+    pub options: SearchOptions,
     /// The query is new and its results start empty, so publish matches as
     /// they arrive. Otherwise current results stay until the search finishes.
     pub stream: bool,
@@ -156,28 +158,21 @@ fn execute(
     let span = job.diagnostic.span("search.execute", "search-worker");
     let mut found = Vec::new();
     let mut published = 0u64;
-    let truncated = run_search(
-        filesystem,
-        &job.root,
-        &job.documents,
-        &job.query,
-        &|| cancellation.is_cancelled(),
-        |batch| {
-            published += batch.len() as u64;
-            if job.stream {
-                let _ = batches.send(SearchBatch {
-                    diagnostic: job.diagnostic.clone(),
-                    generation,
-                    results: batch,
-                    replace: false,
-                    finished: false,
-                    truncated: false,
-                });
-            } else {
-                found.extend(batch);
-            }
-        },
-    );
+    let truncated = run_search(filesystem, &job, &|| cancellation.is_cancelled(), |batch| {
+        published += batch.len() as u64;
+        if job.stream {
+            let _ = batches.send(SearchBatch {
+                diagnostic: job.diagnostic.clone(),
+                generation,
+                results: batch,
+                replace: false,
+                finished: false,
+                truncated: false,
+            });
+        } else {
+            found.extend(batch);
+        }
+    });
     if cancellation.is_cancelled() {
         span.end(Outcome::Cancelled, 0, published);
         job.diagnostic
@@ -202,6 +197,9 @@ fn execute(
 pub(crate) struct Matcher {
     needle: String,
     prefilter: Option<Regex>,
+    exact: Option<Regex>,
+    whole_word: bool,
+    regex: bool,
 }
 
 impl Matcher {
@@ -227,7 +225,56 @@ impl Matcher {
                 .ok()
         })
         .flatten();
-        Self { needle, prefilter }
+        Self {
+            needle,
+            prefilter,
+            exact: None,
+            whole_word: false,
+            regex: false,
+        }
+    }
+
+    pub(crate) fn configured(query: &str, options: &SearchOptions) -> Result<Self, String> {
+        let mut matcher = Self::new(query);
+        matcher.whole_word = options.whole_word;
+        matcher.regex = options.regex;
+        if options.regex || options.match_case {
+            let pattern = if options.regex {
+                query.trim().to_owned()
+            } else {
+                regex::escape(query.trim())
+            };
+            matcher.exact = Some(
+                RegexBuilder::new(&pattern)
+                    .case_insensitive(!options.match_case)
+                    .multi_line(true)
+                    .build()
+                    .map_err(|error| format!("Invalid regular expression: {error}"))?,
+            );
+        }
+        Ok(matcher)
+    }
+
+    /// Replacement uses precisely the same Unicode ranges as search.
+    pub(crate) fn replacement(
+        &self,
+        content: &str,
+        start: usize,
+        end: usize,
+        template: &str,
+    ) -> String {
+        if self.regex
+            && let Some(expression) = &self.exact
+            && let Some(captures) = expression.captures_at(content, start)
+            && captures
+                .get(0)
+                .is_some_and(|found| found.start() == start && found.end() == end)
+        {
+            let mut expanded = String::new();
+            captures.expand(template, &mut expanded);
+            return expanded;
+        }
+        template.to_owned()
     }
 
     pub fn needle(&self) -> &str {
@@ -242,6 +289,93 @@ impl Matcher {
 
     /// Every occurrence in `content`, including overlapping ones.
     pub fn content_results(&self, id: &DocumentId, content: &str, results: &mut Vec<SearchResult>) {
+        let start = results.len();
+        self.unfiltered_results(id, content, results);
+        if self.whole_word {
+            let chars: Vec<_> = content.chars().collect();
+            let mut index = 0;
+            results.retain(|result| {
+                let existing = index < start;
+                index += 1;
+                existing
+                    || (result
+                        .location
+                        .start_char
+                        .checked_sub(1)
+                        .and_then(|offset| chars.get(offset as usize))
+                        .is_none_or(|ch| !word_char(*ch))
+                        && chars
+                            .get(result.location.end_char as usize)
+                            .is_none_or(|ch| !word_char(*ch)))
+            });
+        }
+    }
+
+    fn unfiltered_results(&self, id: &DocumentId, content: &str, results: &mut Vec<SearchResult>) {
+        if let Some(expression) = &self.exact {
+            if self.needle.is_empty() {
+                return;
+            }
+            let mut positions = vec![(0usize, 0usize, 0usize, 1u64, 1u64)];
+            let (mut scalar, mut utf16, mut line, mut column) = (0usize, 0usize, 1u64, 1u64);
+            for (byte, ch) in content.char_indices() {
+                scalar += 1;
+                utf16 += ch.len_utf16();
+                if ch == '\n' {
+                    line += 1;
+                    column = 1;
+                } else {
+                    column += 1;
+                }
+                positions.push((byte + ch.len_utf8(), scalar, utf16, line, column));
+            }
+            let line_starts: Vec<_> = std::iter::once(0)
+                .chain(content.match_indices('\n').map(|(byte, _)| byte + 1))
+                .collect();
+            let mut preview: Option<(usize, LinePreview<'_>)> = None;
+            let mut regular = expression.find_iter(content);
+            let mut from = 0;
+            let matches = std::iter::from_fn(|| {
+                if self.regex {
+                    return regular.next();
+                }
+                let found = expression.find_at(content, from)?;
+                from = found.start() + content[found.start()..].chars().next()?.len_utf8();
+                Some(found)
+            });
+            for found in matches {
+                let start = positions[positions
+                    .binary_search_by_key(&found.start(), |p| p.0)
+                    .unwrap()];
+                let end = positions[positions
+                    .binary_search_by_key(&found.end(), |p| p.0)
+                    .unwrap()];
+                let line_index = line_starts.partition_point(|&byte| byte <= found.start()) - 1;
+                let line_start = line_starts[line_index];
+                let line_end = line_starts
+                    .get(line_index + 1)
+                    .map_or(content.len(), |byte| byte - 1);
+                if preview
+                    .as_ref()
+                    .is_none_or(|(index, _)| *index != line_index)
+                {
+                    preview = Some((line_index, LinePreview::new(&content[line_start..line_end])));
+                }
+                results.push(SearchResult {
+                    id: id.clone(),
+                    snippet: preview.as_ref().unwrap().1.snippet(start.4 as usize - 1),
+                    location: SearchLocation {
+                        line: start.3,
+                        column: start.4,
+                        start_char: start.1 as u64,
+                        end_char: end.1 as u64,
+                        start_utf16: start.2 as u64,
+                        end_utf16: end.2 as u64,
+                    },
+                });
+            }
+            return;
+        }
         let needle = self.needle.as_str();
         if needle.is_empty() || !self.may_match(content) {
             return;
@@ -343,6 +477,10 @@ impl Matcher {
             }
         }
     }
+}
+
+fn word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 /// Snippets around the matches of one line. Built once per matching line, so
@@ -473,12 +611,29 @@ fn in_git_directory(path: &str) -> bool {
 /// Indices of the documents to search, most relevant first: open buffers,
 /// then by depth so root files come before nested ones, then by path.
 /// Ignored files are skipped unless open.
+#[cfg(test)]
 fn search_order(root: &Path, documents: &[DocumentEntry]) -> Vec<usize> {
+    search_order_with_options(root, documents, &SearchOptions::default())
+}
+
+fn search_order_with_options(
+    root: &Path,
+    documents: &[DocumentEntry],
+    options: &SearchOptions,
+) -> Vec<usize> {
     let rules = IgnoreRules::load(root, documents);
+    let Ok(patterns) = FilePatterns::new(options) else {
+        return Vec::new();
+    };
     let mut order: Vec<usize> = (0..documents.len())
         .filter(|&index| {
             let entry = &documents[index];
-            !entry.id().is_external() && (entry.is_loaded() || !rules.ignored(entry.id().as_str()))
+            (!entry.id().is_external() || options.only_open_editors)
+                && (!options.only_open_editors || entry.is_loaded())
+                && patterns.matches(entry.id().as_str())
+                && (!options.use_ignore_files
+                    || entry.is_loaded()
+                    || !rules.ignored(entry.id().as_str()))
         })
         .collect();
     order.sort_by_key(|&index| {
@@ -491,19 +646,26 @@ fn search_order(root: &Path, documents: &[DocumentEntry]) -> Vec<usize> {
 /// Searches `documents` and hands matches to `publish` in batches: the first
 /// as soon as it exists, then at most every `PUBLISH_INTERVAL`, and the rest
 /// at the end. Returns whether `RESULT_LIMIT` cut the search short.
-pub(crate) fn run_search(
+fn run_search(
     filesystem: &dyn WorkspaceFilesystem,
-    root: &Path,
-    documents: &[DocumentEntry],
-    query: &str,
+    job: &SearchJob,
     cancelled: &(dyn Fn() -> bool + Sync),
     mut publish: impl FnMut(Vec<SearchResult>),
 ) -> bool {
-    let matcher = Matcher::new(query);
+    let SearchJob {
+        root,
+        documents,
+        query,
+        options,
+        ..
+    } = job;
+    let Ok(matcher) = Matcher::configured(query, options) else {
+        return false;
+    };
     if matcher.needle().is_empty() {
         return false;
     }
-    let order = search_order(root, documents);
+    let order = search_order_with_options(root, documents, options);
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
     let workers = thread::available_parallelism().map_or(4, |count| count.get().min(8));

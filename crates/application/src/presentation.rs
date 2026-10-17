@@ -28,3 +28,13 @@ pub fn delete_confirmation(value: &str) -> Confirmation {
         discard: "Discard Changes",
     }
 }
+
+pub fn replacement_confirmation(occurrences: u64, files: u64) -> Confirmation {
+    Confirmation {
+        title: format!("Replace {occurrences} occurrences in {files} files?"),
+        body: "Open documents keep unsaved changes. Closed files are saved to disk.",
+        confirm: "Replace",
+        cancel: "Cancel",
+        discard: "",
+    }
+}

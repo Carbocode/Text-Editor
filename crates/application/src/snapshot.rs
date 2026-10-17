@@ -33,7 +33,7 @@ pub struct SearchResult {
 }
 
 /// A match position in every unit the native text views use.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SearchLocation {
     pub line: u64,
     pub column: u64,
@@ -77,6 +77,9 @@ pub struct AppSnapshot {
     pub documents: Arc<Vec<DocumentSummary>>,
     pub directories: Arc<Vec<String>>,
     pub search_query: String,
+    pub search_options: crate::SearchOptions,
+    pub search_error: Option<String>,
+    pub replacement_preview: Option<Arc<crate::ReplacementPreview>>,
     /// Content matches sorted by path, then by position.
     pub search_results: Arc<Vec<SearchResult>>,
     pub search_in_progress: bool,
@@ -100,6 +103,30 @@ pub struct AppSnapshot {
 }
 
 impl AppSnapshot {
+    /// Resolve a native selection before sending a replacement intention.
+    pub fn replacement_target(
+        &self,
+        path: Option<&str>,
+        result_index: Option<u64>,
+    ) -> Result<crate::ReplacementTarget, crate::AppError> {
+        if let Some(index) = result_index {
+            let result = usize::try_from(index)
+                .ok()
+                .and_then(|index| self.search_results.get(index))
+                .ok_or(crate::AppError::NoReplacements)?;
+            Ok(crate::ReplacementTarget::Match {
+                id: result.id.clone(),
+                location: result.location.clone(),
+            })
+        } else if let Some(path) = path {
+            Ok(crate::ReplacementTarget::Document(
+                DocumentId::from_document_path(path)
+                    .map_err(|_| crate::AppError::InvalidEntryName)?,
+            ))
+        } else {
+            Ok(crate::ReplacementTarget::All)
+        }
+    }
     pub fn workspace_root(&self) -> Option<&std::path::Path> {
         self.workspace
             .as_ref()

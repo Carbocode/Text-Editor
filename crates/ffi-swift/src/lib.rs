@@ -82,6 +82,11 @@ impl From<native_workspace_application::Confirmation> for Confirmation {
     }
 }
 #[uniffi::export]
+pub fn workspace_replacement_confirmation(occurrences: u64, files: u64) -> Confirmation {
+    native_workspace_application::replacement_confirmation(occurrences, files).into()
+}
+
+#[uniffi::export]
 pub fn workspace_close_confirmation(value: String) -> Confirmation {
     native_workspace_application::close_confirmation(&value).into()
 }
@@ -151,6 +156,43 @@ pub struct SidebarRow {
     pub result_index: Option<u64>,
 }
 
+#[derive(Clone, uniffi::Record)]
+pub struct SearchOptions {
+    pub match_case: bool,
+    pub whole_word: bool,
+    pub regex: bool,
+    pub include: String,
+    pub exclude: String,
+    pub use_ignore_files: bool,
+    pub only_open_editors: bool,
+}
+impl From<native_workspace_application::SearchOptions> for SearchOptions {
+    fn from(options: native_workspace_application::SearchOptions) -> Self {
+        Self {
+            match_case: options.match_case,
+            whole_word: options.whole_word,
+            regex: options.regex,
+            include: options.include,
+            exclude: options.exclude,
+            use_ignore_files: options.use_ignore_files,
+            only_open_editors: options.only_open_editors,
+        }
+    }
+}
+impl From<SearchOptions> for native_workspace_application::SearchOptions {
+    fn from(options: SearchOptions) -> Self {
+        Self {
+            match_case: options.match_case,
+            whole_word: options.whole_word,
+            regex: options.regex,
+            include: options.include,
+            exclude: options.exclude,
+            use_ignore_files: options.use_ignore_files,
+            only_open_editors: options.only_open_editors,
+        }
+    }
+}
+
 /// None for a list means unchanged since the last delivery to this adapter.
 /// `snapshot` always includes every list. Commands and `poll` deliver deltas.
 #[derive(Clone, uniffi::Record)]
@@ -162,6 +204,11 @@ pub struct WorkspaceUpdate {
     pub workspace_root: Option<String>,
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub search_query: String,
+    pub search_options: SearchOptions,
+    pub search_error: Option<String>,
+    pub replacement_preview: Option<String>,
+    pub replacement_occurrences: u64,
+    pub replacement_files: u64,
     pub search_results: Option<Vec<SearchResult>>,
     pub search_in_progress: bool,
     pub search_truncated: bool,
@@ -196,6 +243,20 @@ fn update(snapshot: &AppSnapshot, previous: Option<&AppSnapshot>) -> WorkspaceUp
             })
             .collect(),
         search_query: snapshot.search_query.clone(),
+        search_options: snapshot.search_options.clone().into(),
+        search_error: snapshot.search_error.clone(),
+        replacement_preview: snapshot
+            .replacement_preview
+            .as_ref()
+            .map(|preview| preview.text.clone()),
+        replacement_occurrences: snapshot
+            .replacement_preview
+            .as_ref()
+            .map_or(0, |preview| preview.occurrences),
+        replacement_files: snapshot
+            .replacement_preview
+            .as_ref()
+            .map_or(0, |preview| preview.file_count),
         search_in_progress: snapshot.search_in_progress,
         search_truncated: snapshot.search_truncated,
         search_results: previous
@@ -461,6 +522,42 @@ impl WorkspaceApplication {
     }
     pub fn set_search_query(&self, query: String) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::QueueSearchQuery(query))
+    }
+    pub fn configure_search(
+        &self,
+        options: SearchOptions,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::ConfigureSearch(options.into()))
+    }
+    pub fn refresh_search(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::RefreshSearch)
+    }
+    pub fn cancel_search(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::CancelSearch)
+    }
+    /// No path selects all results; a path selects a file; an index selects one occurrence.
+    pub fn prepare_replacement(
+        &self,
+        replacement: String,
+        preserve_case: bool,
+        path: Option<String>,
+        result_index: Option<u64>,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        let snapshot = bridge.session.snapshot();
+        let target = snapshot.replacement_target(path.as_deref(), result_index)?;
+        bridge.session.dispatch(AppCommand::PrepareReplacement {
+            replacement,
+            preserve_case,
+            target,
+        })?;
+        Ok(bridge.deliver(false))
+    }
+    pub fn apply_replacement(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::ApplyReplacement)
+    }
+    pub fn discard_replacement(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::DiscardReplacement)
     }
     pub fn open_workspace(&self, path: String) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::OpenWorkspace(PathBuf::from(path)))

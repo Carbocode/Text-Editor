@@ -33,6 +33,17 @@ pub enum AppEvent {
     SearchQueryQueued {
         query: String,
     },
+    SearchConfigured {
+        options: crate::SearchOptions,
+    },
+    SearchCancelled,
+    ReplacementPrepared {
+        preview: Option<Arc<crate::ReplacementPreview>>,
+    },
+    /// A closed file was written; its old search results are no longer valid.
+    SearchFileReplaced {
+        id: DocumentId,
+    },
     /// The current query is searched again; current results stay meanwhile.
     SearchStarted,
     /// Matches from the search worker, appended as they stream in or
@@ -89,6 +100,10 @@ impl AppEvent {
             Self::EntryDeleted { .. } => ("filesystem.entry_deleted", 0),
             Self::EntryRelocated { .. } => ("filesystem.entry_relocated", 0),
             Self::SearchQueryQueued { .. } => ("search.input_changed", 0),
+            Self::SearchConfigured { .. } => ("search.configured", 0),
+            Self::SearchCancelled => ("search.cancelled", 0),
+            Self::ReplacementPrepared { .. } => ("replace.preview", 0),
+            Self::SearchFileReplaced { .. } => ("replace.file_written", 0),
             Self::SearchStarted => ("search.started", 0),
             Self::SearchResultsUpdated { results, .. } => {
                 ("search.results_applied", results.len() as u64)
@@ -118,6 +133,10 @@ impl AppEvent {
             | Self::EntryDeleted { .. }
             | Self::EntryRelocated { .. }
             | Self::SearchQueryQueued { .. }
+            | Self::SearchConfigured { .. }
+            | Self::SearchCancelled
+            | Self::ReplacementPrepared { .. }
+            | Self::SearchFileReplaced { .. }
             | Self::SearchStarted
             | Self::SearchResultsUpdated { .. }
             | Self::DocumentAdded { .. }

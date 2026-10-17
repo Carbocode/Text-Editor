@@ -20,6 +20,15 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var searchResults: [SearchResult] = []
     @Published private(set) var searchInProgress = false
     @Published private(set) var searchTruncated = false
+    @Published private(set) var searchOptions = SearchOptions(matchCase: false, wholeWord: false, regex: false, include: "", exclude: "", useIgnoreFiles: true, onlyOpenEditors: false)
+    @Published private(set) var searchError: String?
+    @Published private(set) var replacementPreview: String?
+    @Published private(set) var replacementOccurrences: UInt64 = 0
+    @Published private(set) var replacementFiles: UInt64 = 0
+    @Published var replacementText = ""
+    @Published var preserveReplacementCase = false
+    @Published var showReplace = false
+    @Published private(set) var searchFocusRevision: UInt64 = 0
     @Published private(set) var directories: [String] = []
     @Published private(set) var documents: [DocumentSummary] = []
     @Published private(set) var fileFilterQuery = ""
@@ -120,6 +129,16 @@ final class WorkspaceStore: ObservableObject {
         clearSearchSelection()
         request { try core.setSearchQuery(query: query) }
     }
+    func configureSearch(_ options: SearchOptions) { clearSearchSelection(); request { try core.configureSearch(options: options) } }
+    func focusSearch(replace: Bool) { showReplace = replace; searchFocusRevision &+= 1 }
+    func refreshSearch() { clearSearchSelection(); request { try core.refreshSearch() } }
+    func cancelSearch() { request { try core.cancelSearch() } }
+    func prepareReplacement(path: String? = nil, resultIndex: Int? = nil) {
+        request { try core.prepareReplacement(replacement: replacementText, preserveCase: preserveReplacementCase,
+            path: path, resultIndex: resultIndex.map(UInt64.init)) }
+    }
+    func applyReplacement() { clearSearchSelection(); request { try core.applyReplacement() } }
+    func discardReplacement() { request { try core.discardReplacement() } }
     func openWorkspace(_ url: URL) { request { try core.openWorkspace(path: url.path) } }
     func refreshWorkspace() { request { try core.refreshWorkspace() } }
     @discardableResult func moveEntry(_ path: String, directory: String) -> Bool {
@@ -209,6 +228,11 @@ final class WorkspaceStore: ObservableObject {
         if workspaceRoot != snapshot.workspaceRoot { workspaceRoot = snapshot.workspaceRoot }
         if recentWorkspaces != snapshot.recentWorkspaces { recentWorkspaces = snapshot.recentWorkspaces }
         if searchQuery != snapshot.searchQuery { searchQuery = snapshot.searchQuery }
+        if searchOptions != snapshot.searchOptions { searchOptions = snapshot.searchOptions }
+        if searchError != snapshot.searchError { searchError = snapshot.searchError }
+        if replacementPreview != snapshot.replacementPreview { replacementPreview = snapshot.replacementPreview }
+        if replacementOccurrences != snapshot.replacementOccurrences { replacementOccurrences = snapshot.replacementOccurrences }
+        if replacementFiles != snapshot.replacementFiles { replacementFiles = snapshot.replacementFiles }
         // While busy, a queued query may not be applied yet.
         if !snapshot.activity.busy && searchFieldText != snapshot.searchQuery { searchFieldText = snapshot.searchQuery }
         if let results = snapshot.searchResults { searchResults = results }

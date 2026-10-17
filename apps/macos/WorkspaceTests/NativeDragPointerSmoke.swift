@@ -59,7 +59,7 @@ struct FileURLDropHarness: View {
     }
 }
 @main struct Smoke {
-    @MainActor static func main() {
+    @MainActor static func main() throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let result = Result()
@@ -94,7 +94,11 @@ struct FileURLDropHarness: View {
         send([(.leftMouseDown, 70), (.leftMouseUp, 70)])
         precondition(result.clicked, "Native drag source intercepted a normal click")
         print("macOS native drag/drop/cancel/click cleanup smoke test passed")
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("external file ü.txt")
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("external file ü.txt")
+        try "external file drag".write(to: url, atomically: true, encoding: .utf8)
         result.dropped = false
         window.contentView = NSHostingView(rootView: FileURLDropHarness(url: url, result: result))
         RunLoop.main.run(until: Date().addingTimeInterval(0.2))

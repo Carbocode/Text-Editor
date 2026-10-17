@@ -3524,6 +3524,7 @@ dependencies = [
 name = "native-workspace-application"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "ignore",
  "native-workspace-devtools-producer",
  "native-workspace-domain",
