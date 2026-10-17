@@ -33,7 +33,7 @@ cargo xtask test xtask        # command composition and Qt discovery regression 
 cargo xtask fmt               # check formatting across the workspace
 ```
 
-`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the eight Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
+`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the nine Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
 
 Inspect composition without running it:
 
@@ -54,9 +54,52 @@ GNOME's `NATIVE_WORKSPACE_SMOKE=1` and `NATIVE_WORKSPACE_SMOKE_WORKSPACE=/path/t
 
 The initial vertical slice covers opening a directory, listing files, opening, editing, and saving UTF-8 documents. The frontends now collect queued `notify` events every 250 ms and reconcile periodically for external changes. Clean open documents reload automatically. If local edits and disk content diverge, normal Save refuses to overwrite the disk; the user can reload or explicitly overwrite it. All frontends use the shared Session runtime.
 
-Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
+Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata, except the session restart suite, which requires an isolated temporary database. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
 
 The Search sidebar matches UTF-8 file contents; the Files field filters entry names. Both ignore case and surrounding whitespace by default. Search offers explicit case, whole-word and regex controls. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty content query clears matches; an empty name filter restores the complete file tree. Search runs in a worker and does not use SQLite.
+
+## Session restoration verification
+
+Normal launches reopen the last saved workspace layout. An upgraded schema-1
+metadata database preserves recents but has no session layout until a workspace
+is opened. Use an isolated `NATIVE_WORKSPACE_STATE_DB` for manual checks:
+
+1. Open a workspace, two permanent tabs, a preview and a file outside the workspace.
+   Reorder the tabs and activate a different document. Quit and restart: the
+   workspace, tab order, active document, preview and external tab must return.
+2. Close every tab, quit and restart: the workspace returns with its empty editor.
+3. Remove one saved file while the app is closed: other tabs reopen with an error.
+   Quit without changing the layout, return the file and restart: its tab returns.
+   Remove the workspace instead: Home stays visible and reports the error.
+4. Launch through Open With or a file/folder argument while another workspace is
+   saved: the explicit request takes precedence. Deliver another OS open while
+   restoration is pending and verify the final workspace follows that request.
+5. Edit active and inactive tabs, then quit through menus, shortcuts and Home's
+   terminating window close. Cancel retains the text. Save All writes every dirty
+   tab; a changed disk baseline keeps the app open and preserves remaining edits.
+   Discard quits while preserving tab layout and leaving disk contents unchanged.
+   Quitting during a pending filesystem operation must keep the app open.
+
+`cargo xtask verify macos` includes `SessionRestoreSmoke`: it drives the launch
+delegate, asynchronous store and native alert buttons against temporary SQLite
+metadata. GNOME and KDE restart drivers run separate processes using the actual
+startup path. After building the selected frontend:
+
+```sh
+tools/smoke-session-restore.sh gnome
+tools/smoke-session-restore.sh kde
+```
+
+The script creates and removes disposable files and a temporary database. On
+headless Linux, run it under `dbus-run-session -- xvfb-run -a`; KDE can use
+`QT_QUICK_BACKEND=software`. CI runs both suites. GNOME covers native Cancel and a
+save conflict; KDE covers Cancel, Save All and Discard through its real dialog.
+Existing KDE regression drivers explicitly choose discard through quit preparation
+when ending a test, so unsaved-buffer scenarios do not stop at a production quit
+confirmation. Core tests cover migration, atomic checkpoints, missing or invalid paths, partial
+restore, relocation rollback, metadata write retries, quit conflicts and worker
+ordering. Restoring does not recover unsaved text, Undo, cursor/scroll positions or
+expanded folders. Concurrent instances share one last-writer-wins layout.
 
 ## Search and replacement verification
 

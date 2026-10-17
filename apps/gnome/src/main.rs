@@ -1,6 +1,8 @@
 mod document_tab_scroll;
 mod editor_chrome;
 mod material_icons;
+#[cfg(debug_assertions)]
+mod session_restore_smoke;
 mod sidebar_interactions;
 #[cfg(debug_assertions)]
 mod smoke;
@@ -41,7 +43,10 @@ fn main() {
     #[cfg(debug_assertions)]
     {
         let state = ui.clone();
-        app.connect_startup(move |app| system_open_smoke::schedule(app, state.clone()));
+        app.connect_startup(move |app| {
+            system_open_smoke::schedule(app, state.clone());
+            session_restore_smoke::schedule(app, state.clone());
+        });
     }
     let activate_ui = ui.clone();
     app.connect_activate(move |app| {
@@ -52,7 +57,15 @@ fn main() {
             if let Some(ui) = existing {
                 ui.home_window.present();
             } else {
-                activate_ui.replace(Some(build_window(app)));
+                let ui = build_window(app);
+                if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_none()
+                    && std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE").is_none()
+                    && std::env::var_os("NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN").is_none()
+                    && ui.core.borrow().snapshot().error.is_none()
+                {
+                    ui.dispatch(AppCommand::RestoreSession);
+                }
+                activate_ui.replace(Some(ui));
             }
         }
     });
@@ -74,6 +87,17 @@ fn main() {
             }
         }
     });
+    #[cfg(debug_assertions)]
+    if std::env::var("NATIVE_WORKSPACE_SMOKE_RESTORE_MODE").as_deref() == Ok("priority")
+        && let Some(root) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_RESTORE")
+    {
+        let path = std::path::PathBuf::from(root).with_extension("external.txt");
+        app.run_with_args(&[
+            "native-workspace-gnome",
+            path.to_str().expect("UTF-8 smoke fixture"),
+        ]);
+        return;
+    }
     #[cfg(debug_assertions)]
     if let Some(root) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN") {
         let path = std::path::PathBuf::from(root).join("README.md");

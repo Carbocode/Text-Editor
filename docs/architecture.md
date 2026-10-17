@@ -25,7 +25,7 @@ Each editor window owns one `Session`. The synchronous `Application` and `AppSta
 
 ## I/O and concurrency
 
-`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Open external files share the document table and save/conflict rules; normal workspace search and the Files sidebar exclude them, while explicit Open Editors search includes them. Closing their tabs removes their entries. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores only recent-workspace metadata, never document text.
+`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Open external files share the document table and save/conflict rules; normal workspace search and the Files sidebar exclude them, while explicit Open Editors search includes them. Closing their tabs removes their entries. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores recent-workspace metadata and the last confirmed session layout, never document text.
 
 A session polls worker, watcher, text-search and name-filter results through one `poll` API. Native adapters use a fast timer (16 ms) while work is active and an idle interval (250 ms) otherwise. The watcher starts a background reconciliation after filesystem events, periodically every 30 seconds, or every two seconds without a watcher. A result from an older state revision cannot replace newer edits or paths.
 
@@ -57,6 +57,25 @@ Rust owns edit ranges, capture expansion, case preservation and confirmation wor
 Snapshot lists and text are shared with `Arc`. A changed dirty flag invalidates document summaries; later typing that leaves summaries unchanged preserves their identity. GTK/Qt skip unchanged conversions. UniFFI sends `WorkspaceUpdate`: omitted lists are unchanged, while `snapshot()` explicitly sends all lists. Qt search occurrences use records with numeric offsets and a `QAbstractListModel`; syntax spans are structured records.
 
 Sidebar rows are ordered in Rust: folders first, then case-insensitive name with an exact-name tie-break. Native adapters consume these rows or direct children; toolkit tree models may materialize collapsed branches lazily. Workspace entry paths use `DocumentId::parse` and `domain::path`; external document identities use canonical absolute paths decoded by `DocumentId::from_document_path` (see [ADR 0005](adr/0005-external-document-identities.md)); Swift calls the same functions through UniFFI.
+
+## Session persistence and startup
+
+Schema 2 stores the last workspace, ordered tab identities, active document and
+preview in one metadata transaction. Application command execution checkpoints
+confirmed layouts, including partial composite successes; Session projections do
+not write metadata. Metadata failures retain editor state and retry on the next
+user command. Polling and typing without a layout change do not write metadata.
+
+`RestoreSession` runs exclusively on the shared worker, using normal workspace and
+document operations and reducer events. It skips unavailable tabs, reports the
+first error and preserves the saved layout until a user changes it. A missing root
+leaves Home visible. Initial OS requests precede restoration; restoration is a
+no-op after another workspace has opened and is never queued behind other work.
+Native adapters present the restored workspace and own quit confirmations using
+shared wording. `PrepareToQuit` rejects running work and optionally executes ordered
+Save All steps before allowing termination. Saved tab layout survives discard;
+unsaved text and native presentation state are not persisted. See
+[ADR 0007](adr/0007-session-restoration.md).
 
 ## Tabs and errors
 

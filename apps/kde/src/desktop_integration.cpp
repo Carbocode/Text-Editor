@@ -1,5 +1,6 @@
 #include "desktop_integration.h"
 #include "system_open.h"
+#include "application_lifecycle.h"
 #include "../tests/cursor_probe.h"
 #include "../tests/file_drop_probe.h"
 #include "../tests/system_open_probe.h"
@@ -30,6 +31,9 @@ public:
 }
 
 extern "C" void configure_kde_desktop() {
+    auto lifecycle = new ApplicationLifecycle(qGuiApp);
+    qGuiApp->installEventFilter(lifecycle);
+    qmlRegisterSingletonInstance("org.nativeworkspace.Desktop", 1, 0, "ApplicationLifecycle", lifecycle);
     auto opens = new SystemOpenRequests(qGuiApp);
     qGuiApp->installEventFilter(opens);
     qmlRegisterSingletonInstance("org.nativeworkspace.Desktop", 1, 0, "SystemOpenRequests", opens);

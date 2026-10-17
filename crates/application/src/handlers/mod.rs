@@ -5,6 +5,7 @@
 mod documents;
 mod entries;
 mod external_files;
+mod restore;
 mod search;
 pub(crate) mod workspace;
 
@@ -50,7 +51,9 @@ impl Application {
             AppCommand::SaveDocument(id) => self.save_document(id),
             AppCommand::ReloadDocument(id) => self.reload_document(id),
             AppCommand::OverwriteDocument(id) => self.overwrite_document(id),
-            AppCommand::OpenPaths(_)
+            AppCommand::RestoreSession
+            | AppCommand::PrepareToQuit { .. }
+            | AppCommand::OpenPaths(_)
             | AppCommand::ApplyReplacement
             | AppCommand::OpenFiles(_)
             | AppCommand::MoveFiles { .. }

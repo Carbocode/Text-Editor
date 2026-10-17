@@ -12,6 +12,7 @@ Kirigami.ApplicationWindow {
     height: Kirigami.Units.gridUnit * 46
     minimumWidth: Kirigami.Units.gridUnit * 36
     minimumHeight: Kirigami.Units.gridUnit * 24
+    onClosing: function(close) { close.accepted = false; workspacePane.requestQuit() }
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
 
     globalDrawer: Kirigami.GlobalDrawer {
@@ -20,7 +21,7 @@ Kirigami.ApplicationWindow {
         isMenu: true
         actions: workspacePane.applicationActions
     }
-    AppController { id: controller }
+    AppController { id: controller; objectName: "workspaceController" }
     FolderDialog {
         id: folderDialog
         parentWindow: workspacePane.showingHome ? workspacePane.homeWindow : workspacePane.Window.window
@@ -32,6 +33,7 @@ Kirigami.ApplicationWindow {
         padding: 0
         WorkspacePane {
             id: workspacePane
+            objectName: "workspacePane"
             anchors.fill: parent
             controller: controller
             enableBrowse: true
@@ -61,7 +63,9 @@ Kirigami.ApplicationWindow {
         }
     }
     Component.onCompleted: {
-        controller.initialize_persistence()
-        openSystemRequests()
+        ApplicationLifecycle.watchQuitRequests()
+        const persistenceReady = controller.initialize_persistence()
+        if (SystemOpenRequests.hasPending()) openSystemRequests()
+        else if (persistenceReady) controller.restore_session()
     }
 }

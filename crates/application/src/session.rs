@@ -426,7 +426,9 @@ impl Session {
             },
         };
         let worker = self.worker.take().expect("collecting a running worker");
-        let failed = reply.error.is_some();
+        // A metadata failure may follow a committed relocation. Only an
+        // uncommitted move rolls projected paths and deferred commands back.
+        let failed = reply.error.is_some() && reply.core.revision() == self.core_revision;
         if worker.relocation.is_some() {
             worker.trace.confirmed(!failed);
         }

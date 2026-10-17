@@ -44,6 +44,14 @@ fn main() -> std::process::ExitCode {
         }) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/WorkspaceSmoke.qml"
     } else if cfg!(debug_assertions)
+        && std::env::args().any(|argument| argument.starts_with("--smoke-restore="))
+    {
+        assert!(
+            std::env::var_os("NATIVE_WORKSPACE_STATE_DB").is_some(),
+            "Restore smoke requires an isolated metadata database"
+        );
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SessionRestoreSmoke.qml"
+    } else if cfg!(debug_assertions)
         && std::env::args().any(|argument| argument.starts_with("--smoke-system-open="))
     {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SystemOpenSmoke.qml"

@@ -15,7 +15,7 @@ Kirigami.ApplicationWindow {
         minimumWidth: Kirigami.Units.gridUnit * 24
         minimumHeight: Kirigami.Units.gridUnit * 20
         visible: homeWindow.workspace.enableBrowse && homeWindow.workspace.showingHome
-        onClosing: Qt.quit()
+        onClosing: function(close) { close.accepted = false; homeWindow.workspace.requestQuit() }
         globalDrawer: Kirigami.GlobalDrawer {
             title: "Native Workspace"
             titleIcon: "accessories-text-editor"

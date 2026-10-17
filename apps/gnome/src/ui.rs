@@ -201,6 +201,57 @@ impl Ui {
         }
     }
 
+    pub(super) fn request_quit(&self) {
+        if self.window.visible_dialog().is_some() || self.home_window.visible_dialog().is_some() {
+            return;
+        }
+        if self.core.borrow().snapshot().activity.busy {
+            self.dispatch(AppCommand::PrepareToQuit { save: false });
+            return;
+        }
+        if !self.core.borrow().snapshot().has_unsaved_documents() {
+            self.finish_quit(false);
+            return;
+        }
+        let prompt = native_workspace_application::quit_confirmation();
+        let dialog = adw::AlertDialog::builder()
+            .heading(&prompt.title)
+            .body(prompt.body)
+            .build();
+        dialog.add_responses(&[
+            ("cancel", prompt.cancel),
+            ("discard", prompt.discard),
+            ("save", prompt.confirm),
+        ]);
+        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("save"));
+        dialog.set_close_response("cancel");
+        let ui = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "save" || response == "discard" {
+                ui.finish_quit(response == "save");
+            }
+        });
+        let parent = if self.window.is_visible() {
+            &self.window
+        } else {
+            &self.home_window
+        };
+        dialog.present(Some(parent));
+    }
+
+    fn finish_quit(&self, save: bool) {
+        let ready = self
+            .core
+            .borrow_mut()
+            .dispatch(AppCommand::PrepareToQuit { save })
+            .is_ok();
+        self.render_current();
+        if ready && let Some(app) = self.window.application() {
+            app.quit();
+        }
+    }
+
     pub(super) fn request_close_document(&self, id: DocumentId) {
         if !self
             .snapshot
