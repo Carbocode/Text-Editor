@@ -479,12 +479,12 @@ ApplicationWindow {
                     check(controller.document_ids.indexOf("renamed.rs") !== -1, "Cancel removed a file")
                     pane.requestDelete("renamed.rs")
                     deleteDialog.customFooterActions[1].trigger()
-                    check(controller.deletion_pending, "Deletion did not start in the background")
+                    check(controller.editing_paused, "Deletion did not start in the background")
                     switchedAt = Date.now()
                     break
                 case 23:
-                    if (controller.deletion_pending && Date.now() - switchedAt < 3000) { --step; break }
-                    check(!controller.deletion_pending, "Deletion never finished")
+                    if (controller.editing_paused && Date.now() - switchedAt < 3000) { --step; break }
+                    check(!controller.editing_paused, "Deletion never finished")
                     check(controller.error_message.indexOf("Save all modified") !== -1, "Dirty deletion was not rejected")
                     check(controller.active_document_text === "unsaved deletion", "Deletion lost unsaved edits")
                     controller.save_document()
@@ -493,8 +493,8 @@ ApplicationWindow {
                     switchedAt = Date.now()
                     break
                 case 24:
-                    if (controller.deletion_pending && Date.now() - switchedAt < 3000) { --step; break }
-                    check(!controller.deletion_pending && controller.error_message.length === 0, "File deletion failed")
+                    if (controller.editing_paused && Date.now() - switchedAt < 3000) { --step; break }
+                    check(!controller.editing_paused && controller.error_message.length === 0, "File deletion failed")
                     check(controller.document_ids.indexOf("renamed.rs") === -1 && controller.open_document_ids.indexOf("renamed.rs") === -1 && controller.active_document_id !== "renamed.rs",
                         "Deleted document stayed in the editor or tree")
                     controller.create_entry("delete-check", true)
@@ -504,8 +504,8 @@ ApplicationWindow {
                     switchedAt = Date.now()
                     break
                 case 25:
-                    if (controller.deletion_pending && Date.now() - switchedAt < 3000) { --step; break }
-                    check(!controller.deletion_pending && controller.error_message.length === 0, "Folder deletion failed")
+                    if (controller.editing_paused && Date.now() - switchedAt < 3000) { --step; break }
+                    check(!controller.editing_paused && controller.error_message.length === 0, "Folder deletion failed")
                     check(controller.directory_ids.indexOf("delete-check") === -1
                         && controller.document_ids.indexOf("delete-check/note") === -1, "Deleted subtree stayed in the tree")
                     console.log("KDE deletion confirmation/cancel/unsaved protection/file/folder smoke test passed")

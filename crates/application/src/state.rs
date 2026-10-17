@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-/// A workspace file and, while it is open, its buffer.
+/// A workspace file or external tab and, while open, its buffer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DocumentEntry {
     id: DocumentId,
@@ -140,6 +140,13 @@ impl DocumentTable {
         let before = (entry.dirty(), entry.external_change);
         change(entry);
         if before != (entry.dirty(), entry.external_change) {
+            self.summaries = OnceLock::new();
+        }
+    }
+
+    fn insert(&mut self, entry: DocumentEntry) {
+        if let Err(index) = self.position(entry.id()) {
+            self.entries.insert(index, entry);
             self.summaries = OnceLock::new();
         }
     }
@@ -399,6 +406,9 @@ impl AppState {
                     self.search_touched = touched;
                 }
             }
+            AppEvent::DocumentAdded { id } => {
+                self.documents.insert(DocumentEntry::new(id.clone()));
+            }
             AppEvent::DocumentLoaded { id, content } => {
                 self.documents
                     .update(id, |entry| entry.load(content.clone()));
@@ -426,7 +436,11 @@ impl AppState {
             }
             AppEvent::DocumentClosed { id } => {
                 self.close_tabs(|open| open == id);
-                self.documents.update(id, DocumentEntry::unload);
+                if id.is_external() {
+                    self.documents.retain(|entry| entry.id() != id);
+                } else {
+                    self.documents.update(id, DocumentEntry::unload);
+                }
                 self.refresh_matches(id);
             }
             AppEvent::DocumentChanged { id, content } => {
@@ -475,7 +489,7 @@ impl AppState {
     /// Recomputes the matches of one document from its buffer, or drops them
     /// when it is closed: the next search reads its disk content again.
     fn refresh_matches(&mut self, id: &DocumentId) {
-        if !self.has_query() {
+        if !self.has_query() || id.is_external() {
             return;
         }
         if self.search_in_progress {

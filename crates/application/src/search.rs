@@ -412,6 +412,9 @@ impl IgnoreRules {
     fn load(root: &Path, documents: &[DocumentEntry]) -> Self {
         let mut builders: HashMap<String, GitignoreBuilder> = HashMap::new();
         for entry in documents {
+            if entry.id().is_external() {
+                continue;
+            }
             let path = entry.id().as_str();
             let (directory, name) = (path::parent(path), path::name(path));
             if name == ".gitignore" && !in_git_directory(path) {
@@ -475,7 +478,7 @@ fn search_order(root: &Path, documents: &[DocumentEntry]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..documents.len())
         .filter(|&index| {
             let entry = &documents[index];
-            entry.is_loaded() || !rules.ignored(entry.id().as_str())
+            !entry.id().is_external() && (entry.is_loaded() || !rules.ignored(entry.id().as_str()))
         })
         .collect();
     order.sort_by_key(|&index| {

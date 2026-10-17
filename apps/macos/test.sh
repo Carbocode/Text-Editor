@@ -48,6 +48,7 @@ swiftc -parse-as-library -I apps/macos/generated \
   apps/macos/generated/native_workspace_ffi_swift.swift \
   apps/macos/Workspace/SidebarNativeDragSource.swift \
   apps/macos/Workspace/SidebarNativeDropTarget.swift \
+  apps/macos/Workspace/ExternalFileDrop.swift \
   apps/macos/Workspace/SidebarInteractionState.swift \
   apps/macos/Workspace/WorkspaceIcons.swift \
   apps/macos/WorkspaceTests/NativeDragPointerSmoke.swift \

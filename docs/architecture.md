@@ -25,11 +25,11 @@ Each editor window owns one `Session`. The synchronous `Application` and `AppSta
 
 ## I/O and concurrency
 
-`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores only recent-workspace metadata, never document text.
+`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Open external files share the document table and save/conflict rules; workspace search and sidebar projections exclude them, and closing their tabs removes their entries. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores only recent-workspace metadata, never document text.
 
 A session polls worker, watcher, text-search and name-filter results through one `poll` API. Native adapters use a fast timer (16 ms) while work is active and an idle interval (250 ms) otherwise. The watcher starts a background reconciliation after filesystem events, periodically every 30 seconds, or every two seconds without a watcher. A result from an older state revision cannot replace newer edits or paths.
 
-Rename, move, deletion and explicit refresh execute on the session worker. Relocation paths appear immediately; a progress indicator appears after 300 ms. Editing is projected during relocation and replayed with queued saves/opens; failed relocation rebases those commands to the original paths. Deletion pauses editing. Concurrent destructive/relocating requests are rejected. Opening a document and ordinary saves are currently inline; moving them to background execution is a command-policy decision, never a frontend worker.
+Rename, move, deletion and explicit refresh execute on the session worker. Relocation paths appear immediately; a progress indicator appears after 300 ms. Editing is projected during relocation and replayed with queued saves/opens; failed relocation rebases those commands to the original paths. Deletion and OS file transfers pause editing via `activity.editing_paused`. OS file opens/transfers run ordered composite steps on the worker; successful earlier steps remain committed if a later file fails. Transfers preserve open external buffers through the relocation reducer and publish destination rows after confirmation. Concurrent destructive/relocating requests are rejected. Opening a document and ordinary saves are currently inline; moving them to background execution is a command-policy decision, never a frontend worker.
 
 ## Search and presentation
 
@@ -37,7 +37,7 @@ Text search debounces for 150 ms, prioritizes open buffers and shallow files, ho
 
 Snapshot lists and text are shared with `Arc`. A changed dirty flag invalidates document summaries; later typing that leaves summaries unchanged preserves their identity. GTK/Qt skip unchanged conversions. UniFFI sends `WorkspaceUpdate`: omitted lists are unchanged, while `snapshot()` explicitly sends all lists. Qt search occurrences use records with numeric offsets and a `QAbstractListModel`; syntax spans are structured records.
 
-Sidebar rows are ordered in Rust: folders first, then case-insensitive name with an exact-name tie-break. Native adapters consume these rows or direct children; toolkit tree models may materialize collapsed branches lazily. Paths use `DocumentId` and `domain::path`; Swift calls the same functions through UniFFI.
+Sidebar rows are ordered in Rust: folders first, then case-insensitive name with an exact-name tie-break. Native adapters consume these rows or direct children; toolkit tree models may materialize collapsed branches lazily. Workspace entry paths use `DocumentId::parse` and `domain::path`; external document identities use canonical absolute paths decoded by `DocumentId::from_document_path` (see [ADR 0005](adr/0005-external-document-identities.md)); Swift calls the same functions through UniFFI.
 
 ## Tabs and errors
 

@@ -5,7 +5,8 @@ pub mod path;
 use std::path::PathBuf;
 
 /// A validated, slash-separated path of a file or folder relative to the
-/// workspace root. Path arithmetic goes through these methods or [`path`],
+/// workspace root, or an absolute external document path. Path arithmetic
+/// goes through these methods or [`path`],
 /// never through ad hoc string splitting.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DocumentId(String);
@@ -28,6 +29,22 @@ impl DocumentId {
             return Err(InvalidDocumentId);
         }
         Ok(Self(value))
+    }
+
+    /// Decode a document identity from a snapshot. Entry operations still use
+    /// `parse`, which accepts workspace-relative paths only.
+    pub fn from_document_path(value: impl Into<String>) -> Result<Self, InvalidDocumentId> {
+        let value = value.into();
+        if !std::path::Path::new(&value).is_absolute() {
+            return Self::parse(value);
+        }
+        let relative = value.strip_prefix('/').ok_or(InvalidDocumentId)?;
+        Self::parse(relative)?;
+        Ok(Self(value))
+    }
+
+    pub fn is_external(&self) -> bool {
+        self.0.starts_with('/')
     }
 
     pub fn as_str(&self) -> &str {
@@ -57,11 +74,17 @@ impl DocumentId {
 
     /// The sibling entry called `name`. `name` must be a single component.
     pub fn renamed(&self, name: &str) -> Result<DocumentId, InvalidDocumentId> {
+        if self.is_external() {
+            return Err(InvalidDocumentId);
+        }
         Self::child_of(self.parent(), name)
     }
 
     /// This entry moved into `directory` ("" for the workspace root).
     pub fn moved_into(&self, directory: &str) -> Result<DocumentId, InvalidDocumentId> {
+        if self.is_external() {
+            return Err(InvalidDocumentId);
+        }
         if !directory.is_empty() {
             Self::parse(directory)?;
         }
@@ -119,6 +142,27 @@ mod tests {
             "a\0b",
         ] {
             assert_eq!(DocumentId::parse(invalid), Err(InvalidDocumentId));
+        }
+    }
+
+    #[test]
+    fn external_document_ids_never_become_workspace_entry_paths() {
+        let external = DocumentId::from_document_path("/tmp/folder/note ü.txt").unwrap();
+        assert!(external.is_external());
+        assert_eq!(external.name(), "note ü.txt");
+        assert!(DocumentId::parse(external.as_str()).is_err());
+        assert!(external.renamed("new").is_err());
+        assert!(external.moved_into("src").is_err());
+        assert_eq!(external.rebased(&id("tmp"), &id("src")), external);
+        for invalid in [
+            "/",
+            "/tmp//note",
+            "/tmp/../note",
+            "/tmp/./note",
+            "/tmp/",
+            "/tmp/a\\b",
+        ] {
+            assert!(DocumentId::from_document_path(invalid).is_err());
         }
     }
 

@@ -4,7 +4,7 @@
 //!
 //! Commands run according to `AppCommand::schedule`:
 //! - inline commands execute on the caller's thread;
-//! - renames, moves, deletions and refreshes run on a worker that owns the
+//! - renames, moves, deletions, OS file opens and refreshes run on a worker that owns the
 //!   `Application` meanwhile, so the UI never waits on the filesystem.
 //!
 //! While the worker runs, the published snapshot is a projection: the same
@@ -167,7 +167,7 @@ impl Session {
                     }
                 }
             }
-            schedule @ (Schedule::Deletion | Schedule::Background) => {
+            schedule @ (Schedule::Exclusive | Schedule::Background) => {
                 self.start(vec![command], schedule, None, trace);
                 Ok(())
             }
@@ -181,6 +181,35 @@ impl Session {
             .relocation()
             .and_then(Result::ok)
             .is_some_and(|relocation| matches!(core.plan_relocation(relocation), Ok(Some(_))))
+    }
+
+    /// Cheap drop feedback; the worker validates real locations before I/O.
+    pub fn can_move_files(&self, paths: &[std::path::PathBuf], directory: &str) -> bool {
+        let Some(core) = &self.core else { return false };
+        let Ok(root) = core.workspace_root() else {
+            return false;
+        };
+        if paths.is_empty() {
+            return false;
+        }
+        let mut targets = std::collections::HashSet::new();
+        paths.iter().all(|path| {
+            let Some(value) = path.to_str() else {
+                return false;
+            };
+            let Ok(external) = DocumentId::from_document_path(value) else {
+                return false;
+            };
+            if !external.is_external() {
+                return false;
+            }
+            let Ok(target) = DocumentId::child_of(directory, external.name()) else {
+                return false;
+            };
+            path != &root.join(target.as_str())
+                && targets.insert(target.clone())
+                && core.validate_destination(&target).is_ok()
+        })
     }
 
     /// Records an adapter-side failure, such as an unparsable path.
@@ -516,7 +545,7 @@ impl Session {
                 busy: true,
                 relocation: worker.relocation.clone(),
                 relocation_slow: self.published.activity.relocation_slow,
-                deleting: worker.schedule == Schedule::Deletion,
+                editing_paused: worker.schedule == Schedule::Exclusive,
             },
             None => Activity::default(),
         }

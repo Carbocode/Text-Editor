@@ -4,6 +4,7 @@
 
 mod documents;
 mod entries;
+mod external_files;
 mod search;
 pub(crate) mod workspace;
 
@@ -13,6 +14,8 @@ use native_workspace_domain::DocumentId;
 impl Application {
     pub(crate) fn resolve(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
         match command {
+            AppCommand::OpenFile(path) => self.open_file(&path),
+            AppCommand::MoveFile { path, directory } => self.move_file(&path, &directory),
             AppCommand::OpenWorkspace(path) => self.open_workspace(&path),
             AppCommand::RefreshWorkspace => self.refresh_workspace(),
             AppCommand::PollWorkspaceChanges => self.poll_workspace_changes(),
@@ -34,7 +37,10 @@ impl Application {
             AppCommand::SaveDocument(id) => self.save_document(id),
             AppCommand::ReloadDocument(id) => self.reload_document(id),
             AppCommand::OverwriteDocument(id) => self.overwrite_document(id),
-            AppCommand::SaveAllDocuments | AppCommand::SaveAndCloseDocument(_) => {
+            AppCommand::OpenFiles(_)
+            | AppCommand::MoveFiles { .. }
+            | AppCommand::SaveAllDocuments
+            | AppCommand::SaveAndCloseDocument(_) => {
                 unreachable!("composite commands run as their steps")
             }
         }

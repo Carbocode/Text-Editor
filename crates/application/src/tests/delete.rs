@@ -107,7 +107,7 @@ fn session_deletes_off_thread_pauses_editing_and_reports_failures() {
         session.dispatch(AppCommand::DeleteEntry(id("a"))).unwrap();
         observed.recv_timeout(Duration::from_secs(5)).unwrap();
         let deleting = session.snapshot();
-        assert!(deleting.activity.deleting);
+        assert!(deleting.activity.editing_paused);
         assert_eq!(deleting.documents, before.documents);
         assert!(matches!(
             session.dispatch(AppCommand::ChangeDocument {

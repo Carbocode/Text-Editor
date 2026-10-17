@@ -9,7 +9,7 @@ import org.nativeworkspace.Editor 1.0
 
 Item {
     id: root
-    enabled: !controller || !controller.deletion_pending
+    enabled: !controller || !controller.editing_paused
     SearchResultsModel { id: searchResults; rows: root.controller ? root.controller.search_results : [] }
     SystemPalette { id: systemColors; colorGroup: SystemPalette.Active }
     // Keep selection accented when focus moves to the editor or another window.
@@ -85,6 +85,7 @@ Item {
     property string renameName: ""
     property var activeRenameEditor: null
     property string draggingPath: ""
+    property var externalDropUrls: []
     property string hoverDirectory: ""
     property bool hoveringDrop: false
     property bool validDrop: false
@@ -363,6 +364,7 @@ Item {
     }
 
     function canDrop(source, directory) {
+        if (externalDropUrls.length > 0) return controller.can_move_files(externalDropUrls, directory)
         return controller.can_move_entry(source, directory)
     }
 
@@ -388,7 +390,7 @@ Item {
     }
 
     function hoverDrop(directory) {
-        if (draggingPath.length === 0) return
+        if (draggingPath.length === 0 && externalDropUrls.length === 0) return
         leaveDropFolder.stop()
         if (hoveringDrop && hoverDirectory === directory) {
             validDrop = canDrop(draggingPath, directory)
@@ -410,6 +412,26 @@ Item {
         }
     }
 
+    function enterExternalDrop(drag, directory) {
+        if (!drag.hasUrls || draggingPath.length > 0) { drag.accepted = false; return }
+        externalDropUrls = drag.urls.map(function(url) { return url.toString() })
+        hoverDrop(directory)
+        drag.accepted = validDrop
+    }
+    function dropExternalFiles(drop, directory) {
+        var urls = drop.urls.map(function(url) { return url.toString() })
+        if (!controller.can_move_files(urls, directory) || !flushEditor()) return
+        expandDropFolder.stop()
+        leaveDropFolder.stop()
+        restoreDragDirectories(directory)
+        temporaryDragDirectories = []
+        if (directory.length > 0) { var folders = Object.assign({}, collapsedDirectories); folders[directory] = false; collapsedDirectories = folders }
+        externalDropUrls = []
+        hoveringDrop = false
+        validDrop = false
+        controller.move_files(urls, directory)
+        drop.accept(Qt.MoveAction)
+    }
     function dropEntry(directory) {
         beginDropTrace()
         if (!canDrop(draggingPath, directory)) {
@@ -502,6 +524,7 @@ Item {
             if (dragGhost.Drag.drop() === Qt.IgnoreAction) controller.drop_handler_finished(false)
         }
         draggingPath = ""
+        externalDropUrls = []
         hoveringDrop = false
         hoverDirectory = ""
         validDrop = false
@@ -521,6 +544,8 @@ Item {
             if (root.hoveringDrop && root.hoverDirectory === directory) {
                 expandDropFolder.stop()
                 root.hoveringDrop = false
+                root.externalDropUrls = []
+                root.restoreDragDirectories(null)
             }
         }
     }
@@ -1394,19 +1419,21 @@ Item {
                                     }
                                     DropArea {
                                         anchors.fill: parent
-                                        keys: ["native-workspace-entry"]
+                                        keys: ["native-workspace-entry", "text/uri-list"]
                                         property string directory: treeRow.entry ? (treeRow.entry.directory
                                             ? treeRow.entry.path : root.parentDirectory(treeRow.entry.path)) : ""
                                         onEntered: function(drag) {
-                                            if (drag.source !== dragGhost) { drag.accepted = false; return }
-                                            root.hoverDrop(directory)
+                                            if (drag.source === dragGhost) root.hoverDrop(directory)
+                                            else root.enterExternalDrop(drag, directory)
                                         }
                                         onPositionChanged: function(drag) {
                                             if (drag.source === dragGhost) root.hoverDrop(directory)
+                                            else root.enterExternalDrop(drag, directory)
                                         }
                                         onExited: root.leaveDrop(directory)
                                         onDropped: function(drop) {
                                             if (drop.source === dragGhost && root.dropEntry(directory)) drop.accept(Qt.MoveAction)
+                                            else if (drop.hasUrls) root.dropExternalFiles(drop, directory)
                                         }
                                     }
                                     onDoubleClicked: if (entry && !entry.directory && root.flushEditor())
@@ -1424,7 +1451,7 @@ Item {
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
                                 height: visible ? implicitHeight : 0
-                                visible: root.sidebarTab === WorkspacePane.Files && root.draggingPath.length > 0
+                                visible: root.sidebarTab === WorkspacePane.Files && (root.draggingPath.length > 0 || root.externalDropUrls.length > 0)
                                 text: root.hoveringDrop && !root.validDrop ? "This folder cannot receive the item" : "Move to workspace root"
                                 contentItem: Kirigami.IconTitleSubtitle {
                                     title: workspaceDropTarget.text
@@ -1432,16 +1459,30 @@ Item {
                                 }
                                 DropArea {
                                     anchors.fill: parent
-                                    keys: ["native-workspace-entry"]
+                                    keys: ["native-workspace-entry", "text/uri-list"]
                                     onEntered: function(drag) {
                                         if (drag.source === dragGhost) root.hoverDrop("")
-                                        else drag.accepted = false
+                                        else root.enterExternalDrop(drag, "")
                                     }
                                     onExited: root.leaveDrop("")
                                     onDropped: function(drop) {
                                         if (drop.source === dragGhost && root.dropEntry("")) drop.accept(Qt.MoveAction)
+                                        else if (drop.hasUrls) root.dropExternalFiles(drop, "")
                                     }
                                 }
+                            }
+                            DropArea {
+                                anchors.top: sidebarHeader.bottom
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                z: -1
+                                enabled: root.sidebarTab === WorkspacePane.Files
+                                keys: ["text/uri-list"]
+                                onEntered: function(drag) { root.enterExternalDrop(drag, "") }
+                                onPositionChanged: function(drag) { root.enterExternalDrop(drag, "") }
+                                onExited: root.leaveDrop("")
+                                onDropped: function(drop) { root.dropExternalFiles(drop, "") }
                             }
                             ListView {
                                 id: fileList
@@ -1579,6 +1620,17 @@ Item {
                 title: root.controller.workspace_name
                 actions: root.pageActions
                 padding: 0
+                DropArea {
+                    objectName: "externalEditorDrop"
+                    anchors.fill: parent
+                    z: 10
+                    keys: ["text/uri-list"]
+                    onDropped: function(drop) {
+                        if (!drop.hasUrls || !root.flushEditor()) return
+                        root.controller.open_files(drop.urls.map(function(url) { return url.toString() }))
+                        drop.accept(Qt.CopyAction)
+                    }
+                }
                 ColumnLayout {
                     anchors.fill: parent
                     spacing: Kirigami.Units.smallSpacing
@@ -1766,7 +1818,7 @@ Item {
                                         textDocument: editor.textDocument
                                         colors: root.syntaxColors
                                     }
-                                    enabled: root.controller.active_document_id.length > 0 && !root.controller.deletion_pending
+                                    enabled: root.controller.active_document_id.length > 0 && !root.controller.editing_paused
                                     onCursorRectangleChanged: lineNumbers.requestPaint()
                                     onActiveLineColorChanged: lineNumbers.requestPaint()
                                     onEnabledChanged: lineNumbers.requestPaint()
@@ -1959,11 +2011,11 @@ Item {
             spacing: Kirigami.Units.largeSpacing
             BusyIndicator {
                 objectName: "pendingMoveIndicator"
-                visible: root.controller.deletion_pending || root.controller.pending_move_target.length > 0
+                visible: root.controller.editing_paused || root.controller.pending_move_target.length > 0
                 running: visible
                 Layout.preferredWidth: Kirigami.Units.iconSizes.small
                 Layout.preferredHeight: Kirigami.Units.iconSizes.small
-                Accessible.name: root.controller.deletion_pending ? "Deleting…" : "Moving… Waiting for confirmation"
+                Accessible.name: root.controller.editing_paused ? "Working…" : "Moving… Waiting for confirmation"
             }
             Label {
                 text: root.controller.active_document_id || "No document"
@@ -1971,7 +2023,7 @@ Item {
                 Layout.fillWidth: true
             }
             Label {
-                text: root.controller.deletion_pending ? "Deleting…" : (root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved"))
+                text: root.controller.editing_paused ? "Working…" : (root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved"))
             }
         }
     }

@@ -67,7 +67,7 @@ impl WatcherBatch {
 pub enum FilesystemError {
     #[error("invalid workspace directory: {0}")]
     InvalidWorkspace(PathBuf),
-    #[error("document is not a regular file inside the workspace: {0}")]
+    #[error("document is not a regular file or has an unsafe path: {0}")]
     InvalidDocument(PathBuf),
     #[error("filesystem error at {}: {source}", path.display())]
     Io {
@@ -91,6 +91,15 @@ pub trait WorkspaceFilesystem: Send + Sync {
     /// Canonicalizes `path` and lists regular files and folders below it,
     /// skipping symlinks.
     fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError>;
+    /// Resolve an absolute regular file selected by the user. Reject symlink leaves.
+    fn resolve_file(&self, path: &Path) -> Result<PathBuf, FilesystemError>;
+    /// Move a resolved regular file into the workspace without replacement.
+    fn move_file(
+        &self,
+        source: &Path,
+        root: &Path,
+        target: &DocumentId,
+    ) -> Result<(), FilesystemError>;
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError>;
     /// UTF-8 content of at most [`MAX_SEARCH_BYTES`], or nothing. Folders
     /// recorded in `verified` are not checked again, so one workspace search
@@ -191,7 +200,11 @@ pub struct RealFilesystem;
 impl RealFilesystem {
     fn safe_document_location(root: &Path, id: &DocumentId) -> Result<PathBuf, FilesystemError> {
         let path = root.join(id.as_str());
-        let mut parent = root.to_path_buf();
+        let mut parent = if id.is_external() {
+            PathBuf::from("/")
+        } else {
+            root.to_path_buf()
+        };
         for component in Path::new(id.as_str())
             .parent()
             .into_iter()
@@ -263,6 +276,32 @@ impl WorkspaceFilesystem for RealFilesystem {
             documents,
             directories,
         })
+    }
+
+    fn resolve_file(&self, path: &Path) -> Result<PathBuf, FilesystemError> {
+        if !path.is_absolute()
+            || !fs::symlink_metadata(path)
+                .map_err(at(path))?
+                .file_type()
+                .is_file()
+        {
+            return Err(FilesystemError::InvalidDocument(path.to_path_buf()));
+        }
+        fs::canonicalize(path).map_err(at(path))
+    }
+
+    fn move_file(
+        &self,
+        source: &Path,
+        root: &Path,
+        target: &DocumentId,
+    ) -> Result<(), FilesystemError> {
+        let source = self.resolve_file(source)?;
+        if target.is_external() {
+            return Err(FilesystemError::InvalidDocument(root.join(target.as_str())));
+        }
+        let target = Self::safe_document_location(root, target)?;
+        rename_without_replacing(&source, &target).map_err(at(&target))
     }
 
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError> {
@@ -347,6 +386,9 @@ impl WorkspaceFilesystem for RealFilesystem {
         id: &DocumentId,
         target: &DocumentId,
     ) -> Result<(), FilesystemError> {
+        if id.is_external() || target.is_external() {
+            return Err(FilesystemError::InvalidDocument(root.join(id.as_str())));
+        }
         let source_path = Self::safe_document_location(root, id)?;
         let target_path = Self::safe_document_location(root, target)?;
         let metadata = fs::symlink_metadata(&source_path).map_err(at(&source_path))?;
@@ -357,6 +399,9 @@ impl WorkspaceFilesystem for RealFilesystem {
     }
 
     fn delete_entry(&self, root: &Path, id: &DocumentId) -> Result<(), FilesystemError> {
+        if id.is_external() {
+            return Err(FilesystemError::InvalidDocument(root.join(id.as_str())));
+        }
         let path = Self::safe_document_location(root, id)?;
         let metadata = fs::symlink_metadata(&path).map_err(at(&path))?;
         let result = if metadata.is_dir() {
@@ -375,6 +420,9 @@ impl WorkspaceFilesystem for RealFilesystem {
         id: &DocumentId,
         directory: bool,
     ) -> Result<(), FilesystemError> {
+        if id.is_external() {
+            return Err(FilesystemError::InvalidDocument(root.join(id.as_str())));
+        }
         let path = Self::safe_document_location(root, id)?;
         let result = if directory {
             fs::create_dir(&path)
@@ -423,6 +471,63 @@ mod tests {
                 .delete_entry(dir.path(), &DocumentId::parse("missing").unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn moving_os_files_never_replaces_even_an_unlisted_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("note");
+        fs::write(&source, "source").unwrap();
+        fs::write(root.path().join("note"), "destination").unwrap();
+        let target = DocumentId::parse("note").unwrap();
+        assert!(
+            RealFilesystem
+                .move_file(&source, root.path(), &target)
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "source");
+        assert_eq!(
+            fs::read_to_string(root.path().join("note")).unwrap(),
+            "destination"
+        );
+        fs::remove_file(root.path().join("note")).unwrap();
+        RealFilesystem
+            .move_file(&source, root.path(), &target)
+            .unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(root.path().join("note")).unwrap(),
+            "source"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn os_file_drops_reject_symlink_leaves_and_destination_ancestors() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let source = outside.path().join("source");
+        fs::write(&source, "keep").unwrap();
+        std::os::unix::fs::symlink(&source, outside.path().join("alias")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("linked")).unwrap();
+        assert!(
+            RealFilesystem
+                .resolve_file(&outside.path().join("alias"))
+                .is_err()
+        );
+        assert!(RealFilesystem.resolve_file(outside.path()).is_err());
+        assert!(
+            RealFilesystem
+                .move_file(
+                    &source,
+                    root.path(),
+                    &DocumentId::parse("linked/new").unwrap()
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "keep");
+        assert!(!outside.path().join("new").exists());
     }
 
     #[test]

@@ -269,10 +269,10 @@ impl Ui {
 
     pub(super) fn sync_pending_move(&self) {
         self.window
-            .set_sensitive(!self.core.borrow().snapshot().activity.deleting);
+            .set_sensitive(!self.core.borrow().snapshot().activity.editing_paused);
         self.editor.set_editable(
             self.snapshot.borrow().active_document.is_some()
-                && !self.core.borrow().snapshot().activity.deleting,
+                && !self.core.borrow().snapshot().activity.editing_paused,
         );
         let target = self
             .core
@@ -507,7 +507,8 @@ impl Ui {
                 .is_some_and(|document| document.external_change),
         );
         self.editor.set_editable(
-            snapshot.active_document.is_some() && !self.core.borrow().snapshot().activity.deleting,
+            snapshot.active_document.is_some()
+                && !self.core.borrow().snapshot().activity.editing_paused,
         );
         self.status
             .set_label(match snapshot.active_document.as_ref() {
@@ -515,8 +516,8 @@ impl Ui {
                 Some(_) => "Saved",
                 None => "Select a document",
             });
-        if self.core.borrow().snapshot().activity.deleting {
-            self.status.set_label("Deleting…");
+        if self.core.borrow().snapshot().activity.editing_paused {
+            self.status.set_label("Working…");
         } else if let Some(error) = snapshot.error.as_deref() {
             self.status.set_label(error);
         }

@@ -256,11 +256,14 @@ struct ContentView: View {
     }
 
     private func canDrop(_ directory: String) -> Bool {
+        if !sidebarDrag.externalURLs.isEmpty {
+            return store.canMoveFiles(sidebarDrag.externalURLs, directory: directory)
+        }
         guard let source = sidebarDrag.source else { return false }
         return store.canMoveEntry(source, directory: directory)
     }
 
-    private func nativeDropTarget(_ directory: String) -> SidebarNativeDropTarget {
+    private func nativeDropTarget(_ directory: String) -> some View {
         SidebarNativeDropTarget(type: NSPasteboard.PasteboardType(sidebarDragType.identifier), state: sidebarDrag, canDrop: {
             let valid = canDrop(directory)
             sidebarDrag.updateValidity(valid)
@@ -298,6 +301,30 @@ struct ContentView: View {
             store.sidebarDropHandlerFinished(result)
             return result
         }, beginDrop: { store.beginSidebarDrop() }, previewHidden: { store.sidebarDropPreviewHidden() })
+        .onDrop(of: [.fileURL], delegate: externalSidebarDrop(directory))
+    }
+
+    private func externalSidebarDrop(_ directory: String) -> ExternalFileDrop {
+        ExternalFileDrop(entered: { urls in
+            guard !urls.isEmpty else { return false }
+            sidebarDrag.beginExternal(urls)
+            let valid = canDrop(directory)
+            sidebarDrag.enter(directory, valid: valid, expand: {
+                guard sidebarTab == .files, appliedFileNameQuery.isEmpty,
+                      !directory.isEmpty, !expandedDirectories.contains(directory) else { return false }
+                toggleDirectory(directory)
+                return true
+            }, collapse: {
+                if expandedDirectories.contains(directory) { toggleDirectory(directory) }
+            })
+            return valid
+        }, exited: { sidebarDrag.leave(directory) }, dropped: { urls in
+            guard store.canMoveFiles(urls, directory: directory) else { sidebarDrag.finish(); return false }
+            let accepted = store.moveFiles(urls, directory: directory)
+            sidebarDrag.finish(committing: accepted ? directory : nil)
+            if accepted && !directory.isEmpty { expandedDirectories.insert(directory); rebuildSidebarIndex() }
+            return accepted
+        })
     }
 
     private var sidebarHeader: some View {
@@ -356,6 +383,7 @@ struct ContentView: View {
                     }
                     .padding(.vertical, 6)
                 }
+                .onDrop(of: [.fileURL], delegate: externalSidebarDrop(""))
                 .safeAreaBar(edge: .top, spacing: 0) { sidebarHeader }
                 .scrollEdgeEffectStyle(.soft, for: .top)
                 .onReceive(store.$workspaceRoot) { root in
@@ -448,6 +476,8 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 480)
         } detail: {
             editorDetail
+                .onDrop(of: [.fileURL], delegate: ExternalFileDrop(entered: { !$0.isEmpty },
+                    exited: {}, dropped: { store.openFiles($0) }, operation: .copy))
                 .toolbar {
                     ToolbarItem(placement: .principal) {
                         Text(store.workspaceName ?? "Native Workspace")
@@ -485,7 +515,7 @@ struct ContentView: View {
         }
         }
         }
-        .disabled(store.deletionPending)
+        .disabled(store.editingPaused)
         .confirmationDialog("Delete \"\(deletePath)\"?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button(workspaceDeleteConfirmation(value: deletePath).confirm, role: .destructive) { store.deleteEntry(deletePath) }
             Button("Cancel", role: .cancel) { }
@@ -594,7 +624,7 @@ struct ContentView: View {
             HStack {
                 Text(store.activeDocument?.title ?? "No document")
                 Spacer()
-                Text(store.deletionPending ? "Deleting…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
+                Text(store.editingPaused ? "Working…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
             }
             .font(.caption)
             .foregroundStyle(.secondary)

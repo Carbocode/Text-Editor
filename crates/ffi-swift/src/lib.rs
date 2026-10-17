@@ -136,7 +136,7 @@ pub struct Activity {
     pub busy: bool,
     pub relocation: Option<Relocation>,
     pub relocation_slow: bool,
-    pub deleting: bool,
+    pub editing_paused: bool,
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -264,7 +264,7 @@ fn update(snapshot: &AppSnapshot, previous: Option<&AppSnapshot>) -> WorkspaceUp
                 target: r.target.to_string(),
             }),
             relocation_slow: snapshot.activity.relocation_slow,
-            deleting: snapshot.activity.deleting,
+            editing_paused: snapshot.activity.editing_paused,
         },
         error: snapshot.error.clone(),
     }
@@ -501,6 +501,32 @@ impl WorkspaceApplication {
             directory,
         })
     }
+    pub fn can_move_files(&self, paths: Vec<String>, directory: String) -> bool {
+        self.lock().is_ok_and(|bridge| {
+            bridge.session.can_move_files(
+                &paths
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect::<Vec<_>>(),
+                &directory,
+            )
+        })
+    }
+    pub fn open_files(&self, paths: Vec<String>) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::OpenFiles(
+            paths.into_iter().map(std::path::PathBuf::from).collect(),
+        ))
+    }
+    pub fn move_files(
+        &self,
+        paths: Vec<String>,
+        directory: String,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::MoveFiles {
+            paths: paths.into_iter().map(std::path::PathBuf::from).collect(),
+            directory,
+        })
+    }
     pub fn open_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::OpenDocument(self.parse_id(id)?))
     }
@@ -567,7 +593,7 @@ impl WorkspaceApplication {
         self.inner.lock().map_err(|_| WorkspaceError::LockPoisoned)
     }
     fn parse_id(&self, value: String) -> Result<DocumentId, WorkspaceError> {
-        match DocumentId::parse(value) {
+        match DocumentId::from_document_path(value) {
             Ok(id) => Ok(id),
             Err(_) => {
                 self.lock()?.session.report(AppError::InvalidEntryName);

@@ -9,6 +9,9 @@ impl Application {
         id: &DocumentId,
         directory: bool,
     ) -> Result<Vec<AppEvent>, AppError> {
+        if id.is_external() {
+            return Err(AppError::InvalidEntryName);
+        }
         let root = self.workspace_root()?.to_path_buf();
         self.filesystem.create_entry(&root, id, directory)?;
         self.refresh_workspace()
@@ -46,6 +49,9 @@ impl Application {
     /// `Ok(false)` when the entry would not move.
     fn validate_relocation(&self, relocation: &Relocation) -> Result<bool, AppError> {
         let Relocation { source, target } = relocation;
+        if source.is_external() || target.is_external() {
+            return Err(AppError::InvalidEntryName);
+        }
         self.workspace_root()?;
         if !self.state().entry_exists(source.as_str()) {
             return Err(AppError::DocumentNotFound(source.clone()));
@@ -56,6 +62,11 @@ impl Application {
         if path::is_descendant(target.as_str(), source.as_str()) {
             return Err(AppError::InvalidMove);
         }
+        self.validate_destination(target)?;
+        Ok(true)
+    }
+
+    pub(crate) fn validate_destination(&self, target: &DocumentId) -> Result<(), AppError> {
         let parent = target.parent();
         if !parent.is_empty()
             && self
@@ -89,10 +100,13 @@ impl Application {
         if occupied {
             return Err(AppError::DestinationExists(target.clone()));
         }
-        Ok(true)
+        Ok(())
     }
 
     pub(super) fn delete_entry(&mut self, id: DocumentId) -> Result<Vec<AppEvent>, AppError> {
+        if id.is_external() {
+            return Err(AppError::InvalidEntryName);
+        }
         let root = self.workspace_root()?.to_path_buf();
         if !self.state().entry_exists(id.as_str()) {
             return Err(AppError::DocumentNotFound(id));

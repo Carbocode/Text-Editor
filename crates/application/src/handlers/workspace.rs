@@ -162,6 +162,13 @@ fn reconcile(
         directories,
         ..
     } = filesystem.open_workspace(root)?;
+    let mut ids = ids;
+    ids.extend(
+        previous_documents
+            .iter()
+            .filter(|entry| entry.id().is_external())
+            .map(|entry| entry.id().clone()),
+    );
     let listed: HashSet<_> = ids.iter().collect();
     let previous: HashMap<_, _> = previous_documents
         .iter()

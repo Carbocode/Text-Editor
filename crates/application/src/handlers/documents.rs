@@ -11,14 +11,36 @@ impl Application {
         id: DocumentId,
         preview: bool,
     ) -> Result<Vec<AppEvent>, AppError> {
+        self.open_document_impl(id, preview, false)
+    }
+
+    pub(super) fn open_document_from_file(
+        &mut self,
+        id: DocumentId,
+    ) -> Result<Vec<AppEvent>, AppError> {
+        self.open_document_impl(id, false, true)
+    }
+
+    fn open_document_impl(
+        &mut self,
+        id: DocumentId,
+        preview: bool,
+        register: bool,
+    ) -> Result<Vec<AppEvent>, AppError> {
         let root = self.workspace_root()?.to_path_buf();
-        let entry = self.document(&id)?;
+        let entry = self.state().documents.get(&id);
+        if !register {
+            self.document(&id)?;
+        }
         let state = self.state();
         let mut events = Vec::new();
         let new_tab = !state.open_documents.contains(&id);
-        let preview = preview && !entry.dirty();
-        if !entry.is_loaded() {
+        let preview = preview && !entry.is_some_and(|entry| entry.dirty());
+        if !entry.is_some_and(|entry| entry.is_loaded()) {
             let content = self.filesystem.read_document(&root, &id)?;
+            if entry.is_none() {
+                events.push(AppEvent::DocumentAdded { id: id.clone() });
+            }
             events.push(AppEvent::DocumentLoaded {
                 id: id.clone(),
                 content: content.into(),

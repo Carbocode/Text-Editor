@@ -49,7 +49,7 @@ pub mod qobject {
         #[qproperty(bool, active_document_external_change)]
         #[qproperty(QString, pending_move_target)]
         #[qproperty(bool, move_pending)]
-        #[qproperty(bool, deletion_pending)]
+        #[qproperty(bool, editing_paused)]
         #[qproperty(QString, error_message)]
         type AppController = super::AppControllerRust;
 
@@ -80,6 +80,12 @@ pub mod qobject {
         fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString;
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
+        #[qinvokable]
+        fn open_files(self: Pin<&mut Self>, urls: &QStringList);
+        #[qinvokable]
+        fn move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString);
+        #[qinvokable]
+        fn can_move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString) -> bool;
         #[qinvokable]
         fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QList_QVariant;
         #[qinvokable]
@@ -167,7 +173,7 @@ pub struct AppControllerRust {
     active_document_external_change: bool,
     pending_move_target: QString,
     move_pending: bool,
-    deletion_pending: bool,
+    editing_paused: bool,
     error_message: QString,
     devtools_available: bool,
     application: Session,
@@ -190,6 +196,18 @@ fn strings<'a>(values: impl Iterator<Item = &'a str>) -> QStringList {
     values.map(QString::from).collect()
 }
 
+fn local_file_paths(urls: &QStringList) -> Option<Vec<PathBuf>> {
+    let paths: Option<Vec<_>> = urls
+        .iter()
+        .map(|value| {
+            QUrl::from_user_input(value, &QString::default())
+                .to_local_file()
+                .map(|path| PathBuf::from(path.to_string()))
+        })
+        .collect();
+    paths.filter(|paths| !paths.is_empty())
+}
+
 impl qobject::AppController {
     fn publish(mut self: Pin<&mut Self>) {
         let snapshot = self.rust().application.snapshot();
@@ -204,7 +222,7 @@ impl qobject::AppController {
         value: &QString,
         command: impl FnOnce(DocumentId) -> AppCommand,
     ) {
-        match DocumentId::parse(value.to_string()) {
+        match DocumentId::from_document_path(value.to_string()) {
             Ok(id) => self.dispatch(command(id)),
             Err(_) => {
                 self.as_mut()
@@ -348,7 +366,7 @@ impl qobject::AppController {
         ));
         self.as_mut().set_move_pending(snapshot.activity.busy);
         self.as_mut()
-            .set_deletion_pending(snapshot.activity.deleting);
+            .set_editing_paused(snapshot.activity.editing_paused);
         self.as_mut()
             .set_error_message(QString::from(snapshot.error.as_deref().unwrap_or_default()));
         self.as_mut().set_revision(snapshot.revision);
@@ -446,6 +464,35 @@ impl qobject::AppController {
             folder_icon_name(&value.to_string(), expanded)
         ))
     }
+    pub fn open_files(self: Pin<&mut Self>, urls: &QStringList) {
+        match local_file_paths(urls) {
+            Some(paths) => self.dispatch(AppCommand::OpenFiles(paths)),
+            None => self.reject_file_urls(),
+        }
+    }
+    pub fn move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString) {
+        match local_file_paths(urls) {
+            Some(paths) => self.dispatch(AppCommand::MoveFiles {
+                paths,
+                directory: directory.to_string(),
+            }),
+            None => self.reject_file_urls(),
+        }
+    }
+    pub fn can_move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString) -> bool {
+        local_file_paths(urls).is_some_and(|paths| {
+            self.rust()
+                .application
+                .can_move_files(&paths, &directory.to_string())
+        })
+    }
+    fn reject_file_urls(mut self: Pin<&mut Self>) {
+        self.as_mut()
+            .rust_mut()
+            .application
+            .report(AppError::InvalidEntryName);
+        self.publish();
+    }
     pub fn open_workspace(self: Pin<&mut Self>, input: &QString) {
         let url = QUrl::from_user_input(input, &QString::default());
         let path = url
@@ -518,7 +565,7 @@ impl qobject::AppController {
         directory: &QString,
         content: &QString,
     ) {
-        if let Ok(id) = DocumentId::parse(self.rust().active_document_id.to_string()) {
+        if let Ok(id) = DocumentId::from_document_path(self.rust().active_document_id.to_string()) {
             let _ = self
                 .as_mut()
                 .rust_mut()
