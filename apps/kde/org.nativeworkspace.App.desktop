@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Native Workspace (KDE)
+Comment=Edit text files and workspace folders
+Exec=native-workspace-kde %F
+Icon=accessories-text-editor
+Terminal=false
+Categories=Development;TextEditor;
+MimeType=text/plain;inode/directory;application/json;application/javascript;application/x-shellscript;
+StartupNotify=true

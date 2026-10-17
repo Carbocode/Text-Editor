@@ -5,6 +5,8 @@ mod sidebar_interactions;
 #[cfg(debug_assertions)]
 mod smoke;
 mod syntax;
+#[cfg(debug_assertions)]
+mod system_open_smoke;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -12,6 +14,8 @@ mod document_tabs;
 mod sidebar;
 mod ui;
 mod window;
+use native_workspace_application::AppCommand;
+use std::{cell::RefCell, rc::Rc};
 use window::build_window;
 
 fn main() {
@@ -24,13 +28,59 @@ fn main() {
     let app = adw::Application::builder()
         .application_id("org.nativeworkspace.App")
         .flags(
-            if std::env::var("NATIVE_WORKSPACE_NEW_INSTANCE").as_deref() == Ok("1") {
-                gio::ApplicationFlags::NON_UNIQUE
-            } else {
-                gio::ApplicationFlags::FLAGS_NONE
-            },
+            gio::ApplicationFlags::HANDLES_OPEN
+                | if std::env::var("NATIVE_WORKSPACE_NEW_INSTANCE").as_deref() == Ok("1") {
+                    gio::ApplicationFlags::NON_UNIQUE
+                } else {
+                    gio::ApplicationFlags::FLAGS_NONE
+                },
         )
         .build();
-    app.connect_activate(build_window);
+    let ui = Rc::new(RefCell::new(None::<ui::Ui>));
+    #[cfg(debug_assertions)]
+    {
+        let state = ui.clone();
+        app.connect_startup(move |app| system_open_smoke::schedule(app, state.clone()));
+    }
+    let activate_ui = ui.clone();
+    app.connect_activate(move |app| {
+        if let Some(window) = app.active_window() {
+            window.present();
+        } else {
+            let existing = activate_ui.borrow().clone();
+            if let Some(ui) = existing {
+                ui.home_window.present();
+            } else {
+                activate_ui.replace(Some(build_window(app)));
+            }
+        }
+    });
+    app.connect_open(move |app, files, _| {
+        if ui.borrow().is_none() {
+            ui.replace(Some(build_window(app)));
+        }
+        if let Some(ui) = ui.borrow().as_ref() {
+            let paths = files
+                .iter()
+                .map(|file| file.path().unwrap_or_else(|| file.uri().as_str().into()))
+                .collect();
+            ui.dispatch(AppCommand::OpenPaths(paths));
+            if ui.snapshot.borrow().workspace.is_some() {
+                ui.home_window.set_visible(false);
+                ui.window.present();
+            } else {
+                ui.home_window.present();
+            }
+        }
+    });
+    #[cfg(debug_assertions)]
+    if let Some(root) = std::env::var_os("NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN") {
+        let path = std::path::PathBuf::from(root).join("README.md");
+        app.run_with_args(&[
+            "native-workspace-gnome",
+            path.to_str().expect("UTF-8 smoke fixture"),
+        ]);
+        return;
+    }
     app.run();
 }

@@ -7,6 +7,7 @@ mod document_tabs;
 mod external_files;
 mod search;
 mod session;
+mod system_open;
 
 use crate::*;
 use native_workspace_domain::DocumentId;
@@ -127,6 +128,13 @@ impl WorkspaceFilesystem for TestFilesystem {
     fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError> {
         self.check(Operation::Open, path)?;
         RealFilesystem.open_workspace(path)
+    }
+    fn resolve_open_target(
+        &self,
+        path: &Path,
+    ) -> Result<native_workspace_filesystem::OpenTarget, FilesystemError> {
+        self.check(Operation::Resolve, path)?;
+        RealFilesystem.resolve_open_target(path)
     }
     fn resolve_file(&self, path: &Path) -> Result<std::path::PathBuf, FilesystemError> {
         self.check(Operation::Resolve, path)?;

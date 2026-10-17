@@ -55,7 +55,8 @@ fn main() {
             .qml_file("tests/CursorSmoke.qml")
             .qml_file("tests/AppearanceSmoke.qml")
             .qml_file("tests/DragSmoke.qml")
-            .qml_file("tests/ExternalDropSmoke.qml"),
+            .qml_file("tests/ExternalDropSmoke.qml")
+            .qml_file("tests/SystemOpenSmoke.qml"),
     )
     .qrc_resources(QResources::new().resource(resources))
     .qt_module("Network")
@@ -63,6 +64,7 @@ fn main() {
     .cpp_files([
         "tests/cursor_probe.h",
         "tests/file_drop_probe.h",
+        "tests/system_open_probe.h",
         "src/syntax_highlighter.h",
         "src/syntax_highlighter.cpp",
         "src/search_results_model.h",
@@ -70,6 +72,7 @@ fn main() {
         "src/editor_fonts.h",
         "src/editor_fonts.cpp",
         "src/desktop_integration.h",
+        "src/system_open.h",
         "src/desktop_integration.cpp",
     ])
     .files(["src/bridge.rs"]);

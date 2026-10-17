@@ -85,15 +85,12 @@ fn application_menu(devtools_available: bool) -> gtk::MenuButton {
     button
 }
 
-pub(super) fn build_window(app: &adw::Application) {
-    if let Some(window) = app.active_window() {
-        window.present();
-        return;
-    }
+pub(super) fn build_window(app: &adw::Application) -> Ui {
     let mut core = Session::new();
     core.enable_devtools("gtk");
     let persistence_error = if std::env::var_os("NATIVE_WORKSPACE_SMOKE").is_none()
         && std::env::var_os("NATIVE_WORKSPACE_SMOKE_WORKSPACE").is_none()
+        && std::env::var_os("NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN").is_none()
     {
         core.enable_persistence_default()
             .err()
@@ -1237,4 +1234,5 @@ pub(super) fn build_window(app: &adw::Application) {
         sidebar_frame: &sidebar_frame,
         sidebar_resize: &sidebar_resize,
     });
+    ui
 }
