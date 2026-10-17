@@ -555,17 +555,33 @@ struct ContentView: View {
                    searchNavigationRevision: store.searchNavigationRevision,
                    fontSize: editorFontSize)
             } else {
-                VStack(spacing: 16) {
-                    ContentUnavailableView(
-                        store.workspaceName == nil ? "Open a Workspace" : "Select a Document",
-                        systemImage: store.workspaceName == nil ? "folder" : "doc.text",
-                        description: Text(store.workspaceName == nil ? "Choose a directory containing Markdown or text files." : "Choose a file in the sidebar.")
-                    )
-                    if store.workspaceName == nil {
-                        Button("Open Workspace") { choosingWorkspace = true }
-                            .buttonStyle(.glassProminent)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 40))
+                            .foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("No Document Open").font(.title.bold())
+                            Text("Choose a file from the sidebar to start editing.")
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Open Folder…", systemImage: "folder.badge.plus") { choosingWorkspace = true }
+                            .keyboardShortcut("o", modifiers: .command)
+                            .buttonStyle(.borderedProminent)
+                        Divider()
+                        Text("Keyboard Shortcuts").font(.headline)
+                        Grid(alignment: .leading, horizontalSpacing: 32, verticalSpacing: 12) {
+                            shortcutRow("Open Folder", keys: "⌘O")
+                            shortcutRow("Save", keys: "⌘S")
+                            shortcutRow("Save All", keys: "⇧⌘S")
+                        }
                     }
+                    .padding(32)
+                    .frame(maxWidth: 440, alignment: .leading)
+                    .frame(maxWidth: .infinity)
                 }
+                .defaultScrollAnchor(.center)
+                .accessibilityIdentifier("workspaceHub")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if let error = store.errorMessage {
@@ -584,6 +600,13 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
+        }
+    }
+
+    private func shortcutRow(_ title: String, keys: String) -> some View {
+        GridRow {
+            Text(title).foregroundStyle(.secondary)
+            Text(keys).monospaced().gridColumnAlignment(.trailing)
         }
     }
 

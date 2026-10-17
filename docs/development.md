@@ -68,6 +68,10 @@ Modify a nested document, switch to another file, then try deleting its parent f
 
 The shared deletion tests cover inactive unsaved descendants, unrelated dirty buffers, successful subtree removal, search invalidation, background execution, filesystem failure, and symlink boundaries. The Swift bridge smoke test also exercises deletion rejection and success through UniFFI.
 
+## Workspace hub verification
+
+In each frontend, open a workspace without opening a document. The editor area must show **No Document Open**, an **Open Folder…** action and keyboard shortcuts, with no text caret, line numbers or minimap. Resize the window to its minimum size and verify that the hub remains readable by scrolling. Open a file from the sidebar: the hub must give way to the editor. Close the last tab and verify that the hub returns; repeat after deleting the last clean open file. The sidebar must remain usable throughout. Check the displayed Open Folder, Save and Save All shortcuts (Command on macOS, Control on Linux, including GTK/Qt when running on macOS); Save shortcuts apply after opening/editing documents.
+
 ## Document tabs verification
 
 Open three files in a different order from their sidebar order. Tabs must keep the order in which they were opened; reopening a tab selects it without duplicating it. Edit two files and switch between them: both buffers and dirty markers must remain intact. Close an inactive clean tab and confirm that the active document stays selected. Close the active tab and confirm that its right neighbor (or the last remaining tab) becomes active.
