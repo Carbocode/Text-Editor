@@ -6,6 +6,21 @@
   <key>CFBundleName</key><string>Native Workspace</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Text documents</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key><array><string>public.text</string><string>public.data</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>Workspace folders</string>
+      <key>CFBundleTypeRole</key><string>Editor</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+    </dict>
+  </array>
   <key>UTExportedTypeDeclarations</key>
   <array><dict>
     <key>UTTypeIdentifier</key><string>org.nativeworkspace.sidebar-entry</string>

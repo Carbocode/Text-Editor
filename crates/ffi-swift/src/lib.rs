@@ -512,6 +512,12 @@ impl WorkspaceApplication {
             )
         })
     }
+    pub fn open_paths(&self, paths: Vec<String>) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::OpenPaths(
+            paths.into_iter().map(PathBuf::from).collect(),
+        ))
+    }
+
     pub fn open_files(&self, paths: Vec<String>) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::OpenFiles(
             paths.into_iter().map(std::path::PathBuf::from).collect(),

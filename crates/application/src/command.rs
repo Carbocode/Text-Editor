@@ -12,6 +12,9 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     OpenWorkspace(PathBuf),
+    /// Ordered OS open requests: folders select a workspace; files open permanent tabs.
+    /// Without a workspace, the first file selects its parent folder.
+    OpenPaths(Vec<PathBuf>),
     /// Open OS files permanently. Successful earlier files survive a later failure.
     OpenFiles(Vec<PathBuf>),
     OpenFile(PathBuf),
@@ -102,6 +105,7 @@ impl AppCommand {
     pub(crate) fn diagnostic_name(&self) -> &'static str {
         match self {
             Self::OpenWorkspace(_) => "command.workspace_open",
+            Self::OpenPaths(_) => "command.paths_open",
             Self::OpenFiles(_) => "command.files_open",
             Self::OpenFile(_) => "command.file_open",
             Self::MoveFiles { .. } => "command.files_move",
@@ -143,7 +147,8 @@ impl AppCommand {
                 path,
                 directory: folder(directory),
             },
-            Self::OpenFiles(_)
+            Self::OpenPaths(_)
+            | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
@@ -210,7 +215,8 @@ impl AppCommand {
                     target,
                 }))
             }
-            Self::OpenFiles(_)
+            Self::OpenPaths(_)
+            | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::MoveFiles { .. }
             | Self::MoveFile { .. }
@@ -258,7 +264,8 @@ impl AppCommand {
                 Self::SaveDocument(id.clone()),
                 Self::CloseDocument(id.clone()),
             ]),
-            Self::OpenFile(_)
+            Self::OpenPaths(_)
+            | Self::OpenFile(_)
             | Self::MoveFile { .. }
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
@@ -292,7 +299,8 @@ impl AppCommand {
             | Self::DeleteEntry(_)
             | Self::CloseDocument(_)
             | Self::DiscardAndCloseDocument(_) => true,
-            Self::OpenFiles(_)
+            Self::OpenPaths(_)
+            | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
@@ -317,9 +325,10 @@ impl AppCommand {
     pub(crate) fn schedule(&self) -> Schedule {
         match self {
             Self::RenameEntry { .. } | Self::MoveEntry { .. } => Schedule::Relocation,
-            Self::MoveFiles { .. } | Self::MoveFile { .. } | Self::DeleteEntry(_) => {
-                Schedule::Exclusive
-            }
+            Self::OpenPaths(_)
+            | Self::MoveFiles { .. }
+            | Self::MoveFile { .. }
+            | Self::DeleteEntry(_) => Schedule::Exclusive,
             Self::OpenFiles(_) | Self::OpenFile(_) | Self::RefreshWorkspace => Schedule::Background,
             Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
@@ -346,6 +355,7 @@ impl AppCommand {
         let exclusive = running == Schedule::Exclusive;
         match self {
             Self::PollWorkspaceChanges | Self::PollSearchResults => BusyPolicy::Skip,
+            Self::OpenPaths(_) => BusyPolicy::Defer,
             // Exclusive operations may remove or relocate the edited document.
             Self::ChangeDocument { .. } if exclusive => BusyPolicy::Reject,
             Self::ChangeDocument { .. } => BusyPolicy::ProjectEdit,

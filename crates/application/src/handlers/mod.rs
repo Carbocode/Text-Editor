@@ -37,7 +37,8 @@ impl Application {
             AppCommand::SaveDocument(id) => self.save_document(id),
             AppCommand::ReloadDocument(id) => self.reload_document(id),
             AppCommand::OverwriteDocument(id) => self.overwrite_document(id),
-            AppCommand::OpenFiles(_)
+            AppCommand::OpenPaths(_)
+            | AppCommand::OpenFiles(_)
             | AppCommand::MoveFiles { .. }
             | AppCommand::SaveAllDocuments
             | AppCommand::SaveAndCloseDocument(_) => {

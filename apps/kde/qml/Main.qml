@@ -3,8 +3,10 @@ import QtQuick.Controls
 import QtQuick.Dialogs
 import org.kde.kirigami as Kirigami
 import org.nativeworkspace.Diagnostic
+import org.nativeworkspace.Desktop
 
 Kirigami.ApplicationWindow {
+    id: window
     visible: !workspacePane.showingHome
     width: Kirigami.Units.gridUnit * 60
     height: Kirigami.Units.gridUnit * 40
@@ -37,5 +39,29 @@ Kirigami.ApplicationWindow {
         }
     }
 
-    Component.onCompleted: controller.initialize_persistence()
+    function openSystemRequests() {
+        if (!SystemOpenRequests.hasPending() || !workspacePane.flushEditor()) return
+        const urls = SystemOpenRequests.takePending()
+        controller.open_paths(urls)
+        if (controller.workspace_root.length > 0) {
+            workspacePane.showingHome = false
+            window.show()
+            window.raise()
+            window.requestActivate()
+        }
+    }
+    Connections {
+        target: SystemOpenRequests
+        function onReceived() { window.openSystemRequests() }
+    }
+    Connections {
+        target: controller
+        function onMove_pendingChanged() {
+            if (!controller.move_pending) Qt.callLater(function() { window.openSystemRequests() })
+        }
+    }
+    Component.onCompleted: {
+        controller.initialize_persistence()
+        openSystemRequests()
+    }
 }

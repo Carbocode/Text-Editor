@@ -21,3 +21,6 @@ The header provides linked Decrease/Increase Text Size buttons, using one-point 
 File rows show an eye for documents open in the editor, in addition to their dirty/conflict status. Open/close snapshots update the visible row indicators without rebuilding the cached tree or name-filter index.
 
 Single-clicking a file or search result opens a preview tab with an italic title. There is at most one preview per window; opening another file in preview replaces it, while selecting an existing tab preserves it. Editing, explicitly saving, double-clicking the file or tab, or choosing Keep Open makes the tab permanent. Undoing edits or saving afterwards does not turn it back into a preview. New files open permanently. F2 and the context menu handle renaming. These rules follow [VS Code preview mode](https://code.visualstudio.com/docs/editing/getting-started/userinterface#_preview-mode).
+
+A desktop entry template is provided in this app's directory. See
+[installation, platform limits and system-open smoke modes](development.md#application-icon-and-open-with-verification).

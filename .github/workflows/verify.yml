@@ -74,7 +74,7 @@ jobs:
       - run: cargo build -p native-workspace-${{ matrix.frontend }}
       - name: Prepare native smoke workspaces
         run: |
-          for fixture in workspace sidebar drag; do
+          for fixture in workspace sidebar drag system-open; do
             mkdir -p "$RUNNER_TEMP/editor-smoke/$fixture/src"
             printf 'Smoke workspace\n' > "$RUNNER_TEMP/editor-smoke/$fixture/README.md"
             printf 'fn main() { println!("sidebar needle"); }\n' > "$RUNNER_TEMP/editor-smoke/$fixture/src/main.rs"
@@ -91,6 +91,20 @@ jobs:
         run: >-
           timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
           target/debug/native-workspace-kde --smoke-workspace="$RUNNER_TEMP/editor-smoke/workspace"
+      - name: GNOME system-open smoke
+        if: matrix.frontend == 'gnome'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env
+          NATIVE_WORKSPACE_NEW_INSTANCE=1
+          NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN="$RUNNER_TEMP/editor-smoke/system-open"
+          target/debug/native-workspace-gnome
+      - name: KDE system-open smoke
+        if: matrix.frontend == 'kde'
+        run: >-
+          timeout 90s dbus-run-session -- xvfb-run -a env QT_QUICK_BACKEND=software
+          target/debug/native-workspace-kde
+          --smoke-system-open="$RUNNER_TEMP/editor-smoke/system-open"
+          "$RUNNER_TEMP/editor-smoke/system-open/README.md"
       - name: KDE sidebar smoke
         if: matrix.frontend == 'kde'
         run: >-

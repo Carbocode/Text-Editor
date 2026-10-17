@@ -1,6 +1,8 @@
 #include "desktop_integration.h"
+#include "system_open.h"
 #include "../tests/cursor_probe.h"
 #include "../tests/file_drop_probe.h"
+#include "../tests/system_open_probe.h"
 
 #include <KColorSchemeManager>
 #include <QEvent>
@@ -28,6 +30,9 @@ public:
 }
 
 extern "C" void configure_kde_desktop() {
+    auto opens = new SystemOpenRequests(qGuiApp);
+    qGuiApp->installEventFilter(opens);
+    qmlRegisterSingletonInstance("org.nativeworkspace.Desktop", 1, 0, "SystemOpenRequests", opens);
     // Give Qt/Kirigami buttons and item delegates a native pointing cursor.
     // Leave text, resize and active drag cursors to their toolkit controls.
     qGuiApp->installEventFilter(new ControlCursorFeedback(qGuiApp));
@@ -46,6 +51,10 @@ extern "C" void configure_kde_desktop() {
     // TreeModel's QML helpers accept role names. The built-in tree editor uses
     // QAbstractItemModel's numeric roles, exposed unchanged by this Qt proxy.
     qmlRegisterType<QIdentityProxyModel>("org.nativeworkspace.Editor", 1, 0, "NativeTreeModel");
+    if (QGuiApplication::arguments().join(QChar(' ')).contains(QStringLiteral("--smoke-system-open="))) {
+        qmlRegisterSingletonType<SystemOpenProbe>("org.nativeworkspace.Test", 1, 0, "SystemOpenProbe",
+            [](QQmlEngine*, QJSEngine*) -> QObject* { return new SystemOpenProbe; });
+    }
     if (QGuiApplication::arguments().join(QChar(' ')).contains(QStringLiteral("--smoke-external="))) {
         qmlRegisterSingletonType<FileDropProbe>("org.nativeworkspace.Test", 1, 0, "FileDropProbe",
             [](QQmlEngine*, QJSEngine*) -> QObject* { return new FileDropProbe; });

@@ -104,6 +104,9 @@ final class WorkspaceStore: ObservableObject {
     @discardableResult func openFiles(_ urls: [URL]) -> Bool {
         request { try core.openFiles(paths: urls.map(\.path)) }
     }
+    @discardableResult func openPaths(_ urls: [URL]) -> Bool {
+        request { try core.openPaths(paths: urls.map { $0.isFileURL ? $0.path : $0.absoluteString }) }
+    }
     func canMoveEntry(_ source: String, directory: String) -> Bool {
         core.canMoveEntry(path: source, directory: directory)
     }

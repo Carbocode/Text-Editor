@@ -83,6 +83,8 @@ pub mod qobject {
         #[qinvokable]
         fn open_files(self: Pin<&mut Self>, urls: &QStringList);
         #[qinvokable]
+        fn open_paths(self: Pin<&mut Self>, urls: &QStringList);
+        #[qinvokable]
         fn move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString);
         #[qinvokable]
         fn can_move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString) -> bool;
@@ -467,6 +469,12 @@ impl qobject::AppController {
     pub fn open_files(self: Pin<&mut Self>, urls: &QStringList) {
         match local_file_paths(urls) {
             Some(paths) => self.dispatch(AppCommand::OpenFiles(paths)),
+            None => self.reject_file_urls(),
+        }
+    }
+    pub fn open_paths(self: Pin<&mut Self>, urls: &QStringList) {
+        match local_file_paths(urls) {
+            Some(paths) => self.dispatch(AppCommand::OpenPaths(paths)),
             None => self.reject_file_urls(),
         }
     }

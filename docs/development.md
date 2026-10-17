@@ -33,7 +33,7 @@ cargo xtask test xtask        # command composition and Qt discovery regression 
 cargo xtask fmt               # check formatting across the workspace
 ```
 
-`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the seven Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
+`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the eight Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
 
 Inspect composition without running it:
 
@@ -104,6 +104,54 @@ The workspace must contain `src/main.rs`; the external source must be a disposab
 UTF-8 regular file. The smoke sends native drag events through QQuickWindow,
 checks folder expansion and moves the edited source into `src`. Run on supported
 native desktops; macOS toolkit checks do not verify Linux file-manager integration.
+
+## Application icon and Open With verification
+
+On macOS build the app bundle, then drop a local UTF-8 file or folder onto its
+Dock or Finder icon. Repeat after quitting the app. Files open permanent tabs;
+folders select a workspace. Also exercise Finder's **Open With** or
+`open -a /absolute/path/NativeWorkspace.app /absolute/path/to/file`.
+The bundle declares text/data and folder document types with alternate handler
+rank; it does not request default ownership. Files must still pass the shared
+UTF-8 and regular-file validation. `SystemOpenSmoke` drives the same AppKit
+application delegate before and after window presentation is available.
+
+On Linux, put the selected frontend executable on `PATH`, then install that
+frontend's `org.nativeworkspace.App.desktop` from `apps/gnome` or `apps/kde`
+into `~/.local/share/applications/` and run
+`update-desktop-database ~/.local/share/applications/`. The templates share the
+application ID: install one frontend's template at a time. The `%F` entry accepts
+local paths with spaces and Unicode from file managers and launchers. Installing
+the entry does not change MIME defaults; choose **Open With** explicitly.
+Launcher drag/drop availability depends on the desktop/shell. GNOME forwards
+later requests through GApplication unless `NATIVE_WORKSPACE_NEW_INSTANCE=1`
+is set. KDE's Linux desktop entry starts a new process for each invocation;
+it does not provide D-Bus forwarding. Qt file-open events are also accepted on
+platforms that deliver them (notably macOS); this does not imply such events are
+available on Linux. GNOME/Qt checks on macOS do not verify Linux shell integration.
+
+Each process has one workspace. Items are handled in supplied order, so a later
+folder replaces an earlier clean workspace and its tabs. Without a workspace,
+a file first selects its parent folder. Reopening the current workspace keeps
+its tabs and edits. With a dirty inactive or active tab, a different folder must
+fail and preserve the buffer. A missing, symlinked, non-local or non-UTF-8 file
+must report an error; completed earlier items remain open. Deliver another
+request during a delayed open and check that it queues and the UI stays responsive.
+
+Dedicated native smoke modes use a disposable workspace containing `README.md`
+and `src/main.rs`:
+
+```sh
+NATIVE_WORKSPACE_SMOKE_SYSTEM_OPEN=/absolute/fixture target/debug/native-workspace-gnome
+QT_QPA_PLATFORM=offscreen target/debug/native-workspace-kde \
+  --smoke-system-open=/absolute/fixture /absolute/fixture/README.md
+```
+
+The GNOME smoke emits the native GApplication `open` signal; the KDE smoke reads
+real launch arguments and sends `QFileOpenEvent` through the application filter.
+They check startup, repeated requests and dirty-buffer rejection. macOS's normal
+`cargo xtask verify macos` includes its dedicated delegate smoke. End-to-end
+Dock/Finder and Linux desktop-shell deliveries remain manual checks.
 
 ## Document tabs verification
 

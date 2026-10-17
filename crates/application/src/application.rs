@@ -13,7 +13,11 @@ use crate::{
 };
 use native_workspace_filesystem::{RealFilesystem, WorkspaceFilesystem, WorkspaceWatcher};
 use native_workspace_storage::{MemoryStorage, MetadataStorage, SqliteStorage};
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 pub(crate) struct Application {
     state: AppState,
@@ -124,9 +128,12 @@ impl Application {
         self.command_context = context.clone();
         let span = context.span(command.diagnostic_name(), "dispatch");
         let revision = self.state.revision;
-        let result = match command.steps(|| self.state.dirty_tabs()) {
-            Some(steps) => self.execute_steps(steps),
-            None => self.execute_one(command),
+        let result = match command {
+            AppCommand::OpenPaths(paths) => self.execute_open_paths(paths),
+            command => match command.steps(|| self.state.dirty_tabs()) {
+                Some(steps) => self.execute_steps(steps),
+                None => self.execute_one(command),
+            },
         };
         self.record(&context, revision, &result);
         let outcome = match &result {
@@ -137,6 +144,15 @@ impl Application {
         let count = result.as_ref().map_or(0, |events| events.len() as u64);
         span.end(outcome, self.state.revision, count);
         result
+    }
+
+    fn execute_open_paths(&mut self, paths: Vec<PathBuf>) -> Result<Vec<AppEvent>, AppError> {
+        let mut events = Vec::new();
+        for path in paths {
+            let commands = self.open_path_commands(&path)?;
+            events.extend(self.execute_steps(commands)?);
+        }
+        Ok(events)
     }
 
     fn execute_steps(&mut self, steps: Vec<AppCommand>) -> Result<Vec<AppEvent>, AppError> {

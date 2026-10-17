@@ -131,7 +131,12 @@ impl Session {
         trace: SidebarDropTrace,
     ) -> Result<(), AppError> {
         if let Some(worker) = &self.worker {
-            return self.while_busy(command.clone(), command.while_busy(worker.schedule));
+            let schedule = if self.published.activity.editing_paused {
+                Schedule::Exclusive
+            } else {
+                worker.schedule
+            };
+            return self.while_busy(command.clone(), command.while_busy(schedule));
         }
         let user_command = !matches!(
             command,
@@ -298,7 +303,11 @@ impl Session {
             BusyPolicy::Skip => Ok(()),
             BusyPolicy::Reject => self.fail(AppError::OperationInProgress),
             BusyPolicy::Defer => {
+                let pause = command.schedule() == Schedule::Exclusive;
                 self.deferred.push(command);
+                if pause && !self.published.activity.editing_paused {
+                    self.publish(|snapshot| snapshot.activity.editing_paused = true);
+                }
                 Ok(())
             }
             BusyPolicy::ProjectEdit => {
@@ -448,13 +457,15 @@ impl Session {
                 }
             }
             self.projection = Some(projection);
-            self.start_job(
-                deferred,
-                Schedule::Background,
-                None,
-                SidebarDropTrace::default(),
-                true,
-            );
+            let schedule = if deferred
+                .iter()
+                .any(|command| command.schedule() == Schedule::Exclusive)
+            {
+                Schedule::Exclusive
+            } else {
+                Schedule::Background
+            };
+            self.start_job(deferred, schedule, None, SidebarDropTrace::default(), true);
             if let Some(error) = reply.error {
                 let _ = self.fail(error);
             }
@@ -545,7 +556,11 @@ impl Session {
                 busy: true,
                 relocation: worker.relocation.clone(),
                 relocation_slow: self.published.activity.relocation_slow,
-                editing_paused: worker.schedule == Schedule::Exclusive,
+                editing_paused: worker.schedule == Schedule::Exclusive
+                    || self
+                        .deferred
+                        .iter()
+                        .any(|command| command.schedule() == Schedule::Exclusive),
             },
             None => Activity::default(),
         }

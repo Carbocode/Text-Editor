@@ -85,12 +85,21 @@ pub struct WorkspaceListing {
     pub directories: Vec<String>,
 }
 
+/// A canonical local item supplied by the operating system.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenTarget {
+    File(PathBuf),
+    Directory(PathBuf),
+}
+
 /// Every filesystem access of the application. Implementations decide
 /// everything about the disk; callers never touch `std::fs` directly.
 pub trait WorkspaceFilesystem: Send + Sync {
     /// Canonicalizes `path` and lists regular files and folders below it,
     /// skipping symlinks.
     fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError>;
+    /// Resolve an absolute file or directory; reject symlink leaves and special files.
+    fn resolve_open_target(&self, path: &Path) -> Result<OpenTarget, FilesystemError>;
     /// Resolve an absolute regular file selected by the user. Reject symlink leaves.
     fn resolve_file(&self, path: &Path) -> Result<PathBuf, FilesystemError>;
     /// Move a resolved regular file into the workspace without replacement.
@@ -278,16 +287,27 @@ impl WorkspaceFilesystem for RealFilesystem {
         })
     }
 
-    fn resolve_file(&self, path: &Path) -> Result<PathBuf, FilesystemError> {
-        if !path.is_absolute()
-            || !fs::symlink_metadata(path)
-                .map_err(at(path))?
-                .file_type()
-                .is_file()
-        {
+    fn resolve_open_target(&self, path: &Path) -> Result<OpenTarget, FilesystemError> {
+        if !path.is_absolute() {
             return Err(FilesystemError::InvalidDocument(path.to_path_buf()));
         }
-        fs::canonicalize(path).map_err(at(path))
+        let kind = fs::symlink_metadata(path).map_err(at(path))?.file_type();
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(FilesystemError::InvalidDocument(path.to_path_buf()));
+        }
+        let resolved = fs::canonicalize(path).map_err(at(path))?;
+        Ok(if kind.is_dir() {
+            OpenTarget::Directory(resolved)
+        } else {
+            OpenTarget::File(resolved)
+        })
+    }
+
+    fn resolve_file(&self, path: &Path) -> Result<PathBuf, FilesystemError> {
+        match self.resolve_open_target(path)? {
+            OpenTarget::File(path) => Ok(path),
+            OpenTarget::Directory(_) => Err(FilesystemError::InvalidDocument(path.to_path_buf())),
+        }
     }
 
     fn move_file(
