@@ -103,13 +103,24 @@ impl TouchpadScroll {
     }
 
     pub(super) fn scroll(&self, unit: gdk::ScrollUnit, dx: f64, dy: f64) -> glib::Propagation {
-        if unit != gdk::ScrollUnit::Surface || (dx == 0.0 && dy == 0.0) {
+        // Horizontal wheel events must not reach GtkScrolledWindow either:
+        // its wheel path also accumulates overshoot and springs back at edges.
+        // Leave vertical wheel navigation to AdwTabBox.
+        if unit != gdk::ScrollUnit::Surface && (unit != gdk::ScrollUnit::Wheel || dx == 0.0) {
             return glib::Propagation::Proceed;
         }
         let Some(adjustment) = self.adjustment() else {
             return glib::Propagation::Proceed;
         };
         self.stop();
+        if unit == gdk::ScrollUnit::Wheel {
+            let step = adjustment.page_size().powf(2.0 / 3.0);
+            Self::move_by(&adjustment, dx * step);
+            return glib::Propagation::Stop;
+        }
+        if dx == 0.0 && dy == 0.0 {
+            return glib::Propagation::Stop;
+        }
         let (dx, dy) = if self.axis.get().is_none() {
             let (x, y) = self.pending.get();
             let accumulated = (x + dx, y + dy);
@@ -130,7 +141,12 @@ impl TouchpadScroll {
         };
         // Surface deltas are logical pixels, not wheel detents. Keep them 1:1
         // and bound every update, including the event that crosses an edge.
-        let value = adjustment.value() + self.delta(dx, dy);
+        Self::move_by(&adjustment, self.delta(dx, dy));
+        glib::Propagation::Stop
+    }
+
+    fn move_by(adjustment: &gtk::Adjustment, delta: f64) {
+        let value = adjustment.value() + delta;
         let bounded = value.clamp(
             adjustment.lower(),
             adjustment.upper() - adjustment.page_size(),
@@ -143,7 +159,6 @@ impl TouchpadScroll {
         } else {
             adjustment.set_value(bounded);
         }
-        glib::Propagation::Stop
     }
 
     pub(super) fn decelerate(&self, vx: f64, vy: f64) {
