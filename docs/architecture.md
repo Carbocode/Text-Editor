@@ -25,7 +25,7 @@ Each editor window owns one `Session`. The synchronous `Application` and `AppSta
 
 ## I/O and concurrency
 
-`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Open external files share the document table and save/conflict rules; workspace search and sidebar projections exclude them, and closing their tabs removes their entries. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores only recent-workspace metadata, never document text.
+`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Open external files share the document table and save/conflict rules; normal workspace search and the Files sidebar exclude them, while explicit Open Editors search includes them. Closing their tabs removes their entries. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores only recent-workspace metadata, never document text.
 
 A session polls worker, watcher, text-search and name-filter results through one `poll` API. Native adapters use a fast timer (16 ms) while work is active and an idle interval (250 ms) otherwise. The watcher starts a background reconciliation after filesystem events, periodically every 30 seconds, or every two seconds without a watcher. A result from an older state revision cannot replace newer edits or paths.
 
@@ -33,7 +33,26 @@ Rename, move, deletion and explicit refresh execute on the session worker. Reloc
 
 ## Search and presentation
 
-Text search debounces for 150 ms, prioritizes open buffers and shallow files, honors ignore files and skips `.git`. It uses up to eight worker threads, skips non-UTF-8 or >1 MiB contents, streams current-generation matches and caps results at 20,000. Results carry Unicode-scalar and UTF-16 positions. Unsaved buffer edits update their matches; relocation preserves matches under the new path; explicit refresh re-searches. Empty queries cancel immediately. Name filtering runs through the same debounced worker and returns matching files/folders and their ancestors.
+Text search debounces for 150 ms, prioritizes open buffers and shallow files, and by default honors ignore files and skips `.git`. It uses up to eight worker threads, skips non-UTF-8 or >1 MiB contents, streams current-generation matches and caps results at 20,000. Results carry Unicode-scalar and UTF-16 positions. Unsaved buffer edits update their matches; relocation preserves matches under the new path; explicit refresh re-searches. Empty queries cancel immediately. Name filtering runs through the same debounced worker and returns matching files/folders and their ancestors.
+
+`SearchOptions` owns case, whole-word and regex matching, include/exclude globs,
+ignore-file use and the Open Editors scope. Only that explicit scope includes open
+external documents. Invalid expressions/patterns publish an inline `search_error`
+and cancel older generations. Cancellation keeps partial results marked incomplete;
+refresh starts a new generation. Buffer matching uses the same settings as workers.
+Relocations with active path filters re-search so old scope membership cannot persist.
+
+Replacement preparation runs on the Session worker without writing. The reducer
+publishes an immutable preview containing exact before/after contents and shared
+review snippets. Apply is exclusive: it checks all disk/buffer baselines before any
+edit and checks each file again before writing. Open buffers receive ordinary
+`DocumentChanged` events and retain their save baseline; closed files are written
+through `WorkspaceFilesystem` and invalidate their matches. Each successful file is
+committed separately, so a later failure retains prior successes. Search is restarted
+after applying, including after a partial failure. A new query, settings or workspace
+clears a pending preview; intervening buffer/disk changes reject it on apply. Native
+adapters own disclosure controls, replacement drafts and preview dialogs, while
+Rust owns edit ranges, capture expansion, case preservation and confirmation wording.
 
 Snapshot lists and text are shared with `Arc`. A changed dirty flag invalidates document summaries; later typing that leaves summaries unchanged preserves their identity. GTK/Qt skip unchanged conversions. UniFFI sends `WorkspaceUpdate`: omitted lists are unchanged, while `snapshot()` explicitly sends all lists. Qt search occurrences use records with numeric offsets and a `QAbstractListModel`; syntax spans are structured records.
 

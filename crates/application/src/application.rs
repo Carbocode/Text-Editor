@@ -130,6 +130,7 @@ impl Application {
         let revision = self.state.revision;
         let result = match command {
             AppCommand::OpenPaths(paths) => self.execute_open_paths(paths),
+            AppCommand::ApplyReplacement => self.apply_replacement(),
             command => match command.steps(|| self.state.dirty_tabs()) {
                 Some(steps) => self.execute_steps(steps),
                 None => self.execute_one(command),
@@ -163,24 +164,33 @@ impl Application {
         Ok(events)
     }
 
-    fn execute_one(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
+    pub(crate) fn execute_one(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
         let researches = command.researches();
         let mut events = self.resolve(command)?;
-        let research = researches && self.state.has_query();
+        let relocation_changes_filter = events
+            .iter()
+            .any(|event| matches!(event, AppEvent::EntryRelocated { .. }))
+            && (!self.state.search_options.include.is_empty()
+                || !self.state.search_options.exclude.is_empty());
+        let research = (researches || relocation_changes_filter) && self.state.has_query();
         if research && !events.is_empty() {
             events.push(AppEvent::SearchStarted);
         }
         self.commit(&events)?;
-        if events
-            .iter()
-            .any(|event| matches!(event, AppEvent::WorkspaceOpened { .. }))
-        {
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                AppEvent::WorkspaceOpened { .. } | AppEvent::SearchCancelled
+            )
+        }) {
             self.search.cancel();
         }
-        if events
-            .iter()
-            .any(|event| matches!(event, AppEvent::SearchQueryQueued { .. }))
-        {
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                AppEvent::SearchQueryQueued { .. } | AppEvent::SearchConfigured { .. }
+            )
+        }) {
             self.queue_search(true);
         }
         // A running search still reads the old paths. Supersede it so late
@@ -190,7 +200,14 @@ impl Application {
             && events
                 .iter()
                 .any(|event| matches!(event, AppEvent::EntryRelocated { .. }));
-        if relocated_while_searching {
+        if relocated_while_searching && !research {
+            self.queue_search(false);
+        }
+        if events
+            .iter()
+            .any(|event| matches!(event, AppEvent::SearchStarted))
+            && !research
+        {
             self.queue_search(false);
         }
         // A refresh that changed nothing still searches the disk again.
@@ -233,6 +250,7 @@ impl Application {
             root: workspace.root.clone(),
             documents: self.state.documents.entries().to_vec(),
             query: self.state.search_query.clone(),
+            options: self.state.search_options.clone(),
             stream,
         });
         self.search_context.generation = generation;

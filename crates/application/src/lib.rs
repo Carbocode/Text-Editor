@@ -18,7 +18,9 @@ mod handlers;
 mod icons;
 mod path_filter;
 mod presentation;
+mod replacement;
 mod search;
+mod search_options;
 mod session;
 pub mod sidebar;
 mod snapshot;
@@ -37,7 +39,11 @@ pub use event::AppEvent;
 pub use icons::{file_icon_name, folder_icon_name};
 pub use native_workspace_storage::RecentWorkspace;
 pub use path_filter::PathFilterResult;
-pub use presentation::{Confirmation, close_confirmation, delete_confirmation};
+pub use presentation::{
+    Confirmation, close_confirmation, delete_confirmation, replacement_confirmation,
+};
+pub use replacement::{ReplacementPreview, ReplacementTarget};
+pub use search_options::SearchOptions;
 pub use session::Session;
 pub use sidebar::{SidebarChild, SidebarRow, SidebarRowKind};
 pub use snapshot::{

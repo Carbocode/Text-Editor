@@ -55,6 +55,7 @@ pub(super) struct Ui {
     pub(super) file_query: Rc<RefCell<String>>,
     pub(super) file_search_row: gtk::Box,
     pub(super) text_search_row: gtk::Box,
+    pub(super) search_controls: crate::search_panel::SearchControls,
     pub(super) search_spinner: gtk::Spinner,
     pub(super) search_truncated: gtk::Label,
     pub(super) conflict_banner: gtk::Box,
@@ -493,6 +494,7 @@ impl Ui {
         if self.search.text().as_str() != snapshot.search_query {
             self.search.set_text(&snapshot.search_query);
         }
+        self.search_controls.render(self, &snapshot);
         self.search_spinner
             .set_spinning(snapshot.search_in_progress);
         self.search_spinner.set_visible(

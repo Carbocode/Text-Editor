@@ -8,8 +8,8 @@ import org.nativeworkspace.Diagnostic
 
 Kirigami.ApplicationWindow {
     visible: !workspacePane.showingHome
-    width: Kirigami.Units.gridUnit * 60
-    height: Kirigami.Units.gridUnit * 40
+    width: Kirigami.Units.gridUnit * 72
+    height: Kirigami.Units.gridUnit * 46
     minimumWidth: Kirigami.Units.gridUnit * 36
     minimumHeight: Kirigami.Units.gridUnit * 24
     title: controller.workspace_name.length > 0 ? controller.workspace_name : "Native Workspace"
@@ -42,8 +42,56 @@ Kirigami.ApplicationWindow {
     }
     function search(query) {
         controller.search_files(query)
-        input.wait(250)
-        controller.poll()
+        settleSearch()
+    }
+    function settleSearch() {
+        var deadline = Date.now() + 5000
+        do {
+            input.wait(5)
+            controller.poll()
+            if (Date.now() > deadline) throw new Error("Search/replacement did not settle")
+        } while (controller.move_pending || controller.search_in_progress)
+    }
+    function searchAndReplace() {
+        workspacePane.createEntry("search-panel.txt", false)
+        workspacePane.editorText = "cat CAT Cat concatenate 💡 cat"
+        workspacePane.saveActive()
+        controller.configure_search_files("search-panel.txt", "", true, false)
+        controller.configure_search(false, true, false)
+        search("cat")
+        if (controller.search_results.length !== 4) throw new Error("Whole-word search failed")
+        controller.configure_search(true, true, false)
+        settleSearch()
+        if (controller.search_results.length !== 2) throw new Error("Case-sensitive search failed")
+        controller.configure_search(false, true, true)
+        search("[")
+        if (controller.search_error.length === 0 || controller.search_results.length !== 0)
+            throw new Error("Invalid regex did not clear results")
+        controller.configure_search(false, true, false)
+        search("cat")
+        controller.prepare_replacement("dog", true, "", -1)
+        settleSearch()
+        if (controller.replacement_preview.length === 0 || controller.replacement_occurrences !== 4)
+            throw new Error("Replacement preview was not published")
+        if (workspacePane.editorText !== "cat CAT Cat concatenate 💡 cat")
+            throw new Error("Preview changed the document")
+        controller.apply_replacement()
+        settleSearch()
+        if (controller.replacement_preview.length !== 0 || !controller.active_document_dirty
+                || workspacePane.editorText !== "dog DOG Dog concatenate 💡 dog")
+            throw new Error("Replacement did not preserve case and unsaved state")
+        workspacePane.saveActive()
+        search("dog")
+        controller.prepare_replacement("fox", false, "", -1)
+        settleSearch()
+        workspacePane.editorText = "dog typed after preview"
+        workspacePane.flushEditor()
+        controller.apply_replacement()
+        settleSearch()
+        if (controller.error_message.length === 0 || workspacePane.editorText !== "dog typed after preview")
+            throw new Error("A stale preview overwrote the buffer")
+        controller.discard_replacement()
+        console.log("Kirigami Search options/Unicode/replace preview/stale buffer smoke test passed")
     }
     Timer { id: smokeLayoutDelay; interval: 250; repeat: false }
     Timer { id: benchmarkDelay; interval: 200; repeat: false }
@@ -221,6 +269,7 @@ Kirigami.ApplicationWindow {
                         if (controller.document_ids.indexOf("notes/todo.md") === -1)
                             throw new Error("New file did not appear in workspace")
                         console.log("Kirigami workspace edit/save smoke test passed")
+                        searchAndReplace()
                         finishSmoke(workspacePane.Window.window)
                     })
                 })

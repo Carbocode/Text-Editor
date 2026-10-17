@@ -20,6 +20,19 @@ impl Application {
             AppCommand::RefreshWorkspace => self.refresh_workspace(),
             AppCommand::PollWorkspaceChanges => self.poll_workspace_changes(),
             AppCommand::QueueSearchQuery(query) => Ok(self.queue_search_query(query)),
+            AppCommand::ConfigureSearch(options) => {
+                Ok(vec![AppEvent::SearchConfigured { options }])
+            }
+            AppCommand::RefreshSearch => Ok(vec![AppEvent::SearchStarted]),
+            AppCommand::CancelSearch => Ok(vec![AppEvent::SearchCancelled]),
+            AppCommand::PrepareReplacement {
+                replacement,
+                preserve_case,
+                target,
+            } => self.prepare_replacement(&replacement, preserve_case, target),
+            AppCommand::DiscardReplacement => {
+                Ok(vec![AppEvent::ReplacementPrepared { preview: None }])
+            }
             AppCommand::PollSearchResults => Ok(self.poll_search_results()),
             AppCommand::CreateEntry { id, directory } => self.create_entry(&id, directory),
             AppCommand::RenameEntry { .. } | AppCommand::MoveEntry { .. } => {
@@ -38,6 +51,7 @@ impl Application {
             AppCommand::ReloadDocument(id) => self.reload_document(id),
             AppCommand::OverwriteDocument(id) => self.overwrite_document(id),
             AppCommand::OpenPaths(_)
+            | AppCommand::ApplyReplacement
             | AppCommand::OpenFiles(_)
             | AppCommand::MoveFiles { .. }
             | AppCommand::SaveAllDocuments

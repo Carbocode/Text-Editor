@@ -31,6 +31,16 @@ pub enum AppError {
     BackgroundTaskFailed,
     #[error("The application revision overflowed.")]
     RevisionOverflow,
+    #[error(
+        "Wait for a complete search before replacing. Refine the query if results are limited or cancelled."
+    )]
+    IncompleteSearch,
+    #[error("Invalid search: {0}")]
+    InvalidSearch(String),
+    #[error("“{0}” changed since the replacement preview. Search again and prepare a new preview.")]
+    StaleReplacement(DocumentId),
+    #[error("There are no changes to replace.")]
+    NoReplacements,
     #[error(transparent)]
     Filesystem(#[from] FilesystemError),
     #[error(transparent)]
@@ -40,6 +50,10 @@ pub enum AppError {
 /// A payload-free classification for adapters and diagnostics.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AppErrorKind {
+    IncompleteSearch,
+    InvalidSearch,
+    StaleReplacement,
+    NoReplacements,
     WorkspaceNotOpen,
     InvalidEntryName,
     InvalidMove,
@@ -59,6 +73,10 @@ pub enum AppErrorKind {
 impl AppError {
     pub fn kind(&self) -> AppErrorKind {
         match self {
+            Self::IncompleteSearch => AppErrorKind::IncompleteSearch,
+            Self::InvalidSearch(_) => AppErrorKind::InvalidSearch,
+            Self::StaleReplacement(_) => AppErrorKind::StaleReplacement,
+            Self::NoReplacements => AppErrorKind::NoReplacements,
             Self::WorkspaceNotOpen => AppErrorKind::WorkspaceNotOpen,
             Self::InvalidEntryName => AppErrorKind::InvalidEntryName,
             Self::InvalidMove => AppErrorKind::InvalidMove,
@@ -85,6 +103,10 @@ impl AppErrorKind {
             Self::Filesystem => "error.filesystem",
             Self::Storage => "error.storage",
             Self::WorkspaceNotOpen
+            | Self::IncompleteSearch
+            | Self::InvalidSearch
+            | Self::StaleReplacement
+            | Self::NoReplacements
             | Self::InvalidEntryName
             | Self::InvalidMove
             | Self::DestinationExists

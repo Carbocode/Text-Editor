@@ -4,7 +4,7 @@
 //! adding a command fails to compile until its diagnostics name, path
 //! rebasing, scheduling and busy policy are decided here, in one place.
 
-use crate::{AppError, Relocation};
+use crate::{AppError, Relocation, ReplacementTarget, SearchOptions};
 use native_workspace_domain::{DocumentId, path};
 use std::path::PathBuf;
 
@@ -33,6 +33,17 @@ pub enum AppCommand {
     PollWorkspaceChanges,
     /// Record the query; the search worker debounces and searches.
     QueueSearchQuery(String),
+    ConfigureSearch(SearchOptions),
+    RefreshSearch,
+    CancelSearch,
+    /// Prepare a reviewable edit without changing files or buffers.
+    PrepareReplacement {
+        replacement: String,
+        preserve_case: bool,
+        target: ReplacementTarget,
+    },
+    ApplyReplacement,
+    DiscardReplacement,
     /// Collect streamed search results.
     PollSearchResults,
     CreateEntry {
@@ -113,6 +124,12 @@ impl AppCommand {
             Self::RefreshWorkspace => "command.workspace_refresh",
             Self::PollWorkspaceChanges => "command.workspace_poll",
             Self::QueueSearchQuery(_) => "command.search_input",
+            Self::ConfigureSearch(_) => "command.search_configure",
+            Self::RefreshSearch => "command.search_refresh",
+            Self::CancelSearch => "command.search_cancel",
+            Self::PrepareReplacement { .. } => "command.replace_preview",
+            Self::ApplyReplacement => "command.replace_apply",
+            Self::DiscardReplacement => "command.replace_discard",
             Self::PollSearchResults => "command.search_poll",
             Self::CreateEntry { .. } => "command.entry_create",
             Self::RenameEntry { .. } => "command.entry_rename",
@@ -139,6 +156,15 @@ impl AppCommand {
         let folder =
             |directory: String| path::rebase(&directory, from.as_str(), to.as_str()).into_owned();
         match self {
+            Self::PrepareReplacement {
+                replacement,
+                preserve_case,
+                target,
+            } => Self::PrepareReplacement {
+                replacement,
+                preserve_case,
+                target: target.rebased(from, to),
+            },
             Self::MoveFiles { paths, directory } => Self::MoveFiles {
                 paths,
                 directory: folder(directory),
@@ -154,6 +180,11 @@ impl AppCommand {
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
+            | Self::ConfigureSearch(_)
+            | Self::RefreshSearch
+            | Self::CancelSearch
+            | Self::ApplyReplacement
+            | Self::DiscardReplacement
             | Self::PollSearchResults
             | Self::SaveAllDocuments => self,
             Self::CreateEntry {
@@ -224,6 +255,12 @@ impl AppCommand {
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
+            | Self::ConfigureSearch(_)
+            | Self::RefreshSearch
+            | Self::CancelSearch
+            | Self::ApplyReplacement
+            | Self::DiscardReplacement
+            | Self::PrepareReplacement { .. }
             | Self::PollSearchResults
             | Self::CreateEntry { .. }
             | Self::DeleteEntry(_)
@@ -271,6 +308,12 @@ impl AppCommand {
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
+            | Self::ConfigureSearch(_)
+            | Self::RefreshSearch
+            | Self::CancelSearch
+            | Self::ApplyReplacement
+            | Self::DiscardReplacement
+            | Self::PrepareReplacement { .. }
             | Self::PollSearchResults
             | Self::CreateEntry { .. }
             | Self::RenameEntry { .. }
@@ -305,6 +348,12 @@ impl AppCommand {
             | Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
+            | Self::ConfigureSearch(_)
+            | Self::RefreshSearch
+            | Self::CancelSearch
+            | Self::ApplyReplacement
+            | Self::DiscardReplacement
+            | Self::PrepareReplacement { .. }
             | Self::PollSearchResults
             | Self::CreateEntry { .. }
             | Self::RenameEntry { .. }
@@ -328,11 +377,19 @@ impl AppCommand {
             Self::OpenPaths(_)
             | Self::MoveFiles { .. }
             | Self::MoveFile { .. }
-            | Self::DeleteEntry(_) => Schedule::Exclusive,
-            Self::OpenFiles(_) | Self::OpenFile(_) | Self::RefreshWorkspace => Schedule::Background,
+            | Self::DeleteEntry(_)
+            | Self::ApplyReplacement => Schedule::Exclusive,
+            Self::OpenFiles(_)
+            | Self::OpenFile(_)
+            | Self::RefreshWorkspace
+            | Self::PrepareReplacement { .. } => Schedule::Background,
             Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
+            | Self::ConfigureSearch(_)
+            | Self::RefreshSearch
+            | Self::CancelSearch
+            | Self::DiscardReplacement
             | Self::PollSearchResults
             | Self::CreateEntry { .. }
             | Self::OpenDocument(_)
@@ -364,13 +421,19 @@ impl AppCommand {
             | Self::MoveFile { .. }
             | Self::DeleteEntry(_)
             | Self::RenameEntry { .. }
-            | Self::MoveEntry { .. } => BusyPolicy::Reject,
+            | Self::MoveEntry { .. }
+            | Self::PrepareReplacement { .. }
+            | Self::ApplyReplacement => BusyPolicy::Reject,
             _ if exclusive => BusyPolicy::Reject,
             Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::QueueSearchQuery(_)
+            | Self::ConfigureSearch(_)
+            | Self::RefreshSearch
+            | Self::CancelSearch
+            | Self::DiscardReplacement
             | Self::CreateEntry { .. }
             | Self::OpenDocument(_)
             | Self::PreviewDocument(_)

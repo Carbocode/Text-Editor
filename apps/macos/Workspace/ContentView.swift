@@ -144,6 +144,10 @@ struct ContentView: View {
             .overlay(nativeDropTarget(parentDirectory(group.id)))
             .onKeyPress(KeyEquivalent("\u{F705}")) { beginRename(group.id); return .handled }
             .contextMenu {
+                if sidebarTab == .search && store.showReplace {
+                    Button("Replace All in File…") { store.prepareReplacement(path: group.id) }
+                    Divider()
+                }
                 Button("Rename") { beginRename(group.id) }
                 Button("Delete…", role: .destructive) { requestDelete(group.id) }
             }
@@ -169,6 +173,10 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .simultaneousGesture(TapGesture(count: 2).onEnded { store.keepDocumentOpen(match.result.id) })
+            .contextMenu {
+                Button("Replace…") { store.prepareReplacement(resultIndex: match.index) }
+                Button("Replace All in File…") { store.prepareReplacement(path: match.result.id) }
+            }
             .overlay {
                 if selectedDirectory == nil && store.selectedSearchResultIndex == match.index {
                     SidebarRowHighlight()
@@ -334,24 +342,7 @@ struct ContentView: View {
             .frame(height: BonsplitTabBarMetrics.barHeight)
             .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
             if sidebarTab == .search {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search in files", text: Binding(
-                        get: { store.searchFieldText },
-                        set: { store.setSearchQuery($0) }
-                    ))
-                    .textFieldStyle(.plain)
-                    if store.searchInProgress { ProgressView().controlSize(.small) }
-                }
-                .padding(10)
-                .glassEffect(.regular, in: Capsule())
-                .padding(.bottom, 8)
-                if store.searchTruncated {
-                    Text("Showing the first 20,000 matches. Refine the search to see the rest.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                SearchPanel(store: store)
             }
         }
         .padding(.horizontal, 10)
@@ -516,6 +507,7 @@ struct ContentView: View {
         }
         }
         .disabled(store.editingPaused)
+        .onChange(of: store.searchFocusRevision) { _, _ in sidebarTab = .search }
         .confirmationDialog("Delete \"\(deletePath)\"?", isPresented: $confirmingDelete, titleVisibility: .visible) {
             Button(workspaceDeleteConfirmation(value: deletePath).confirm, role: .destructive) { store.deleteEntry(deletePath) }
             Button("Cancel", role: .cancel) { }

@@ -49,6 +49,7 @@ fn main() {
             .qml_file("qml/WorkspacePane.qml")
             .qml_file("qml/WorkspaceHome.qml")
             .qml_file("qml/EntryDialogs.qml")
+            .qml_file("qml/SearchPanel.qml")
             .qml_file("tests/WorkspaceSmoke.qml")
             .qml_file("tests/SidebarSmoke.qml")
             .qml_file("tests/SidebarLayoutSmoke.qml")

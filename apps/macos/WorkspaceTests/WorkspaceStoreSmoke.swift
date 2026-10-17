@@ -221,6 +221,64 @@ struct WorkspaceStoreSmoke {
         try "second source".write(to: external, atomically: true, encoding: .utf8)
         precondition(!store.canMoveFiles([external], directory: ""))
         print("macOS external files/open/move/dirty-buffer/collision smoke test passed")
+        store.createEntry("search-panel.txt", directory: false)
+        store.changeDocument("cat CAT Cat concatenate 💡 cat")
+        store.saveDocument()
+        var options = SearchOptions(matchCase: false, wholeWord: true, regex: false,
+            include: "search-panel.txt", exclude: "", useIgnoreFiles: true, onlyOpenEditors: false)
+        func finishSearch() {
+            let deadline = Date().addingTimeInterval(5)
+            while (store.backendBusy || store.searchInProgress) && Date() < deadline {
+                store.poll()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+            precondition(!store.backendBusy && !store.searchInProgress)
+        }
+        store.configureSearch(options)
+        store.setSearchQuery("cat")
+        finishSearch()
+        precondition(store.searchResults.count == 4)
+        options.matchCase = true
+        store.configureSearch(options)
+        finishSearch()
+        precondition(store.searchResults.count == 2)
+        options.regex = true
+        store.configureSearch(options)
+        store.setSearchQuery("[")
+        finishSearch()
+        precondition(store.searchError != nil && store.searchResults.isEmpty)
+        options.regex = false
+        options.matchCase = false
+        store.configureSearch(options)
+        store.setSearchQuery("cat")
+        finishSearch()
+        store.replacementText = "dog"
+        store.preserveReplacementCase = true
+        store.prepareReplacement()
+        finishSearch()
+        precondition(store.replacementPreview != nil && store.replacementOccurrences == 4 && store.replacementFiles == 1)
+        precondition(store.editorText == "cat CAT Cat concatenate 💡 cat")
+        store.applyReplacement()
+        finishSearch()
+        precondition(store.replacementPreview == nil && store.hasDirtyActiveDocument)
+        precondition(store.editorText == "dog DOG Dog concatenate 💡 dog")
+        store.saveDocument()
+        store.setSearchQuery("dog")
+        finishSearch()
+        store.prepareReplacement()
+        finishSearch()
+        // A no-op replacement must not leave a spurious preview.
+        precondition(store.replacementPreview == nil && store.errorMessage != nil)
+        store.replacementText = "fox"
+        store.prepareReplacement()
+        finishSearch()
+        precondition(store.replacementPreview != nil)
+        store.changeDocument("dog typed after preview")
+        store.applyReplacement()
+        finishSearch()
+        precondition(store.errorMessage != nil && store.editorText == "dog typed after preview")
+        store.discardReplacement()
+        print("macOS Search options/Unicode/replace preview/stale buffer smoke test passed")
         print("macOS optimistic rename/rollback/concurrent edits/deferred save/icon debounce smoke test passed")
     }
 }

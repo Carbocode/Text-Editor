@@ -183,6 +183,8 @@ pub(crate) struct AppState {
     pub(crate) documents: DocumentTable,
     pub(crate) directories: Arc<Vec<String>>,
     pub(crate) search_query: String,
+    pub(crate) search_options: crate::SearchOptions,
+    pub(crate) replacement_preview: Option<Arc<crate::ReplacementPreview>>,
     pub(crate) search_results: Arc<Vec<SearchResult>>,
     pub(crate) search_in_progress: bool,
     pub(crate) search_truncated: bool,
@@ -217,6 +219,9 @@ impl AppState {
             documents: self.documents.summaries(),
             directories: self.directories.clone(),
             search_query: self.search_query.clone(),
+            search_options: self.search_options.clone(),
+            search_error: self.search_options.error(&self.search_query),
+            replacement_preview: self.replacement_preview.clone(),
             search_results: self.search_results.clone(),
             search_in_progress: self.search_in_progress,
             search_truncated: self.search_truncated,
@@ -233,6 +238,7 @@ impl AppState {
 
     pub(crate) fn has_query(&self) -> bool {
         !self.search_query.trim().is_empty()
+            && self.search_options.error(&self.search_query).is_none()
     }
 
     /// Open tabs with unsaved changes, in tab order.
@@ -270,6 +276,7 @@ impl AppState {
                     .replace(documents.iter().cloned().map(DocumentEntry::new).collect());
                 self.directories = Arc::new(directories.clone());
                 self.search_query.clear();
+                self.replacement_preview = None;
                 self.search_results = Arc::default();
                 self.search_in_progress = false;
                 self.search_truncated = false;
@@ -363,13 +370,26 @@ impl AppState {
             }
             AppEvent::SearchQueryQueued { query } => {
                 self.search_query = query.clone();
-                self.search_results = Arc::default();
-                self.search_in_progress = self.has_query();
-                self.search_truncated = false;
-                self.search_touched.clear();
+                self.reset_search();
+            }
+            AppEvent::SearchConfigured { options } => {
+                self.search_options = options.clone();
+                self.reset_search();
+            }
+            AppEvent::SearchCancelled => {
+                self.search_in_progress = false;
+                self.search_truncated = true;
+            }
+            AppEvent::ReplacementPrepared { preview } => {
+                self.replacement_preview = preview.clone();
+            }
+            AppEvent::SearchFileReplaced { id } => {
+                self.search_touched.insert(id.clone());
+                Arc::make_mut(&mut self.search_results).retain(|result| result.id != *id);
             }
             AppEvent::SearchStarted => {
-                self.search_in_progress = true;
+                self.search_in_progress = self.has_query();
+                self.search_truncated = false;
                 self.search_touched.clear();
             }
             AppEvent::SearchResultsUpdated {
@@ -467,6 +487,14 @@ impl AppState {
         }
     }
 
+    fn reset_search(&mut self) {
+        self.search_results = Arc::default();
+        self.search_in_progress = self.has_query();
+        self.search_truncated = false;
+        self.search_touched.clear();
+        self.replacement_preview = None;
+    }
+
     /// Removes matching tabs. A removed active tab is replaced by its visual
     /// neighbor: the next tab, or the previous one when it was last.
     fn close_tabs(&mut self, remove: impl Fn(&DocumentId) -> bool) {
@@ -489,15 +517,19 @@ impl AppState {
     /// Recomputes the matches of one document from its buffer, or drops them
     /// when it is closed: the next search reads its disk content again.
     fn refresh_matches(&mut self, id: &DocumentId) {
-        if !self.has_query() || id.is_external() {
+        if !self.has_query() || (id.is_external() && !self.search_options.only_open_editors) {
             return;
         }
         if self.search_in_progress {
             self.search_touched.insert(id.clone());
         }
         let mut found = Vec::new();
-        if let Some(content) = self.documents.get(id).and_then(DocumentEntry::content) {
-            Matcher::new(&self.search_query).content_results(id, content, &mut found);
+        if let Some(content) = self.documents.get(id).and_then(DocumentEntry::content)
+            && crate::search_options::FilePatterns::new(&self.search_options)
+                .is_ok_and(|patterns| patterns.matches(id.as_str()))
+            && let Ok(matcher) = Matcher::configured(&self.search_query, &self.search_options)
+        {
+            matcher.content_results(id, content, &mut found);
         }
         let start = self
             .search_results
