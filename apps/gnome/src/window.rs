@@ -25,6 +25,15 @@ fn icon_button(label: &str, icon_name: &str) -> gtk::Button {
     button
 }
 
+fn primary_accelerator(key: &str) -> String {
+    let modifier = if cfg!(target_os = "macos") {
+        "<Meta>"
+    } else {
+        "<Control>"
+    };
+    format!("{modifier}{key}")
+}
+
 fn editor_font_points(editor: &gtk::TextView) -> f64 {
     editor
         .pango_context()
@@ -341,6 +350,68 @@ pub(super) fn build_window(app: &adw::Application) {
     let editor_chrome = editor_chrome::wrap(&editor, &editor_scroll);
     editor_panel.append(&editor_chrome.row);
     let empty_editor_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let hub = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    hub.set_widget_name("workspaceHub");
+    hub.set_halign(gtk::Align::Center);
+    hub.set_valign(gtk::Align::Center);
+    hub.set_margin_top(32);
+    hub.set_margin_bottom(32);
+    hub.set_margin_start(32);
+    hub.set_margin_end(32);
+    let icon = gtk::Image::from_icon_name("text-x-generic-symbolic");
+    icon.set_pixel_size(40);
+    icon.set_halign(gtk::Align::Start);
+    icon.add_css_class("dim-label");
+    hub.append(&icon);
+    let title = gtk::Label::new(Some("No Document Open"));
+    title.add_css_class("title-1");
+    title.set_xalign(0.0);
+    hub.append(&title);
+    let description = gtk::Label::new(Some("Choose a file from the sidebar to start editing."));
+    description.add_css_class("dim-label");
+    description.set_wrap(true);
+    description.set_xalign(0.0);
+    hub.append(&description);
+    let open_folder = icon_button("Open Folder…", "document-open-symbolic");
+    open_folder.add_css_class("suggested-action");
+    open_folder.set_halign(gtk::Align::Start);
+    open_folder.set_action_name(Some("app.open"));
+    hub.append(&open_folder);
+    hub.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let shortcuts_title = gtk::Label::new(Some("Keyboard Shortcuts"));
+    shortcuts_title.add_css_class("heading");
+    shortcuts_title.set_xalign(0.0);
+    hub.append(&shortcuts_title);
+    let shortcuts = gtk::Grid::new();
+    shortcuts.set_column_spacing(32);
+    shortcuts.set_row_spacing(12);
+    for (row, (label, accelerator)) in [
+        ("Open Folder", "o"),
+        ("Save", "s"),
+        ("Save All", "<Shift>s"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let label = gtk::Label::new(Some(label));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.add_css_class("dim-label");
+        shortcuts.attach(&label, 0, row as i32, 1, 1);
+        shortcuts.attach(
+            &gtk::ShortcutLabel::new(&primary_accelerator(accelerator)),
+            1,
+            row as i32,
+            1,
+            1,
+        );
+    }
+    hub.append(&shortcuts);
+    let hub_scroll = gtk::ScrolledWindow::new();
+    hub_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    hub_scroll.set_vexpand(true);
+    hub_scroll.set_child(Some(&hub));
+    empty_editor_page.append(&hub_scroll);
     empty_editor_page.append(&editor_panel);
     let editor_stack = gtk::Stack::new();
     editor_stack.set_vexpand(true);
@@ -823,7 +894,7 @@ pub(super) fn build_window(app: &adw::Application) {
         let action = gio::SimpleAction::new("quit", None);
         action.connect_activate(move |_, _| application.quit());
         app.add_action(&action);
-        app.set_accels_for_action("app.quit", &["<Primary>q"]);
+        app.set_accels_for_action("app.quit", &[&primary_accelerator("q")]);
     }
     {
         let ui = ui.clone();
@@ -840,14 +911,14 @@ pub(super) fn build_window(app: &adw::Application) {
             }
         });
         app.add_action(&save_action);
-        app.set_accels_for_action("app.save", &["<Primary>s"]);
+        app.set_accels_for_action("app.save", &[&primary_accelerator("s")]);
     }
     {
         let ui = ui.clone();
         let action = gio::SimpleAction::new("save-all", None);
         action.connect_activate(move |_, _| ui.dispatch(AppCommand::SaveAllDocuments));
         app.add_action(&action);
-        app.set_accels_for_action("app.save-all", &["<Primary><Shift>s"]);
+        app.set_accels_for_action("app.save-all", &[&primary_accelerator("<Shift>s")]);
     }
     {
         let ui = ui.clone();
@@ -938,7 +1009,7 @@ pub(super) fn build_window(app: &adw::Application) {
             dialog.show();
         });
         app.add_action(&action);
-        app.set_accels_for_action("app.open", &["<Primary>o"]);
+        app.set_accels_for_action("app.open", &[&primary_accelerator("o")]);
     }
     {
         let ui = ui.clone();

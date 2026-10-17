@@ -583,6 +583,23 @@ Item {
         onActivated: root.saveActive()
     }
 
+    // Qt's portable Ctrl notation becomes Command in nativeText on macOS.
+    Shortcut {
+        id: saveShortcut
+        sequence: "Ctrl+S"
+        enabled: false
+    }
+    Shortcut {
+        id: openFolderShortcut
+        sequence: "Ctrl+O"
+        enabled: false
+    }
+    Shortcut {
+        id: saveAllShortcut
+        sequence: saveAllAction.shortcut
+        enabled: false
+    }
+
     function openSearchResult(index, id) {
         selectedDirectoryPath = ""
         if (!flushEditor()) return
@@ -977,9 +994,9 @@ Item {
     }
     Kirigami.Action {
         id: openAction
+        shortcut: StandardKey.Open
         text: "Open Folder…"
         icon.name: "document-open-folder"
-        shortcut: StandardKey.Open
         onTriggered: root.browseRequested()
     }
     Kirigami.Action {
@@ -992,6 +1009,7 @@ Item {
     Kirigami.Action {
         id: saveAllAction
         objectName: "saveAllAction"
+        shortcut: "Ctrl+Shift+S"
         text: "Save All"
         icon.name: "document-save-all"
         onTriggered: if (root.flushEditor()) root.controller.save_all_documents()
@@ -1651,6 +1669,7 @@ Item {
                         RowLayout {
                             anchors.fill: parent
                             spacing: 0
+                            visible: root.controller.active_document_id.length > 0
                             FontMetrics { id: editorMetrics; font: editor.font }
                             FontInfo { id: resolvedEditorFont; font: editor.font }
                             Canvas {
@@ -1851,12 +1870,59 @@ Item {
                                 }
                             }
                         }
-                        Kirigami.PlaceholderMessage {
-                            anchors.centerIn: parent
+                        ScrollView {
+                            id: hubScroll
+                            objectName: "workspaceHub"
+                            implicitWidth: 0
+                            implicitHeight: 0
+                            anchors.fill: parent
                             visible: root.controller.active_document_id.length === 0
-                            icon.name: "document-edit"
-                            text: "No Document Open"
-                            explanation: "Choose a file from the sidebar."
+                            contentWidth: availableWidth
+                            contentHeight: Math.max(availableHeight, hubContent.implicitHeight)
+                            clip: true
+                            ColumnLayout {
+                                id: hubContent
+                                width: Math.min(440, hubScroll.availableWidth)
+                                x: (hubScroll.availableWidth - width) / 2
+                                y: Math.max(0, (hubScroll.availableHeight - height) / 2)
+                                spacing: Kirigami.Units.largeSpacing * 2
+                                Kirigami.Icon {
+                                    source: "document-edit"
+                                    Layout.preferredWidth: Kirigami.Units.iconSizes.large
+                                    Layout.preferredHeight: Kirigami.Units.iconSizes.large
+                                }
+                                Kirigami.Heading {
+                                    text: "No Document Open"
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Label {
+                                    text: "Choose a file from the sidebar to start editing."
+                                    opacity: 0.7
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                                Button { action: openAction }
+                                Kirigami.Separator { Layout.fillWidth: true }
+                                Kirigami.Heading { text: "Keyboard Shortcuts"; level: 3 }
+                                GridLayout {
+                                    columns: 2
+                                    columnSpacing: Kirigami.Units.largeSpacing * 3
+                                    rowSpacing: Kirigami.Units.largeSpacing
+                                    Repeater {
+                                        model: ["Open Folder", openFolderShortcut.nativeText, "Save", saveShortcut.nativeText, "Save All", saveAllShortcut.nativeText]
+                                        Label {
+                                            required property int index
+                                            required property string modelData
+                                            text: modelData
+                                            opacity: index % 2 === 0 ? 0.7 : 1
+                                            Layout.fillWidth: index % 2 === 0
+                                            horizontalAlignment: index % 2 === 0 ? Text.AlignLeft : Text.AlignRight
+                                        }
+                                    }
+                                }
+                            }
+                            padding: Kirigami.Units.largeSpacing * 3
                         }
                     }
                     Kirigami.InlineMessage {

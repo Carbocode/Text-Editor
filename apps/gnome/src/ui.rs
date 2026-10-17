@@ -381,6 +381,8 @@ impl Ui {
             }
             target.append(&self.editor_panel);
         }
+        self.editor_panel
+            .set_visible(snapshot.active_document.is_some());
         self.editor_stack
             .set_visible_child_name(if snapshot.open_documents.is_empty() {
                 "empty"
