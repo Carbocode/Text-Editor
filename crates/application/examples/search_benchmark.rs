@@ -1,6 +1,6 @@
 //! Run with `cargo run -p native-workspace-application --release --example search_benchmark -- [workspace] [query]`.
 
-use native_workspace_application::{AppCommand, Application};
+use native_workspace_application::{AppCommand, Session};
 use std::{
     env, fs,
     path::PathBuf,
@@ -53,23 +53,22 @@ fn main() {
         .get(2)
         .map(String::as_str)
         .unwrap_or("benchmark-needle");
-    let mut app = Application::new();
+    let mut app = Session::new();
     let started = Instant::now();
-    let opened = app
-        .dispatch(AppCommand::OpenWorkspace(root))
+    app.dispatch(AppCommand::OpenWorkspace(root))
         .expect("open workspace");
+    let opened = app.snapshot();
     let open_time = started.elapsed();
     let started = Instant::now();
-    let queued = app
-        .dispatch(AppCommand::QueueSearchQuery(query.to_owned()))
+    app.dispatch(AppCommand::QueueSearchQuery(query.to_owned()))
         .expect("queue search");
+    let queued = app.snapshot();
     let queue_time = started.elapsed();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut first_result = None;
     let completed = loop {
-        let snapshot = app
-            .dispatch(AppCommand::PollSearchResults)
-            .expect("poll search");
+        app.poll();
+        let snapshot = app.snapshot();
         if first_result.is_none() && !snapshot.search_results.is_empty() {
             first_result = Some(started.elapsed());
         }

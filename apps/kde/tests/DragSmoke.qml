@@ -95,6 +95,7 @@ ApplicationWindow {
                     editor.text = localText
                     pane.syncingEditor = false
                     check(controller.active_document_text === originalText, "Local edit unexpectedly flushed before drop")
+                    if (delayed) controller.delay_next_background_job(1000)
                     var releasedAt = Date.now()
                     releaseTime = releasedAt
                     lastHeartbeat = releasedAt

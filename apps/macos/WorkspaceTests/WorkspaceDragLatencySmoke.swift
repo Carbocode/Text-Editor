@@ -57,8 +57,8 @@ struct WorkspaceDragLatencySmoke {
         try "notes\n".write(to: root.appendingPathComponent("notes.md"), atomically: true, encoding: .utf8)
         try "fn main() {}\n".write(to: root.appendingPathComponent("src/main.rs"), atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: root) }
-        let queue = DispatchQueue(label: "workspace.drag-latency.backend")
-        let store = WorkspaceStore(operationQueue: queue, persistence: false)
+        let core = WorkspaceApplication()
+        let store = WorkspaceStore(core: core, persistence: false)
         store.openWorkspace(root)
         let window = NSWindow(contentRect: NSRect(x: 80, y: 80, width: 1000, height: 700),
             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -213,9 +213,7 @@ struct WorkspaceDragLatencySmoke {
             if relocation?.target == "src/README.md" { pendingAt = ProcessInfo.processInfo.systemUptime }
         }
         defer { subscription.cancel() }
-        queue.suspend()
-        var resumed = false
-        defer { if !resumed { queue.resume() } }
+        try core.delayNextBackgroundJob(milliseconds: 1500)
         func dropView(in view: NSView?) -> SidebarNativeDropTarget.DropView? {
             guard let view else { return nil }
             if let target = view as? SidebarNativeDropTarget.DropView,
@@ -255,8 +253,6 @@ struct WorkspaceDragLatencySmoke {
         pump(until: { ProcessInfo.processInfo.systemUptime >= waitUntil }, timeout: 1)
         heartbeat.invalidate()
         precondition(ticks >= 20, "UI event loop stalled while filesystem confirmation was blocked")
-        queue.resume()
-        resumed = true
         pump(until: { !store.backendBusy && store.pendingRelocation == nil }, timeout: 3)
         precondition(FileManager.default.fileExists(atPath: root.appendingPathComponent("src/README.md").path))
         if CommandLine.arguments.contains("--record-drop") {

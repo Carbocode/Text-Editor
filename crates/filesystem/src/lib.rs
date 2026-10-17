@@ -32,26 +32,34 @@ impl WorkspaceWatcher {
         })
     }
 
-    pub fn has_changes(&self) -> bool {
-        self.drain_changes().0
-    }
-    /// Consume the same notify queue while reporting bounded scalar diagnostics.
-    pub fn drain_changes(&self) -> (bool, u64, u64) {
-        let mut changed = false;
-        let mut count = 0u64;
-        let mut errors = 0u64;
+    /// Consumes queued notifications, ignoring pure access events.
+    pub fn drain_changes(&self) -> WatcherBatch {
+        let mut batch = WatcherBatch::default();
         while let Ok(event) = self.events.try_recv() {
             let relevant = match event {
                 Ok(event) => !matches!(event.kind, EventKind::Access(_)),
                 Err(_) => {
-                    errors += 1;
+                    batch.errors += 1;
                     true
                 }
             };
-            count += u64::from(relevant);
-            changed |= relevant;
+            batch.events += u64::from(relevant);
         }
-        (changed, count, errors)
+        batch
+    }
+}
+
+/// Notifications collected since the last drain.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WatcherBatch {
+    /// Relevant events, including errors: any of them warrants a rescan.
+    pub events: u64,
+    pub errors: u64,
+}
+
+impl WatcherBatch {
+    pub fn changed(&self) -> bool {
+        self.events > 0
     }
 }
 
@@ -69,89 +77,61 @@ pub enum FilesystemError {
     },
 }
 
+/// The files and folders of a workspace, each list sorted by path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceListing {
+    pub workspace: Workspace,
+    pub documents: Vec<DocumentId>,
+    pub directories: Vec<String>,
+}
+
+/// Every filesystem access of the application. Implementations decide
+/// everything about the disk; callers never touch `std::fs` directly.
 pub trait WorkspaceFilesystem: Send + Sync {
-    fn open_workspace(
-        &self,
-        path: &Path,
-    ) -> Result<(Workspace, Vec<DocumentId>, Vec<String>), FilesystemError>;
+    /// Canonicalizes `path` and lists regular files and folders below it,
+    /// skipping symlinks.
+    fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError>;
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError>;
-    fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
-        self.read_document(root, id).ok()
-    }
-    /// Like `read_document_for_search`, but folders recorded in `verified`
-    /// are not checked again, so a workspace search checks each folder once.
-    fn read_document_for_search_in(
+    /// UTF-8 content of at most [`MAX_SEARCH_BYTES`], or nothing. Folders
+    /// recorded in `verified` are not checked again, so one workspace search
+    /// checks each folder once.
+    fn read_document_for_search(
         &self,
         root: &Path,
         id: &DocumentId,
         verified: &mut HashSet<String>,
-    ) -> Option<String> {
-        let _ = verified;
-        self.read_document_for_search(root, id)
-    }
+    ) -> Option<String>;
+    /// Writes an existing regular file, or creates a missing one.
     fn write_document(
         &self,
         root: &Path,
         id: &DocumentId,
         content: &str,
     ) -> Result<(), FilesystemError>;
+    /// Renames atomically without ever replacing an existing entry.
     fn rename_entry(
         &self,
         root: &Path,
         id: &DocumentId,
         target: &DocumentId,
-    ) -> Result<(), FilesystemError> {
-        let source_path = RealFilesystem::safe_document_location(root, id)?;
-        let target_path = RealFilesystem::safe_document_location(root, target)?;
-        let metadata =
-            fs::symlink_metadata(&source_path).map_err(|source| FilesystemError::Io {
-                path: source_path.clone(),
-                source,
-            })?;
-        if !(metadata.is_file() || metadata.is_dir()) {
-            return Err(FilesystemError::InvalidDocument(source_path));
-        }
-        rename_without_replacing(&source_path, &target_path).map_err(|source| FilesystemError::Io {
-            path: target_path,
-            source,
-        })
-    }
-
-    /// Remove only entries inside the workspace; symlinked ancestors are rejected.
-    /// Recursive removal unlinks child symlinks without following their targets.
-    fn delete_entry(&self, root: &Path, id: &DocumentId) -> Result<(), FilesystemError> {
-        let path = RealFilesystem::safe_document_location(root, id)?;
-        let metadata = fs::symlink_metadata(&path).map_err(|source| FilesystemError::Io {
-            path: path.clone(),
-            source,
-        })?;
-        let result = if metadata.is_dir() {
-            fs::remove_dir_all(&path)
-        } else if metadata.is_file() {
-            fs::remove_file(&path)
-        } else {
-            return Err(FilesystemError::InvalidDocument(path));
-        };
-        result.map_err(|source| FilesystemError::Io { path, source })
-    }
-
+    ) -> Result<(), FilesystemError>;
+    /// Removes an entry recursively, unlinking child symlinks without
+    /// following them.
+    fn delete_entry(&self, root: &Path, id: &DocumentId) -> Result<(), FilesystemError>;
+    /// Creates an empty file or folder without replacing anything.
     fn create_entry(
         &self,
         root: &Path,
         id: &DocumentId,
         directory: bool,
-    ) -> Result<(), FilesystemError> {
-        let path = RealFilesystem::safe_document_location(root, id)?;
-        if directory {
-            fs::create_dir(&path).map_err(|source| FilesystemError::Io { path, source })
-        } else {
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map(|_| ())
-                .map_err(|source| FilesystemError::Io { path, source })
-        }
+    ) -> Result<(), FilesystemError>;
+}
+
+/// Attaches the path to an I/O error.
+fn at(path: &Path) -> impl FnOnce(io::Error) -> FilesystemError + '_ {
+    move |source| FilesystemError::Io {
+        path: path.to_path_buf(),
+        source,
     }
 }
 
@@ -219,10 +199,7 @@ impl RealFilesystem {
         {
             parent.push(component);
             if !fs::symlink_metadata(&parent)
-                .map_err(|source| FilesystemError::Io {
-                    path: parent.clone(),
-                    source,
-                })?
+                .map_err(at(&parent))?
                 .file_type()
                 .is_dir()
             {
@@ -234,10 +211,7 @@ impl RealFilesystem {
 
     fn document_path(root: &Path, id: &DocumentId) -> Result<PathBuf, FilesystemError> {
         let path = Self::safe_document_location(root, id)?;
-        let metadata = fs::symlink_metadata(&path).map_err(|source| FilesystemError::Io {
-            path: path.clone(),
-            source,
-        })?;
+        let metadata = fs::symlink_metadata(&path).map_err(at(&path))?;
         if !metadata.file_type().is_file() {
             return Err(FilesystemError::InvalidDocument(path));
         }
@@ -246,14 +220,8 @@ impl RealFilesystem {
 }
 
 impl WorkspaceFilesystem for RealFilesystem {
-    fn open_workspace(
-        &self,
-        path: &Path,
-    ) -> Result<(Workspace, Vec<DocumentId>, Vec<String>), FilesystemError> {
-        let root = fs::canonicalize(path).map_err(|source| FilesystemError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError> {
+        let root = fs::canonicalize(path).map_err(at(path))?;
         if !root.is_dir() {
             return Err(FilesystemError::InvalidWorkspace(root));
         }
@@ -266,18 +234,9 @@ impl WorkspaceFilesystem for RealFilesystem {
         let mut directories = Vec::new();
         let mut pending = vec![root.clone()];
         while let Some(directory) = pending.pop() {
-            for entry in fs::read_dir(&directory).map_err(|source| FilesystemError::Io {
-                path: directory.clone(),
-                source,
-            })? {
-                let entry = entry.map_err(|source| FilesystemError::Io {
-                    path: directory.clone(),
-                    source,
-                })?;
-                let file_type = entry.file_type().map_err(|source| FilesystemError::Io {
-                    path: entry.path(),
-                    source,
-                })?;
+            for entry in fs::read_dir(&directory).map_err(at(&directory))? {
+                let entry = entry.map_err(at(&directory))?;
+                let file_type = entry.file_type().map_err(at(&entry.path()))?;
                 let relative = entry
                     .path()
                     .strip_prefix(&root)
@@ -299,21 +258,31 @@ impl WorkspaceFilesystem for RealFilesystem {
         }
         documents.sort();
         directories.sort();
-        Ok((Workspace { root, name }, documents, directories))
+        Ok(WorkspaceListing {
+            workspace: Workspace { root, name },
+            documents,
+            directories,
+        })
     }
 
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError> {
         let path = Self::document_path(root, id)?;
-        fs::read_to_string(&path).map_err(|source| FilesystemError::Io { path, source })
+        fs::read_to_string(&path).map_err(at(&path))
     }
 
-    fn read_document_for_search(&self, root: &Path, id: &DocumentId) -> Option<String> {
+    #[cfg(not(unix))]
+    fn read_document_for_search(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        _verified: &mut HashSet<String>,
+    ) -> Option<String> {
         let path = Self::document_path(root, id).ok()?;
         read_bounded_utf8(fs::File::open(path).ok()?)
     }
 
     #[cfg(unix)]
-    fn read_document_for_search_in(
+    fn read_document_for_search(
         &self,
         root: &Path,
         id: &DocumentId,
@@ -359,23 +328,64 @@ impl WorkspaceFilesystem for RealFilesystem {
         let path = Self::safe_document_location(root, id)?;
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.file_type().is_file() => {
-                fs::write(&path, content).map_err(|source| FilesystemError::Io { path, source })
+                fs::write(&path, content).map_err(at(&path))
             }
             Ok(_) => Err(FilesystemError::InvalidDocument(path)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path)
-                    .map_err(|source| FilesystemError::Io {
-                        path: path.clone(),
-                        source,
-                    })?;
-                file.write_all(content.as_bytes())
-                    .map_err(|source| FilesystemError::Io { path, source })
-            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .and_then(|mut file| file.write_all(content.as_bytes()))
+                .map_err(at(&path)),
             Err(source) => Err(FilesystemError::Io { path, source }),
         }
+    }
+
+    fn rename_entry(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        target: &DocumentId,
+    ) -> Result<(), FilesystemError> {
+        let source_path = Self::safe_document_location(root, id)?;
+        let target_path = Self::safe_document_location(root, target)?;
+        let metadata = fs::symlink_metadata(&source_path).map_err(at(&source_path))?;
+        if !(metadata.is_file() || metadata.is_dir()) {
+            return Err(FilesystemError::InvalidDocument(source_path));
+        }
+        rename_without_replacing(&source_path, &target_path).map_err(at(&target_path))
+    }
+
+    fn delete_entry(&self, root: &Path, id: &DocumentId) -> Result<(), FilesystemError> {
+        let path = Self::safe_document_location(root, id)?;
+        let metadata = fs::symlink_metadata(&path).map_err(at(&path))?;
+        let result = if metadata.is_dir() {
+            fs::remove_dir_all(&path)
+        } else if metadata.is_file() {
+            fs::remove_file(&path)
+        } else {
+            return Err(FilesystemError::InvalidDocument(path));
+        };
+        result.map_err(at(&path))
+    }
+
+    fn create_entry(
+        &self,
+        root: &Path,
+        id: &DocumentId,
+        directory: bool,
+    ) -> Result<(), FilesystemError> {
+        let path = Self::safe_document_location(root, id)?;
+        let result = if directory {
+            fs::create_dir(&path)
+        } else {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .map(drop)
+        };
+        result.map_err(at(&path))
     }
 }
 
@@ -494,7 +504,11 @@ mod tests {
         fs::create_dir(dir.path().join("nested")).unwrap();
         fs::write(dir.path().join("nested/note.md"), "hidden").unwrap();
         let filesystem = RealFilesystem;
-        let (workspace, ids, directories) = filesystem.open_workspace(dir.path()).unwrap();
+        let WorkspaceListing {
+            workspace,
+            documents: ids,
+            directories,
+        } = filesystem.open_workspace(dir.path()).unwrap();
         assert_eq!(directories, ["nested"]);
         assert_eq!(
             ids.iter().map(DocumentId::as_str).collect::<Vec<_>>(),
@@ -520,17 +534,12 @@ mod tests {
         fs::write(dir.path().join(id.as_str()), "x".repeat(1024 * 1024 + 1)).unwrap();
         let filesystem = RealFilesystem;
         assert_eq!(
-            filesystem.open_workspace(dir.path()).unwrap().1,
+            filesystem.open_workspace(dir.path()).unwrap().documents,
             std::slice::from_ref(&id)
         );
         assert!(
             filesystem
-                .read_document_for_search(dir.path(), &id)
-                .is_none()
-        );
-        assert!(
-            filesystem
-                .read_document_for_search_in(dir.path(), &id, &mut HashSet::new())
+                .read_document_for_search(dir.path(), &id, &mut HashSet::new())
                 .is_none()
         );
     }
@@ -552,7 +561,7 @@ mod tests {
         let filesystem = RealFilesystem;
         let mut verified = HashSet::new();
         let mut read = |name: &str| {
-            filesystem.read_document_for_search_in(
+            filesystem.read_document_for_search(
                 dir.path(),
                 &DocumentId::parse(name).unwrap(),
                 &mut verified,
@@ -572,7 +581,11 @@ mod tests {
         fs::write(outside.path().join("secret.txt"), "secret").unwrap();
         std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
         let filesystem = RealFilesystem;
-        let (_, files, directories) = filesystem.open_workspace(dir.path()).unwrap();
+        let WorkspaceListing {
+            documents: files,
+            directories,
+            ..
+        } = filesystem.open_workspace(dir.path()).unwrap();
         assert!(files.is_empty());
         assert!(directories.is_empty());
         assert!(

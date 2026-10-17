@@ -10,6 +10,7 @@ import org.nativeworkspace.Editor 1.0
 Item {
     id: root
     enabled: !controller || !controller.deletion_pending
+    SearchResultsModel { id: searchResults; rows: root.controller ? root.controller.search_results : [] }
     SystemPalette { id: systemColors; colorGroup: SystemPalette.Active }
     // Keep selection accented when focus moves to the editor or another window.
     // The host's accent may differ from Breeze's default selection blue.
@@ -23,7 +24,8 @@ Item {
     property alias sidebarHeaderBar: sidebarTopBar
     property alias workspacePage: editorPage
     property bool creatingDirectory: false
-    property int sidebarTab: 0 // Files, Search, Git, Bookmarks, Warnings, Errors
+    enum SidebarSection { Files, Search, Git, Bookmarks, Warnings, Errors }
+    property int sidebarTab: WorkspacePane.Files
     readonly property var sidebarSections: [
         { title: "Files", icon: "folder" },
         { title: "Search", icon: "edit-find" },
@@ -38,7 +40,7 @@ Item {
     readonly property string fileFilter: controller ? controller.file_filter_query : ""
     onSidebarTabChanged: {
         scheduleSidebarUpdate()
-        if (sidebarTab === 0) Qt.callLater(root.restoreFileTreeSelection)
+        if (sidebarTab === WorkspacePane.Files) Qt.callLater(root.restoreFileTreeSelection)
     }
     onFileNameQueryChanged: if (controller) controller.filter_files(fileNameQuery)
     onFileFilterChanged: invalidateSidebar(0)
@@ -54,7 +56,7 @@ Item {
     property bool synchronizingDocumentTabs: true
     property int selectedResultIndex: -1
     property string selectedDirectoryPath: ""
-    readonly property var activeSidebarSearchRow: sidebarTab === 0 ? fileSearchRow : textSearchRow
+    readonly property var activeSidebarSearchRow: sidebarTab === WorkspacePane.Files ? fileSearchRow : textSearchRow
     property alias sidebarTabBar: sidebarTabs
     property alias documentTabBar: documentTabBar
     property alias editorText: editor.text
@@ -142,18 +144,13 @@ Item {
         function onDocument_idsChanged() { root.invalidateSidebar(0) }
         function onFile_filter_filesChanged() { root.invalidateSidebar(0) }
         function onFile_filter_directoriesChanged() { root.invalidateSidebar(0) }
-        function onSearch_result_idsChanged() { root.invalidateSidebar(1) }
-        function onSearch_result_linesChanged() { root.invalidateSidebar(1) }
+        function onSearch_resultsChanged() { root.invalidateSidebar(1) }
     }
 
     Component.onCompleted: {
         syncDocumentTabs()
         scheduleSidebarUpdate()
-        var encoded = root.controller ? root.controller.minimap_glyphs() : ""
-        var glyphs = []
-        for (var glyph = 0; glyph < encoded.length; glyph += 2)
-            glyphs.push(parseInt(encoded.slice(glyph, glyph + 2), 16))
-        minimapGlyphs = glyphs
+        minimapGlyphs = root.controller ? root.controller.minimap_glyphs() : []
         updateHighlight()
     }
 
@@ -178,10 +175,10 @@ Item {
         var spans = minimapSpans
         var kinds = []
         for (var index = 0; index < spans.length; ++index) {
-            var parts = spans[index].split(":")
-            var end = Math.min(source.length, Number(parts[1]))
-            for (var position = Number(parts[0]); position < end; ++position)
-                kinds[position] = Number(parts[2])
+            var span = spans[index]
+            var end = Math.min(source.length, span.end)
+            for (var position = span.start; position < end; ++position)
+                kinds[position] = span.kind
         }
         minimapKinds = kinds
         var lines = source.split("\n")
@@ -196,19 +193,13 @@ Item {
         minimap.requestPaint()
     }
 
-    // Smoke tests need the filtered tree before returning.
-    function filterNamesNow(query) {
-        fileNameQuery = query
-        controller.filter_files_now(query)
-    }
-
     function invalidateSidebar(tab) {
         sidebarCaches[tab] = null
         if (sidebarTab === tab) scheduleSidebarUpdate()
     }
 
     function cacheCurrentSidebar() {
-        if (sidebarTab >= 2) return
+        if (sidebarTab >= WorkspacePane.Git) return
         sidebarCaches[sidebarTab] = {
             ordered: orderedSidebarEntries,
             visible: visibleSidebarEntries,
@@ -301,7 +292,7 @@ Item {
         activeRenameEditor = null
         renamePath = path
         renameName = path.split("/").pop()
-        if (sidebarTab === 0) {
+        if (sidebarTab === WorkspacePane.Files) {
             if (sidebarEntriesDirty) rebuildOrderedEntries()
             fileTree.forceLayout()
             var row = treeRowForPath(path)
@@ -325,13 +316,26 @@ Item {
         }
     }
 
+    Connections {
+        target: root.Window.window
+        function onActiveFocusItemChanged() {
+            // The native edit delegate can be created after the next event
+            // turn, especially when a cached TreeView is shown again.
+            if (root.renamePath.length > 0 && root.sidebarTab === WorkspacePane.Files)
+                Qt.callLater(root.focusInlineRename)
+        }
+    }
+
     function focusInlineRename() {
-        if (sidebarTab === 1) {
+        if (sidebarTab === WorkspacePane.Search) {
             if (!activeRenameEditor || !activeRenameEditor.visible) return
             if (activeRenameEditor.activeFocus) return
         } else {
             var field = root.Window.window ? root.Window.window.activeFocusItem : null
-            if (!field || typeof field.select !== "function" || field === editor) return
+            if (!field || typeof field.select !== "function") return
+            var owner = field
+            while (owner && owner !== fileTree) owner = owner.parent
+            if (owner !== fileTree) return
             if (activeRenameEditor === field && field.activeFocus) return
             activeRenameEditor = field
             activeRenameEditor.objectName = "sidebarRenameField"
@@ -346,7 +350,7 @@ Item {
         if (renamePath.length === 0 || !flushEditor()) return
         var path = renamePath
         var name = renameName
-        if (sidebarTab === 0) fileTree.closeEditor()
+        if (sidebarTab === WorkspacePane.Files) fileTree.closeEditor()
         controller.rename_entry(path, name)
         if (controller.error_message.length === 0) renamePath = ""
     }
@@ -359,16 +363,7 @@ Item {
     }
 
     function canDrop(source, directory) {
-        if (controller.move_pending) return false
-        if (source.length === 0) return false
-        var target = (directory.length > 0 ? directory + "/" : "") + source.split("/").pop()
-        if (target === source || target.startsWith(source + "/")) return false
-        // The Files tree indexes every entry by parent. Reading the full id
-        // lists copies the whole workspace into JS on each pointer move.
-        if (lazyTree() && !sidebarEntriesDirty)
-            return !childEntries(directory).some(entry => entry.path === target)
-        return controller.directory_ids.indexOf(target) === -1
-            && !controller.document_ids.some(path => path === target || path.startsWith(target + "/"))
+        return controller.can_move_entry(source, directory)
     }
 
     function restoreDragDirectories(destination) {
@@ -381,7 +376,7 @@ Item {
         temporaryDragDirectories = keep
         closing.sort((a, b) => b.length - a.length)
         for (var path of closing) if (collapsedDirectories[path] === false) {
-            if (sidebarTab === 0 && fileFilter.length === 0 && treeRowForPath(path) >= 0) {
+            if (sidebarTab === WorkspacePane.Files && fileFilter.length === 0 && treeRowForPath(path) >= 0) {
                 toggleDirectory(path)
             } else {
                 var restored = Object.assign({}, collapsedDirectories)
@@ -463,7 +458,7 @@ Item {
         sidebarUpdate.stop()
         var rebuildStarted = Date.now()
         rebuildOrderedEntries()
-        if (sidebarTab === 0) {
+        if (sidebarTab === WorkspacePane.Files) {
             fileTree.forceLayout()
             restoreFileTreeExpansion()
         }
@@ -571,96 +566,13 @@ Item {
         }
     }
 
-    Kirigami.Dialog {
-        id: deleteEntryDialog
-        objectName: "deleteEntryDialog"
-        property string path: ""
-        property string workspaceRoot: ""
-        modal: true
-        title: "Delete “" + path + "”?"
-        preferredWidth: Kirigami.Units.gridUnit * 26
-        standardButtons: Kirigami.Dialog.NoButton
-        Label {
-            text: "This permanently deletes the entry and all its contents. Modified documents must be saved first. This cannot be undone."
-            wrapMode: Text.WordWrap
-        }
-        customFooterActions: [
-            Kirigami.Action {
-                text: "Cancel"
-                onTriggered: deleteEntryDialog.close()
-            },
-            Kirigami.Action {
-                text: "Delete Permanently"
-                icon.name: "edit-delete"
-                onTriggered: {
-                    deleteEntryDialog.close()
-                    if (deleteEntryDialog.workspaceRoot === root.controller.workspace_root && root.flushEditor())
-                        root.controller.delete_entry(deleteEntryDialog.path)
-                }
-            }
-        ]
-    }
-
-    function requestCloseDocument(path) {
-        if (!root.flushEditor()) return
-        if (root.controller.dirty_document_ids.indexOf(path) === -1) {
-            root.controller.close_document(path)
-        } else {
-            closeDocumentDialog.path = path
-            closeDocumentDialog.workspaceRoot = root.controller.workspace_root
-            closeDocumentDialog.open()
-        }
-    }
-    Kirigami.Dialog {
-        id: closeDocumentDialog
-        objectName: "closeDocumentDialog"
-        property string path: ""
-        property string workspaceRoot: ""
-        title: "Save changes to “" + path.split("/").pop() + "”?"
-        standardButtons: Kirigami.Dialog.NoButton
-        Label { text: "Your changes will be lost if you close without saving."; wrapMode: Text.WordWrap }
-        customFooterActions: [
-            Kirigami.Action { text: "Cancel"; onTriggered: closeDocumentDialog.close() },
-            Kirigami.Action { text: "Discard Changes"; onTriggered: {
-                closeDocumentDialog.close()
-                if (closeDocumentDialog.workspaceRoot === root.controller.workspace_root && root.flushEditor())
-                    root.controller.discard_and_close_document(closeDocumentDialog.path)
-            } },
-            Kirigami.Action { text: "Save"; onTriggered: {
-                closeDocumentDialog.close()
-                if (closeDocumentDialog.workspaceRoot === root.controller.workspace_root && root.flushEditor())
-                    root.controller.save_and_close_document(closeDocumentDialog.path)
-            } }
-        ]
-    }
-
+    EntryDialogs { id: entryDialogs; workspace: root }
+    function requestCloseDocument(path) { entryDialogs.requestCloseDocument(path) }
     function requestDelete(path) {
-        if (root.controller.move_pending) return
+        if (controller.move_pending) return
         fileTree.closeEditor()
         renamePath = ""
-        deleteEntryDialog.workspaceRoot = root.controller.workspace_root
-        deleteEntryDialog.path = path
-        deleteEntryDialog.open()
-    }
-
-    Kirigami.Dialog {
-        id: createEntryDialog
-        preferredWidth: Kirigami.Units.gridUnit * 24
-        title: root.creatingDirectory ? "New Folder" : "New File"
-        standardButtons: Kirigami.Dialog.Ok | Kirigami.Dialog.Cancel
-        Kirigami.FormLayout {
-            TextField {
-                id: newEntryPath
-                Kirigami.FormData.label: "Relative path:"
-                placeholderText: root.creatingDirectory ? "folder" : "file.txt"
-                onAccepted: createEntryDialog.accept()
-            }
-        }
-        onOpened: {
-            newEntryPath.text = ""
-            newEntryPath.forceActiveFocus()
-        }
-        onAccepted: root.createEntry(newEntryPath.text.trim(), root.creatingDirectory)
+        entryDialogs.requestDelete(path)
     }
 
     Shortcut {
@@ -674,8 +586,8 @@ Item {
     function openSearchResult(index, id) {
         selectedDirectoryPath = ""
         if (!flushEditor()) return
-        var start = controller.search_result_starts[index]
-        var end = controller.search_result_ends[index]
+        var start = searchResults.get(index).start
+        var end = searchResults.get(index).end
         controller.preview_document(id)
         if (controller.active_document_id !== id) return
         selectedResultIndex = index
@@ -699,22 +611,18 @@ Item {
     }
 
     function textSearchFileIds() {
-        var ids = controller.search_result_ids
-        var lines = controller.search_result_lines
         var files = []
         var seen = ({})
-        for (var i = 0; i < ids.length; ++i) {
-            if (lines[i] !== "" && !seen["#" + ids[i]]) {
-                files.push(ids[i])
-                seen["#" + ids[i]] = true
-            }
+        for (var i = 0; i < searchResults.count; ++i) {
+            var id = searchResults.get(i).id
+            if (!seen["#" + id]) { files.push(id); seen["#" + id] = true }
         }
         return files
     }
 
     function fileIds() {
-        if (sidebarTab >= 2) return []
-        if (sidebarTab === 1) return textSearchFileIds()
+        if (sidebarTab >= WorkspacePane.Git) return []
+        if (sidebarTab === WorkspacePane.Search) return textSearchFileIds()
         // The controller filters names on a worker; see filter_files.
         return Array.from(fileFilter.length > 0 ? controller.file_filter_files : controller.document_ids)
     }
@@ -726,13 +634,13 @@ Item {
     // The plain Files tree asks the core for one folder at a time, so
     // collapsed dependency folders cost nothing. Searches and name filters
     // still list every path.
-    function lazyTree() { return sidebarTab === 0 && fileFilter.length === 0 }
+    function lazyTree() { return sidebarTab === WorkspacePane.Files && fileFilter.length === 0 }
 
     function childEntries(parent) {
         var key = "#" + parent
         var listed = childEntriesByParent[key]
         if (listed || !lazyTree()) return listed || []
-        listed = controller.sidebar_children(parent).map(item => ({ path: item.substring(1), directory: item[0] === "d" }))
+        listed = controller.sidebar_children(parent)
         childEntriesByParent[key] = listed
         return listed
     }
@@ -779,7 +687,7 @@ Item {
     function rebuildOrderedEntries() {
         sidebarEntriesDirty = false
         sidebarUpdate.stop()
-        if (sidebarTab >= 2) {
+        if (sidebarTab >= WorkspacePane.Git) {
             visibleSidebarEntries = []
             return
         }
@@ -788,8 +696,8 @@ Item {
             orderedSidebarEntries = cached.ordered
             visibleSidebarEntries = cached.visible
             childEntriesByParent = cached.children
-            if (sidebarTab === 1) matchIndicesByFile = cached.matches
-            if (sidebarTab === 0 && fileTreeNeedsRestore)
+            if (sidebarTab === WorkspacePane.Search) matchIndicesByFile = cached.matches
+            if (sidebarTab === WorkspacePane.Files && fileTreeNeedsRestore)
                 Qt.callLater(root.restoreFileTreeExpansion)
             return
         }
@@ -820,82 +728,26 @@ Item {
             cacheCurrentSidebar()
             return
         }
-        var files = fileIds()
         var matches = ({})
-        if (sidebarTab === 1 && root.controller.search_query.length > 0) {
-            var resultIds = root.controller.search_result_ids
-            var resultLines = root.controller.search_result_lines
-            for (var result = 0; result < resultIds.length; ++result) {
-                if (resultLines[result] === "") continue
-                var resultKey = "#" + resultIds[result]
-                if (!matches[resultKey]) matches[resultKey] = []
-                matches[resultKey].push(result)
-            }
-        }
-        if (sidebarTab === 1) matchIndicesByFile = matches
-        var directories = []
-        var workspaceDirectories = root.controller.directory_ids
-        var seenDirectories = ({})
-        if (sidebarTab === 0) {
-            // A published name filter already lists every folder holding a match.
-            if (fileFilter.length > 0) workspaceDirectories = root.controller.file_filter_directories
-            for (var k = 0; k < workspaceDirectories.length; ++k) {
-                var directory = workspaceDirectories[k]
-                directories.push(directory)
-                seenDirectories["#" + directory] = true
-            }
-        }
-        if (sidebarTab === 1) {
-            for (var i = 0; i < files.length; ++i) {
-                var parts = files[i].split("/")
-                for (var j = 1; j < parts.length; ++j) {
-                    var parent = parts.slice(0, j).join("/")
-                    if (!seenDirectories["#" + parent]) {
-                        directories.push(parent)
-                        seenDirectories["#" + parent] = true
-                    }
-                }
-            }
-            var matchedDirectories = directories.slice()
-            for (var d = 0; d < matchedDirectories.length; ++d) {
-                var folderParts = matchedDirectories[d].split("/")
-                for (var ancestor = 1; ancestor < folderParts.length; ++ancestor) {
-                    var folderParent = folderParts.slice(0, ancestor).join("/")
-                    if (!seenDirectories["#" + folderParent]) {
-                        directories.push(folderParent)
-                        seenDirectories["#" + folderParent] = true
-                    }
-                }
-            }
-            directories.sort()
-            files.sort()
-        }
-        var foldersByParent = ({})
-        var filesByParent = ({})
-        function addChild(table, path) {
-            var separator = path.lastIndexOf("/")
-            var parent = separator < 0 ? "" : path.substring(0, separator)
-            var key = "#" + parent
-            if (!table[key]) table[key] = []
-            table[key].push(path)
-        }
-        for (var d = 0; d < directories.length; ++d)
-            addChild(foldersByParent, directories[d])
-        for (var f = 0; f < files.length; ++f)
-            addChild(filesByParent, files[f])
         var childEntries = ({})
-        for (var folderParent in foldersByParent) {
-            childEntries[folderParent] = foldersByParent[folderParent].map(function(path) {
-                return { path: path, directory: true }
-            })
+        var paths = []
+        // Rust supplies the same filtered tree and sibling order as every frontend.
+        for (var row of controller.sidebar_rows(sidebarTab === WorkspacePane.Search, [])) {
+            if (row.result >= 0) {
+                var resultKey = "#" + row.path
+                if (!matches[resultKey]) matches[resultKey] = []
+                matches[resultKey].push(row.result)
+                continue
+            }
+            var entry = { path: row.path, directory: row.directory }
+            var key = "#" + parentDirectory(row.path)
+            if (!childEntries[key]) childEntries[key] = []
+            childEntries[key].push(entry)
+            paths.push(entry)
         }
-        for (var fileParent in filesByParent) {
-            if (!childEntries[fileParent]) childEntries[fileParent] = []
-            for (var child of filesByParent[fileParent])
-                childEntries[fileParent].push({ path: child, directory: false })
-        }
+        if (sidebarTab === WorkspacePane.Search) matchIndicesByFile = matches
         childEntriesByParent = childEntries
-        if (sidebarTab === 0) {
+        if (sidebarTab === WorkspacePane.Files) {
             restoringFileTree = true
             fileTreeNeedsRestore = true
             var indexPaths = ({})
@@ -904,21 +756,13 @@ Item {
             fileTreeModel.rows = rootRows
             Qt.callLater(root.restoreFileTreeExpansion)
         }
-        var paths = []
-        function appendChildren(parent) {
-            for (var entry of childEntries["#" + parent] || []) {
-                paths.push(entry)
-                if (entry.directory) appendChildren(entry.path)
-            }
-        }
-        appendChildren("")
         orderedSidebarEntries = paths
         updateVisibleEntries()
         cacheCurrentSidebar()
     }
 
     function updateVisibleEntries() {
-        var searching = sidebarTab === 1 || fileFilter.length > 0
+        var searching = sidebarTab === WorkspacePane.Search || fileFilter.length > 0
         var visible = []
         var hiddenPrefix = ""
         for (var i = 0; i < orderedSidebarEntries.length; ++i) {
@@ -933,7 +777,7 @@ Item {
         }
         // Only Search uses the ListModel. Keep it populated while Files or an
         // empty panel is selected, rather than removing and reinserting rows.
-        if (sidebarTab !== 1) {
+        if (sidebarTab !== WorkspacePane.Search) {
             visibleSidebarEntries = visible
             return
         }
@@ -979,7 +823,7 @@ Item {
     }
 
     function restoreFileTreeSelection() {
-        if (sidebarTab !== 0 || renamePath.length > 0) return
+        if (sidebarTab !== WorkspacePane.Files || renamePath.length > 0) return
         var path = selectedDirectoryPath || controller.active_document_id
         var row = treeRowForPath(path)
         if (row >= 0)
@@ -987,11 +831,11 @@ Item {
     }
 
     function restoreFileTreeExpansion() {
-        if (sidebarTab !== 0) {
+        if (sidebarTab !== WorkspacePane.Files) {
             restoringFileTree = false
             return
         }
-        if (sidebarTab === 0) {
+        if (sidebarTab === WorkspacePane.Files) {
             if (fileFilter.length > 0) {
                 fileTree.expandRecursively(-1)
             } else {
@@ -1037,18 +881,18 @@ Item {
         }
         if (expanding) appendVisibleChildren(path)
         var oldCount = oldEnd - index - 1
-        if (sidebarTab === 1) {
+        if (sidebarTab === WorkspacePane.Search) {
             if (oldCount > 0) sidebarModel.remove(index + 1, oldCount)
             for (var row = 0; row < children.length; ++row)
                 sidebarModel.insert(index + 1 + row, children[row])
         }
         visibleSidebarEntries = visible.slice(0, index + 1).concat(children, visible.slice(oldEnd))
-        if (sidebarTab === 1) {
+        if (sidebarTab === WorkspacePane.Search) {
             searchSidebarEntries = visibleSidebarEntries
             invalidateSidebar(0)
         }
         cacheCurrentSidebar()
-        if (sidebarTab === 0 && fileFilter.length === 0 && treeIndexPaths["#" + path]) {
+        if (sidebarTab === WorkspacePane.Files && fileFilter.length === 0 && treeIndexPaths["#" + path]) {
             if (expanding) materializeTreeFolder(path)
             var treeRow = fileTree.rowAtIndex(nativeTreeModel.mapFromSource(fileTreeModel.index(treeIndexPaths["#" + path], 0)))
             if (treeRow >= 0 && fileTree.isExpanded(treeRow) !== expanding) {
@@ -1063,41 +907,12 @@ Item {
         return matchIndicesByFile["#" + id] || []
     }
 
-    // Confirm a move as soon as its worker finishes, so a completed move
-    // never looks like it is still loading.
     Timer {
-        interval: 16
+        interval: root.controller && (root.controller.move_pending || root.controller.search_in_progress || root.controller.file_filter_in_progress) ? 16 : 250
         repeat: true
-        running: root.controller && root.controller.move_pending
-        onTriggered: if (root.flushEditor()) {
-            root.controller.poll_workspace_changes()
-            root.controller.poll_search_results()
-        }
+        running: root.controller !== null && root.controller !== undefined
+        onTriggered: if (root.flushEditor()) root.controller.poll()
     }
-
-    // Searches and name filters run on workers; publish their results
-    // promptly instead of on the next slow poll.
-    Timer {
-        interval: 16
-        repeat: true
-        running: root.controller && (root.controller.search_in_progress || root.controller.file_filter_in_progress)
-        onTriggered: {
-            root.controller.poll_file_filter()
-            if (root.controller.search_in_progress && root.flushEditor())
-                root.controller.poll_search_results()
-        }
-    }
-
-    Timer {
-        interval: 250
-        repeat: true
-        running: root.controller && root.controller.workspace_name.length > 0
-        onTriggered: if (root.flushEditor()) {
-            root.controller.poll_workspace_changes()
-            root.controller.poll_search_results()
-        }
-    }
-
 
     readonly property list<Action> applicationActions: [homeAction, openAction, developerAction, quitAction]
     readonly property list<Action> pageActions: [textZoomAction, saveAction, saveAllAction]
@@ -1194,13 +1009,13 @@ Item {
         id: newFileAction
         text: "New File…"
         icon.name: "document-new"
-        onTriggered: { root.creatingDirectory = false; createEntryDialog.open() }
+        onTriggered: { entryDialogs.create(false) }
     }
     Kirigami.Action {
         id: newFolderAction
         text: "New Folder…"
         icon.name: "folder-new"
-        onTriggered: { root.creatingDirectory = true; createEntryDialog.open() }
+        onTriggered: { entryDialogs.create(true) }
     }
     Kirigami.Action {
         id: developerAction
@@ -1217,53 +1032,12 @@ Item {
         onTriggered: Qt.quit()
     }
 
-    Kirigami.ApplicationWindow {
+    WorkspaceHome {
         id: homeWindow
-        transientParent: null
-        title: "Native Workspace"
-        width: Kirigami.Units.gridUnit * 36
-        height: Kirigami.Units.gridUnit * 32
-        minimumWidth: Kirigami.Units.gridUnit * 24
-        minimumHeight: Kirigami.Units.gridUnit * 20
-        visible: root.enableBrowse && root.showingHome
-        onClosing: Qt.quit()
-        globalDrawer: Kirigami.GlobalDrawer {
-            title: "Native Workspace"
-            titleIcon: "accessories-text-editor"
-            isMenu: true
-            actions: [developerAction, quitAction]
-        }
-        pageStack.initialPage: Kirigami.ScrollablePage {
-            title: "Recent Workspaces"
-            actions: [openAction, resumeAction]
-            ListView {
-                model: root.controller.recent_workspace_paths
-                delegate: Kirigami.SubtitleDelegate {
-                    required property int index
-                    required property string modelData
-                    width: ListView.view.width
-                    text: root.controller.recent_workspace_names[index]
-                    subtitle: modelData
-                    icon.source: root.controller.folder_icon(modelData, false)
-                    icon.color: "transparent"
-                    onClicked: root.openWorkspace(modelData)
-                }
-                Kirigami.PlaceholderMessage {
-                    anchors.centerIn: parent
-                    width: parent.width - Kirigami.Units.largeSpacing * 2
-                    visible: root.controller.recent_workspace_paths.length === 0
-                    icon.name: "document-open-folder"
-                    text: "No Recent Workspaces"
-                    explanation: "Open a folder to start editing."
-                    helpfulAction: openAction
-                }
-            }
-            footer: Kirigami.InlineMessage {
-                visible: root.controller.error_message.length > 0
-                text: root.controller.error_message
-                type: Kirigami.MessageType.Error
-            }
-        }
+        workspace: root
+        drawerActions: [developerAction, quitAction]
+        pageActions: [openAction, resumeAction]
+        browseAction: openAction
     }
 
     ColumnLayout {
@@ -1347,7 +1121,7 @@ Item {
                                     Layout.maximumHeight: root.documentTabHeight
                                     Layout.leftMargin: Kirigami.Units.smallSpacing
                                     Layout.rightMargin: Kirigami.Units.smallSpacing
-                                    visible: root.sidebarTab === 0
+                                    visible: root.sidebarTab === WorkspacePane.Files
                                     ToolButton {
                                         id: addEntryButton
                                         objectName: "addEntryButton"
@@ -1392,7 +1166,7 @@ Item {
                                     Layout.maximumHeight: root.documentTabHeight
                                     Layout.leftMargin: Kirigami.Units.smallSpacing
                                     Layout.rightMargin: Kirigami.Units.smallSpacing
-                                    visible: root.sidebarTab === 1
+                                    visible: root.sidebarTab === WorkspacePane.Search
                                     Kirigami.SearchField {
                                         id: textSearchField
                                         Layout.fillWidth: true
@@ -1413,7 +1187,7 @@ Item {
                                     Layout.fillWidth: true
                                     Layout.leftMargin: Kirigami.Units.smallSpacing
                                     Layout.rightMargin: Kirigami.Units.smallSpacing
-                                    visible: root.sidebarTab === 1 && root.controller.search_truncated
+                                    visible: root.sidebarTab === WorkspacePane.Search && root.controller.search_truncated
                                     text: "Showing the first 20,000 matches. Refine the search to see the rest."
                                     wrapMode: Text.Wrap
                                     font: Kirigami.Theme.smallFont
@@ -1425,7 +1199,7 @@ Item {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
-                                visible: root.sidebarTab >= 2
+                                visible: root.sidebarTab >= WorkspacePane.Git
                                 Kirigami.PlaceholderMessage {
                                     anchors.centerIn: parent
                                     width: parent.width - Kirigami.Units.largeSpacing * 2
@@ -1442,7 +1216,7 @@ Item {
                                 anchors.right: parent.right
                                 anchors.bottom: workspaceDropTarget.top
                                 anchors.bottomMargin: Kirigami.Units.smallSpacing
-                                visible: root.sidebarTab === 0
+                                visible: root.sidebarTab === WorkspacePane.Files
                                 clip: true
                                 model: nativeTreeModel
                                 selectionModel: ItemSelectionModel { model: nativeTreeModel }
@@ -1460,13 +1234,13 @@ Item {
                                 columnWidthProvider: function() { return width }
                                 onWidthChanged: forceLayout()
                                 onExpanded: function(row) {
-                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileFilter.length > 0) return
+                                    if (root.sidebarTab !== WorkspacePane.Files || root.restoringFileTree || root.fileFilter.length > 0) return
                                     var entry = root.treeEntry(fileTree.index(row, 0))
                                     if (entry && root.collapsedDirectories[entry.path] !== false)
                                         root.toggleDirectory(entry.path)
                                 }
                                 onCollapsed: function(row) {
-                                    if (root.sidebarTab !== 0 || root.restoringFileTree || root.fileFilter.length > 0) return
+                                    if (root.sidebarTab !== WorkspacePane.Files || root.restoringFileTree || root.fileFilter.length > 0) return
                                     var entry = root.treeEntry(fileTree.index(row, 0))
                                     if (entry && root.collapsedDirectories[entry.path] === false)
                                         root.toggleDirectory(entry.path)
@@ -1632,7 +1406,7 @@ Item {
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
                                 height: visible ? implicitHeight : 0
-                                visible: root.sidebarTab === 0 && root.draggingPath.length > 0
+                                visible: root.sidebarTab === WorkspacePane.Files && root.draggingPath.length > 0
                                 text: root.hoveringDrop && !root.validDrop ? "This folder cannot receive the item" : "Move to workspace root"
                                 contentItem: Kirigami.IconTitleSubtitle {
                                     title: workspaceDropTarget.text
@@ -1658,7 +1432,7 @@ Item {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
-                                visible: root.sidebarTab === 1
+                                visible: root.sidebarTab === WorkspacePane.Search
                                 clip: true
                                 model: sidebarModel
                                 reuseItems: true
@@ -1767,8 +1541,8 @@ Item {
                                             objectName: "sidebarSearchMatch:" + resultIndex
                                             width: fileGroup.width
                                             leftPadding: fileGroup.indent + Kirigami.Units.gridUnit
-                                            text: root.controller.search_result_snippets[resultIndex] || ""
-                                            subtitle: "Line " + root.controller.search_result_lines[resultIndex] + ", Column " + root.controller.search_result_columns[resultIndex]
+                                            text: searchResults.get(resultIndex).snippet || ""
+                                            subtitle: "Line " + searchResults.get(resultIndex).line + ", Column " + searchResults.get(resultIndex).column
                                             icon.name: "go-jump"
                                             highlighted: root.selectedResultIndex === resultIndex
                                             onClicked: root.openSearchResult(resultIndex, fileGroup.fileId)

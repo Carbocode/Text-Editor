@@ -1,46 +1,55 @@
 //! Run against the separate diagnostic service; also succeeds if it is absent.
-use native_workspace_application::{AppCommand, Application};
+use native_workspace_application::{AppCommand, Session};
 use std::{
     thread,
     time::{Duration, Instant},
 };
+
 fn main() {
     let root = std::env::args_os().nth(1).expect("workspace directory");
-    let mut app = Application::new();
-    app.enable_devtools("core-smoke");
-    app.dispatch(AppCommand::OpenWorkspace(root.into()))
+    let mut session = Session::new();
+    session.enable_devtools("core-smoke");
+    let observer = session.diagnostic_observer();
+    session
+        .dispatch(AppCommand::OpenWorkspace(root.into()))
         .unwrap();
-    app.dispatch(AppCommand::QueueSearchQuery(
-        "superseded_private_query".into(),
-    ))
-    .unwrap();
+    session
+        .dispatch(AppCommand::QueueSearchQuery(
+            "superseded_private_query".into(),
+        ))
+        .unwrap();
     thread::sleep(Duration::from_millis(20));
-    app.dispatch(AppCommand::QueueSearchQuery("pub".into()))
+    session
+        .dispatch(AppCommand::QueueSearchQuery("pub".into()))
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while app.snapshot().search_in_progress {
-        if let Some(snapshot) = app
-            .dispatch_if_changed(AppCommand::PollSearchResults)
-            .unwrap()
-        {
-            app.diagnostic_snapshot_applied(snapshot.diagnostic_operation, snapshot.revision, 1000);
+    let mut applied = session.revision();
+    while session.snapshot().search_in_progress {
+        session.poll();
+        if session.revision() != applied {
+            let snapshot = session.snapshot();
+            applied = snapshot.revision;
+            observer.snapshot_applied(snapshot.diagnostic_operation, snapshot.revision, 1000);
         }
         assert!(Instant::now() < deadline, "search completion deadline");
         thread::sleep(Duration::from_millis(20));
     }
     println!(
         "search completed: {} matches",
-        app.snapshot().search_results.len()
+        session.snapshot().search_results.len()
     );
-    let old_operation = app.snapshot().diagnostic_operation;
-    let workspace = app.snapshot().workspace_root.unwrap();
-    let reopened = app.dispatch(AppCommand::OpenWorkspace(workspace)).unwrap();
+    let old_operation = session.snapshot().diagnostic_operation;
+    let workspace = session.snapshot().workspace_root().unwrap().to_path_buf();
+    session
+        .dispatch(AppCommand::OpenWorkspace(workspace))
+        .unwrap();
     if old_operation != 0 {
         assert_ne!(
-            reopened.diagnostic_operation, old_operation,
+            session.snapshot().diagnostic_operation,
+            old_operation,
             "new workspace must not inherit an old search operation"
         );
     }
-    drop(app);
+    drop(session);
     thread::sleep(Duration::from_millis(500));
 }

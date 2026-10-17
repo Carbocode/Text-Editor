@@ -7027,6 +7027,7 @@ dependencies = [
  "native-workspace-devtools-protocol",
  "reqwest 0.12.28",
  "semver",
+ "serde_json",
  "tempfile",
 ]
 

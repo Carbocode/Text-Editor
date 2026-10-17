@@ -15,7 +15,7 @@ cargo xtask build macos       # compile and package; no tests or launch
 cargo xtask start macos       # open the existing build; no frontend compilation
 cargo xtask run macos         # build + start; no tests
 cargo xtask test macos        # Rust bridge tests + build prerequisites + Swift smoke tests
-cargo xtask verify macos      # fmt + check + lint + test; no normal editor launch
+cargo xtask verify macos      # architecture + fmt + check + lint + test; no normal editor launch
 ```
 
 `start` fails with a build instruction if the executable is missing. It deliberately opens the last build, so use `run` after changing source. macOS and GNOME launch a new instance, preserving existing sessions. Cargo may still compile the xtask runner itself before any command if it has changed.
@@ -26,7 +26,7 @@ The same tasks can target smaller components:
 cargo xtask check core        # type-check shared Rust crates
 cargo xtask lint core         # Clippy, warnings denied
 cargo xtask test core         # shared Rust tests, without GUI dependencies
-cargo xtask verify core       # fmt + check + lint + test
+cargo xtask verify core       # architecture + fmt + check + lint + test
 cargo xtask build devtools    # collector + console executables
 cargo xtask test devtools     # protocol, producer, collector and console Rust tests
 cargo xtask test xtask        # command composition and Qt discovery regression tests
@@ -48,15 +48,15 @@ Existing action-target commands (`build-macos`, `run-macos`, `build-gnome`, `run
 
 ## Explicit GUI smoke modes
 
-GNOME's `NATIVE_WORKSPACE_SMOKE=1` and `NATIVE_WORKSPACE_SMOKE_WORKSPACE=/path/to/disposable-fixture` enable native diagnostic and edit/save smoke paths when launching the built executable. KDE's `--smoke-sidebar` and `--smoke-drag` modes require disposable fixtures; see [KDE development](kde.md) for contents and Qt style variants. Set these only for deliberate GUI verification; no normal run task injects them. Headless Linux GUI checks need a display server such as Xvfb.
+GNOME's `NATIVE_WORKSPACE_SMOKE=1` and `NATIVE_WORKSPACE_SMOKE_WORKSPACE=/path/to/disposable-fixture` enable native startup and edit/save smoke paths when launching the built executable. KDE's `--smoke-sidebar` and `--smoke-drag` modes require disposable fixtures; see [KDE development](kde.md) for contents and Qt style variants. Set these only for deliberate GUI verification; no normal run task injects them. Headless Linux GUI checks need a display server such as Xvfb.
 
 ## Development behavior
 
-The initial vertical slice covers opening a directory, listing files, opening, editing, and saving UTF-8 documents. The frontends now collect queued `notify` events every 250 ms and reconcile periodically for external changes. Clean open documents reload automatically. If local edits and disk content diverge, normal Save refuses to overwrite the disk; the user can reload or explicitly overwrite it. The diagnostic counter remains in the core and smoke tests, but is hidden from normal windows.
+The initial vertical slice covers opening a directory, listing files, opening, editing, and saving UTF-8 documents. The frontends now collect queued `notify` events every 250 ms and reconcile periodically for external changes. Clean open documents reload automatically. If local edits and disk content diverge, normal Save refuses to overwrite the disk; the user can reload or explicitly overwrite it. All frontends use the shared Session runtime.
 
 Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
 
-The sidebar search matches relative paths and UTF-8 file contents throughout the directory tree, ignoring case and surrounding whitespace in the query. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty query shows every listed document. Search runs in a worker and does not use SQLite.
+The Search sidebar matches UTF-8 file contents; the Files field filters entry names. Both ignore case and surrounding whitespace. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty content query clears matches; an empty name filter restores the complete file tree. Search runs in a worker and does not use SQLite.
 
 Normal run commands launch the selected editor. Developer Tools open only through the editor button and run in separate service/console processes. The console interface is in English. See [implementation and verification](devtools/IMPLEMENTATION.md) for standalone diagnostics commands, protocol budgets and coverage still pending.
 
@@ -75,3 +75,9 @@ Open three files in a different order from their sidebar order. Tabs must keep t
 Close a modified tab and exercise Cancel, Save, and Discard Changes. Cancel preserves the buffer; Save closes only after a successful save; Discard closes without writing and reopening loads the disk content. Change the file externally before choosing Save: the conflict must leave the tab and local edits intact. Save All must save inactive dirty tabs too, stop at the first failure, and accurately reflect files already saved. Rename or move an open file or its parent folder and confirm that tabs retain their order and buffers. Delete a clean active file and confirm that its tab disappears and a remaining tab becomes active.
 
 After editing one document, switch to another with identical text and try Undo: it must never replay the previous document's edits. The shared native editor clears its undo history on a document switch. Edit again, then rename that document: its selection and undo history must remain intact. In GNOME, click an already selected tab repeatedly and verify that it stays highlighted. On macOS, navigate to a search match, then switch or close its tab: the new document must not inherit the old search selection. The tab strip must leave most of the workspace height available to the editor. Every tab must use the same Material icon as its file-tree row and update it on extension changes. A modified document has a fixed dot to the left of the icon, independent of the title: editing must not change tab width, and truncating a long title must not hide its dirty marker. Save All belongs to the window header/toolbar. Open enough GNOME tabs to overflow and scroll away from the selected one: idle refreshes and edits must retain the scroll position. In KDE, verify sidebar tabs in the header, equal search/document-row heights, and buttons fitting their bars after resizing. On macOS, pass the pointer repeatedly over active and inactive glass tabs; text and icons must remain visible, and sidebar/document controls must share a vertical center.
+
+## Architecture checks
+
+`cargo xtask architecture` validates the Cargo dependency graph. `verify` runs it before formatting, type checking, warnings-denied Clippy and tests. Check, lint and test include all targets, so examples and test binaries cannot retain obsolete APIs. CI runs the same tasks for core, xtask, Developer Tools and each native adapter; native workspace, sidebar and delayed-drag smoke tests also run on Linux. The workflow is defined in `.github/workflows/verify.yml`; branch protection must be configured in the repository host to require its jobs before merging.
+
+Use the repository's `.agents/skills/editor-change/SKILL.md` when extending editor behavior. `AGENTS.md` and ADR 0004 describe ownership. GTK code is split into window construction, presentation controller, sidebar materialization and a debug-only smoke driver. Qt keeps Home and entry dialogs in separate components and its smoke entrypoint under `tests/`. Neither production adapter exposes synchronous search/filter shortcuts.

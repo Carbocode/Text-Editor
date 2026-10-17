@@ -1,7 +1,12 @@
 import SwiftUI
 
+enum SidebarSection: Int, CaseIterable {
+    case files, search, git, bookmarks, warnings, errors
+    var hasTree: Bool { self == .files || self == .search }
+}
+
 struct SidebarTabBar: View {
-    @Binding var selection: Int
+    @Binding var selection: SidebarSection
 
     private let tabs = [
         ("Files", "folder"),
@@ -16,17 +21,17 @@ struct SidebarTabBar: View {
         HStack(spacing: 0) {
             ForEach(tabs.indices, id: \.self) { index in
                 Button {
-                    selection = index
+                    selection = SidebarSection.allCases[index]
                 } label: {
                     Image(systemName: tabs[index].1)
                         .frame(maxWidth: .infinity)
                         .frame(height: 28)
                         .contentShape(Capsule())
-                        .glassEffect(selection == index ? .regular.interactive() : .identity, in: Capsule())
+                        .glassEffect(selection.rawValue == index ? .regular.interactive() : .identity, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(tabs[index].0)
-                .accessibilityAddTraits(selection == index ? .isSelected : [])
+                .accessibilityAddTraits(selection.rawValue == index ? .isSelected : [])
                 .help(tabs[index].0)
             }
         }

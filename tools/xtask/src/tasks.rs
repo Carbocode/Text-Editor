@@ -13,6 +13,7 @@ Commands:
   verify <core|macos|gnome|kde|devtools|xtask>  fmt + check + lint + test
 
 Other commands:
+  architecture  Check workspace dependency boundaries
   doctor [--strict macos|gnome|kde]
   devtools [--demo] | devtools-service | devtools-ui
 
@@ -24,6 +25,7 @@ const DEVTOOLS_BINARIES: &[&str] = &["native-workspace-devtools", "native-worksp
 
 #[derive(Debug, PartialEq)]
 enum Step {
+    Architecture,
     Cargo { args: Vec<&'static str>, kde: bool },
     Shell(&'static str),
     Start { package: &'static str, kde: bool },
@@ -33,6 +35,9 @@ fn cargo(action: &'static str, packages: &[&'static str], kde: bool) -> Step {
     let mut args = vec![action];
     for package in packages {
         args.extend(["-p", package]);
+    }
+    if matches!(action, "check" | "clippy" | "test") {
+        args.push("--all-targets");
     }
     if action == "clippy" {
         args.extend(["--", "-D", "warnings"]);
@@ -107,7 +112,8 @@ fn plan(action: &str, target: &str) -> Option<Vec<Step>> {
             Some(steps)
         }
         "verify" => {
-            let mut steps = plan("fmt", "core")?;
+            let mut steps = vec![Step::Architecture];
+            steps.extend(plan("fmt", "core")?);
             for action in ["check", "lint", "test"] {
                 steps.extend(plan(action, target)?);
             }
@@ -120,6 +126,7 @@ fn plan(action: &str, target: &str) -> Option<Vec<Step>> {
 impl Step {
     fn description(&self) -> String {
         match self {
+            Self::Architecture => "cargo xtask architecture".to_owned(),
             Self::Cargo { args, kde } => format!(
                 "cargo {}{}",
                 args.join(" "),
@@ -148,6 +155,7 @@ impl Step {
 
     fn execute(&self) -> ExitCode {
         match self {
+            Self::Architecture => crate::architecture::check(),
             Self::Cargo { args, kde: true } => crate::run_kde(args),
             Self::Cargo { args, kde: false } => crate::run("cargo", args),
             Self::Shell(script) => crate::run("sh", &[script]),
@@ -199,6 +207,7 @@ mod tests {
                         assert!(!content.contains("cargo test"));
                     }
                     Step::Start { .. } => {}
+                    Step::Architecture => panic!("launch must not verify architecture"),
                 }
             }
         }
@@ -207,7 +216,8 @@ mod tests {
     #[test]
     fn verification_composes_explicit_checks_and_mac_smoke_prerequisites() {
         for target in ["core", "macos", "gnome", "kde", "devtools", "xtask"] {
-            let mut expected = plan("fmt", "core").unwrap();
+            let mut expected = vec![Step::Architecture];
+            expected.extend(plan("fmt", "core").unwrap());
             for action in ["check", "lint", "test"] {
                 expected.extend(plan(action, target).unwrap());
             }

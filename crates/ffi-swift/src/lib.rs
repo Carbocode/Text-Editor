@@ -1,8 +1,11 @@
-//! The only UniFFI boundary in the repository.
+//! UniFFI adapter: one Session, shared rules, and changed lists only.
 
-use native_workspace_application::{AppCommand, AppError, AppSnapshot, Application};
-use native_workspace_domain::DocumentId;
-use std::{path::PathBuf, sync::Mutex};
+use native_workspace_application::{AppCommand, AppError, AppSnapshot, Session};
+use native_workspace_domain::{DocumentId, path};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 uniffi::setup_scaffolding!();
 
@@ -22,12 +25,69 @@ pub struct SyntaxToken {
 pub fn highlight_document(file_name: String, text: String) -> Vec<SyntaxToken> {
     native_workspace_syntax::highlight(&file_name, &text)
         .into_iter()
-        .map(|token| SyntaxToken {
-            start_utf16: token.start_utf16 as u64,
-            end_utf16: token.end_utf16 as u64,
-            kind: token.kind.code(),
+        .map(|t| SyntaxToken {
+            start_utf16: t.start_utf16 as u64,
+            end_utf16: t.end_utf16 as u64,
+            kind: t.kind.code(),
         })
         .collect()
+}
+
+#[uniffi::export]
+pub fn workspace_path_name(value: String) -> String {
+    path::name(&value).into()
+}
+#[uniffi::export]
+pub fn workspace_path_join(directory: String, name: String) -> String {
+    path::join(&directory, &name)
+}
+#[uniffi::export]
+pub fn workspace_path_parent(value: String) -> String {
+    path::parent(&value).into()
+}
+#[uniffi::export]
+pub fn workspace_path_rebase(value: String, source: String, target: String) -> String {
+    path::rebase(&value, &source, &target).into_owned()
+}
+#[uniffi::export]
+pub fn workspace_path_is_within(value: String, ancestor: String) -> bool {
+    path::is_within(&value, &ancestor)
+}
+#[uniffi::export]
+pub fn workspace_file_icon(value: String) -> String {
+    native_workspace_application::file_icon_name(&value).into()
+}
+#[uniffi::export]
+pub fn workspace_folder_icon(value: String, expanded: bool) -> String {
+    native_workspace_application::folder_icon_name(&value, expanded).into()
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct Confirmation {
+    pub title: String,
+    pub body: String,
+    pub confirm: String,
+    pub cancel: String,
+    pub discard: String,
+}
+impl From<native_workspace_application::Confirmation> for Confirmation {
+    fn from(c: native_workspace_application::Confirmation) -> Self {
+        Self {
+            title: c.title,
+            body: c.body.into(),
+            confirm: c.confirm.into(),
+            cancel: c.cancel.into(),
+            discard: c.discard.into(),
+        }
+    }
+}
+#[uniffi::export]
+pub fn workspace_close_confirmation(value: String) -> Confirmation {
+    native_workspace_application::close_confirmation(&value).into()
+}
+#[uniffi::export]
+pub fn workspace_delete_confirmation(value: String) -> Confirmation {
+    native_workspace_application::delete_confirmation(&value).into()
 }
 
 #[derive(Clone, uniffi::Record)]
@@ -37,7 +97,6 @@ pub struct DocumentSummary {
     pub dirty: bool,
     pub external_change: bool,
 }
-
 #[derive(Clone, uniffi::Record)]
 pub struct DocumentSnapshot {
     pub id: String,
@@ -46,30 +105,11 @@ pub struct DocumentSnapshot {
     pub dirty: bool,
     pub external_change: bool,
 }
-
-#[derive(Clone, uniffi::Record)]
-pub struct OpenedDocument {
-    pub revision: u64,
-    pub open_documents: Vec<String>,
-    pub preview_document: Option<String>,
-    pub document: DocumentSnapshot,
-}
-
 #[derive(Clone, uniffi::Record)]
 pub struct RecentWorkspace {
     pub root: String,
     pub name: String,
 }
-
-#[derive(Clone, uniffi::Record)]
-pub struct SearchResult {
-    pub id: String,
-    pub title: String,
-    pub dirty: bool,
-    pub snippet: Option<String>,
-    pub location: Option<SearchLocation>,
-}
-
 #[derive(Clone, uniffi::Record)]
 pub struct SearchLocation {
     pub line: u64,
@@ -79,140 +119,183 @@ pub struct SearchLocation {
     pub start_utf16: u64,
     pub end_utf16: u64,
 }
+#[derive(Clone, uniffi::Record)]
+pub struct SearchResult {
+    pub id: String,
+    pub title: String,
+    pub snippet: String,
+    pub location: SearchLocation,
+}
+#[derive(Clone, uniffi::Record)]
+pub struct Relocation {
+    pub source: String,
+    pub target: String,
+}
+#[derive(Clone, uniffi::Record)]
+pub struct Activity {
+    pub busy: bool,
+    pub relocation: Option<Relocation>,
+    pub relocation_slow: bool,
+    pub deleting: bool,
+}
 
 #[derive(Clone, uniffi::Record)]
-pub struct WorkspaceSnapshot {
+pub struct SidebarRow {
+    pub title: String,
+    pub dirty: bool,
+    pub external_change: bool,
+    pub path: String,
+    pub depth: u64,
+    pub directory: bool,
+    pub expanded: bool,
+    pub result_index: Option<u64>,
+}
+
+/// None for a list means unchanged since the last delivery to this adapter.
+/// `snapshot` always includes every list. Commands and `poll` deliver deltas.
+#[derive(Clone, uniffi::Record)]
+pub struct WorkspaceUpdate {
     pub diagnostic_operation: u64,
     pub revision: u64,
-    pub counter: u64,
+    pub editor_generation: u64,
     pub workspace_name: Option<String>,
     pub workspace_root: Option<String>,
     pub recent_workspaces: Vec<RecentWorkspace>,
     pub search_query: String,
-    pub search_results: Vec<SearchResult>,
+    pub search_results: Option<Vec<SearchResult>>,
     pub search_in_progress: bool,
     pub search_truncated: bool,
-    pub directories: Vec<String>,
-    pub documents: Vec<DocumentSummary>,
+    pub directories: Option<Vec<String>>,
+    pub documents: Option<Vec<DocumentSummary>>,
+    pub file_filter_files: Option<Vec<String>>,
+    pub file_filter_directories: Option<Vec<String>>,
+    pub file_filter_query: String,
+    pub file_filter_in_progress: bool,
     pub open_documents: Vec<String>,
     pub preview_document: Option<String>,
     pub active_document: Option<DocumentSnapshot>,
+    pub activity: Activity,
+    pub error: Option<String>,
 }
 
-impl From<AppSnapshot> for WorkspaceSnapshot {
-    fn from(snapshot: AppSnapshot) -> Self {
-        Self {
-            diagnostic_operation: snapshot.diagnostic_operation,
-            revision: snapshot.revision,
-            counter: snapshot.diagnostic_counter,
-            workspace_name: snapshot.workspace_name,
-            workspace_root: snapshot
-                .workspace_root
-                .map(|root| root.to_string_lossy().into_owned()),
-            recent_workspaces: snapshot
-                .recent_workspaces
-                .into_iter()
-                .map(|item| RecentWorkspace {
-                    root: item.root.to_string_lossy().into_owned(),
-                    name: item.name,
-                })
-                .collect(),
-            search_query: snapshot.search_query.0,
-            search_truncated: snapshot.search_truncated,
-            search_results: std::sync::Arc::unwrap_or_clone(snapshot.search_results)
-                .into_iter()
-                .map(|result| SearchResult {
-                    id: result.id.as_str().to_owned(),
-                    title: result.title,
-                    dirty: result.dirty,
-                    snippet: result.snippet,
-                    location: result.location.map(|location| SearchLocation {
-                        line: location.line,
-                        column: location.column,
-                        start_char: location.start_char,
-                        end_char: location.end_char,
-                        start_utf16: location.start_utf16,
-                        end_utf16: location.end_utf16,
-                    }),
-                })
-                .collect(),
-            search_in_progress: snapshot.search_in_progress,
-            directories: std::sync::Arc::unwrap_or_clone(snapshot.directories),
-            documents: std::sync::Arc::unwrap_or_clone(snapshot.documents)
-                .into_iter()
-                .map(|doc| DocumentSummary {
-                    id: doc.id.as_str().to_owned(),
-                    title: doc.title,
-                    dirty: doc.dirty,
-                    external_change: doc.external_change,
-                })
-                .collect(),
-            open_documents: snapshot
-                .open_documents
-                .into_iter()
-                .map(|id| id.as_str().to_owned())
-                .collect(),
-            preview_document: snapshot.preview_document.map(|id| id.as_str().to_owned()),
-            active_document: snapshot.active_document.map(|doc| DocumentSnapshot {
-                id: doc.id.as_str().to_owned(),
-                title: doc.title,
-                content: doc.content,
-                dirty: doc.dirty,
-                external_change: doc.external_change,
+fn update(snapshot: &AppSnapshot, previous: Option<&AppSnapshot>) -> WorkspaceUpdate {
+    WorkspaceUpdate {
+        diagnostic_operation: snapshot.diagnostic_operation,
+        revision: snapshot.revision,
+        editor_generation: snapshot.editor_generation,
+        workspace_name: snapshot.workspace_name().map(str::to_owned),
+        workspace_root: snapshot
+            .workspace_root()
+            .map(|p| p.to_string_lossy().into_owned()),
+        recent_workspaces: snapshot
+            .recent_workspaces
+            .iter()
+            .map(|w| RecentWorkspace {
+                root: w.root.to_string_lossy().into_owned(),
+                name: w.name.clone(),
+            })
+            .collect(),
+        search_query: snapshot.search_query.clone(),
+        search_in_progress: snapshot.search_in_progress,
+        search_truncated: snapshot.search_truncated,
+        search_results: previous
+            .is_none_or(|p| !Arc::ptr_eq(&p.search_results, &snapshot.search_results))
+            .then(|| {
+                snapshot
+                    .search_results
+                    .iter()
+                    .map(|r| SearchResult {
+                        id: r.id.to_string(),
+                        title: r.id.name().into(),
+                        snippet: r.snippet.clone(),
+                        location: SearchLocation {
+                            line: r.location.line,
+                            column: r.location.column,
+                            start_char: r.location.start_char,
+                            end_char: r.location.end_char,
+                            start_utf16: r.location.start_utf16,
+                            end_utf16: r.location.end_utf16,
+                        },
+                    })
+                    .collect()
             }),
+        directories: previous
+            .is_none_or(|p| !Arc::ptr_eq(&p.directories, &snapshot.directories))
+            .then(|| snapshot.directories.as_ref().clone()),
+        documents: previous
+            .is_none_or(|p| !Arc::ptr_eq(&p.documents, &snapshot.documents))
+            .then(|| {
+                snapshot
+                    .documents
+                    .iter()
+                    .map(|d| DocumentSummary {
+                        id: d.id.to_string(),
+                        title: d.id.name().into(),
+                        dirty: d.dirty,
+                        external_change: d.external_change,
+                    })
+                    .collect()
+            }),
+        file_filter_files: previous
+            .is_none_or(|p| !Arc::ptr_eq(&p.file_filter, &snapshot.file_filter))
+            .then(|| snapshot.file_filter.files.clone()),
+        file_filter_directories: previous
+            .is_none_or(|p| !Arc::ptr_eq(&p.file_filter, &snapshot.file_filter))
+            .then(|| snapshot.file_filter.directories.clone()),
+        file_filter_query: snapshot.file_filter.query.clone(),
+        file_filter_in_progress: snapshot.file_filter_in_progress,
+        open_documents: snapshot
+            .open_documents
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+        preview_document: snapshot.preview_document.as_ref().map(ToString::to_string),
+        active_document: snapshot.active_document.as_ref().map(|d| DocumentSnapshot {
+            id: d.id.to_string(),
+            title: d.id.name().into(),
+            content: d.content.to_string(),
+            dirty: d.dirty,
+            external_change: d.external_change,
+        }),
+        activity: Activity {
+            busy: snapshot.activity.busy,
+            relocation: snapshot.activity.relocation.as_ref().map(|r| Relocation {
+                source: r.source.to_string(),
+                target: r.target.to_string(),
+            }),
+            relocation_slow: snapshot.activity.relocation_slow,
+            deleting: snapshot.activity.deleting,
+        },
+        error: snapshot.error.clone(),
+    }
+}
+
+/// The core supplies error wording. The adapter adds only transport failures.
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum WorkspaceError {
+    #[error("{message}")]
+    Application { message: String },
+    #[error("Application lock poisoned.")]
+    LockPoisoned,
+}
+impl From<AppError> for WorkspaceError {
+    fn from(error: AppError) -> Self {
+        Self::Application {
+            message: error.to_string(),
         }
     }
 }
 
-#[derive(Debug, thiserror::Error, uniffi::Error)]
-pub enum WorkspaceError {
-    #[error("no workspace is open")]
-    WorkspaceNotOpen,
-    #[error("document not found: {0}")]
-    DocumentNotFound(String),
-    #[error("document is not open: {0}")]
-    DocumentNotOpen(String),
-    #[error("save modified documents before changing workspaces or closing tabs")]
-    UnsavedChanges,
-    #[error("save all modified documents in this file or folder before deleting it")]
-    DeleteUnsavedChanges,
-    #[error("a file operation is in progress; wait for it to finish")]
-    DeleteInProgress,
-    #[error("document changed on disk: {0}")]
-    ExternalChanges(String),
-    #[error("invalid document name")]
-    InvalidDocumentId,
-    #[error("a folder cannot be moved inside itself")]
-    InvalidMove,
-    #[error("filesystem error: {0}")]
-    Filesystem(String),
-    #[error("metadata storage error: {0}")]
-    Storage(String),
-    #[error("diagnostic counter overflow")]
-    CounterOverflow,
-    #[error("application revision overflow")]
-    RevisionOverflow,
-    #[error("application lock poisoned")]
-    LockPoisoned,
+struct BridgeSession {
+    session: Session,
+    delivered: Option<AppSnapshot>,
 }
-
-impl From<AppError> for WorkspaceError {
-    fn from(error: AppError) -> Self {
-        match error {
-            AppError::InvalidMove => Self::InvalidMove,
-            AppError::InvalidEntryName => Self::InvalidDocumentId,
-            AppError::WorkspaceNotOpen => Self::WorkspaceNotOpen,
-            AppError::DocumentNotFound(id) => Self::DocumentNotFound(id),
-            AppError::DocumentNotOpen(id) => Self::DocumentNotOpen(id),
-            AppError::UnsavedChanges => Self::UnsavedChanges,
-            AppError::DeleteUnsavedChanges => Self::DeleteUnsavedChanges,
-            AppError::DeleteInProgress => Self::DeleteInProgress,
-            AppError::ExternalChanges(id) => Self::ExternalChanges(id),
-            AppError::Filesystem(error) => Self::Filesystem(error.to_string()),
-            AppError::Storage(error) => Self::Storage(error.to_string()),
-            AppError::CounterOverflow => Self::CounterOverflow,
-            AppError::RevisionOverflow => Self::RevisionOverflow,
-        }
+impl BridgeSession {
+    fn deliver(&mut self, full: bool) -> WorkspaceUpdate {
+        let snapshot = self.session.snapshot();
+        let result = update(&snapshot, if full { None } else { self.delivered.as_ref() });
+        self.delivered = Some(snapshot);
+        result
     }
 }
 
@@ -220,7 +303,6 @@ impl From<AppError> for WorkspaceError {
 pub struct WorkspaceDropTrace {
     inner: native_workspace_application::SidebarDropTrace,
 }
-
 #[uniffi::export]
 impl WorkspaceDropTrace {
     pub fn preview_hidden(&self) {
@@ -232,296 +314,273 @@ impl WorkspaceDropTrace {
     pub fn sidebar_ready(&self) {
         self.inner.sidebar_ready();
     }
-    pub fn confirmed(&self, success: bool) {
-        self.inner.confirmed(success);
-    }
 }
 
 #[derive(uniffi::Object)]
 pub struct WorkspaceApplication {
-    inner: Mutex<Application>,
+    inner: Mutex<BridgeSession>,
     diagnostic_observer: std::sync::OnceLock<native_workspace_application::DiagnosticObserver>,
 }
-
 #[uniffi::export]
 impl WorkspaceApplication {
-    pub fn diagnostic_ui_heartbeat(&self) {
-        if let Some(observer) = self.diagnostic_observer.get() {
-            observer.ui_heartbeat();
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        let mut session = Session::new();
+        session.enable_devtools("swiftui");
+        let observer = session.diagnostic_observer();
+        let diagnostic_observer = std::sync::OnceLock::new();
+        if observer.available() {
+            let _ = diagnostic_observer.set(observer);
+        }
+        Self {
+            inner: Mutex::new(BridgeSession {
+                session,
+                delivered: None,
+            }),
+            diagnostic_observer,
         }
     }
-    pub fn begin_sidebar_drop(&self, origin: u8) -> std::sync::Arc<WorkspaceDropTrace> {
-        std::sync::Arc::new(WorkspaceDropTrace {
+    pub fn diagnostic_ui_heartbeat(&self) {
+        if let Some(o) = self.diagnostic_observer.get() {
+            o.ui_heartbeat();
+        }
+    }
+    pub fn begin_sidebar_drop(&self, origin: u8) -> Arc<WorkspaceDropTrace> {
+        Arc::new(WorkspaceDropTrace {
             inner: native_workspace_application::SidebarDropTrace::begin(
                 self.diagnostic_observer.get().cloned().unwrap_or_default(),
                 origin,
             ),
         })
     }
-
-    pub fn move_entry_traced(
-        &self,
-        path: String,
-        directory: String,
-        trace: std::sync::Arc<WorkspaceDropTrace>,
-    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?
-            .dispatch_sidebar_move(Self::parse_id(path)?, directory, false, trace.inner.clone())
-            .map(Into::into)
-            .map_err(Into::into)
-    }
-    #[uniffi::constructor]
-    pub fn new() -> Self {
-        let mut app = Application::new();
-        app.enable_devtools("swiftui");
-        let diagnostic_observer = std::sync::OnceLock::new();
-        let observer = app.diagnostic_observer();
-        if observer.available() {
-            let _ = diagnostic_observer.set(observer);
-        }
-        Self {
-            inner: Mutex::new(app),
-            diagnostic_observer,
-        }
-    }
-
     pub fn open_devtools(&self) -> bool {
         if self.diagnostic_observer.get().is_none() {
-            let Ok(mut app) = self.inner.try_lock() else {
+            let Ok(mut bridge) = self.inner.try_lock() else {
                 return false;
             };
-            app.start_devtools("swiftui");
-            let observer = app.diagnostic_observer();
+            bridge.session.start_devtools("swiftui");
+            let observer = bridge.session.diagnostic_observer();
             if !observer.available() {
                 return false;
             }
             let _ = self.diagnostic_observer.set(observer);
         }
-        if let Some(observer) = self.diagnostic_observer.get() {
-            observer.open_console();
+        if let Some(o) = self.diagnostic_observer.get() {
+            o.open_console();
             return true;
         }
         false
     }
-
     pub fn devtools_available(&self) -> bool {
         cfg!(feature = "devtools")
     }
-
     pub fn devtools_enabled(&self) -> bool {
-        self.diagnostic_observer
-            .get()
-            .is_some_and(|observer| observer.enabled())
+        self.diagnostic_observer.get().is_some_and(|o| o.enabled())
     }
-
     pub fn diagnostic_snapshot_applied(&self, operation: u64, revision: u64, duration_ns: u64) {
-        if let Some(observer) = self.diagnostic_observer.get() {
-            observer.snapshot_applied(operation, revision, duration_ns);
+        if let Some(o) = self.diagnostic_observer.get() {
+            o.snapshot_applied(operation, revision, duration_ns);
         }
     }
-
-    pub fn snapshot(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        let app = self
-            .inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?;
-        Ok(app.snapshot().into())
+    pub fn snapshot(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        Ok(self.lock()?.deliver(true))
     }
-
-    pub fn enable_persistence(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        let mut app = self
-            .inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?;
-        app.enable_persistence_default()
-            .map(Into::into)
-            .map_err(Into::into)
+    pub fn enable_persistence(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge.session.enable_persistence_default()?;
+        Ok(bridge.deliver(false))
     }
-
-    pub fn increment(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::IncrementDiagnostic)
+    pub fn poll(&self) -> Result<Option<WorkspaceUpdate>, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge.session.poll();
+        if bridge
+            .delivered
+            .as_ref()
+            .is_some_and(|s| s.revision == bridge.session.revision())
+        {
+            return Ok(None);
+        }
+        Ok(Some(bridge.deliver(false)))
     }
-
-    pub fn set_search_query(&self, query: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    pub fn filter_files(&self, query: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge.session.filter_files(&query);
+        Ok(bridge.deliver(false))
+    }
+    pub fn sidebar_rows(
+        &self,
+        search: bool,
+        expanded: Vec<String>,
+    ) -> Result<Vec<SidebarRow>, WorkspaceError> {
+        use native_workspace_application::SidebarRowKind;
+        let snapshot = self.lock()?.session.snapshot();
+        let expanded: std::collections::HashSet<_> = expanded.into_iter().collect();
+        let rows = if search {
+            snapshot.search_rows()
+        } else if snapshot.file_filter.is_active() {
+            snapshot.file_filter_rows()
+        } else {
+            snapshot.file_tree_rows(|p| expanded.contains(p))
+        };
+        Ok(rows
+            .into_iter()
+            .map(|r| SidebarRow {
+                title: path::name(&r.path).into(),
+                dirty: snapshot.document_summary(&r.path).is_some_and(|d| d.dirty),
+                external_change: snapshot
+                    .document_summary(&r.path)
+                    .is_some_and(|d| d.external_change),
+                directory: r.is_directory(),
+                expanded: matches!(r.kind, SidebarRowKind::Directory { expanded: true }),
+                result_index: match r.kind {
+                    SidebarRowKind::Match { result } => Some(result as u64),
+                    _ => None,
+                },
+                path: r.path,
+                depth: r.depth as u64,
+            })
+            .collect())
+    }
+    pub fn can_move_entry(&self, path: String, directory: String) -> bool {
+        self.inner.lock().is_ok_and(|b| {
+            DocumentId::parse(path).is_ok_and(|id| b.session.can_move_entry(id, directory))
+        })
+    }
+    pub fn move_entry_traced(
+        &self,
+        path: String,
+        directory: String,
+        trace: Arc<WorkspaceDropTrace>,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let id = self.parse_id(path)?;
+        let mut bridge = self.lock()?;
+        bridge
+            .session
+            .dispatch_traced(AppCommand::MoveEntry { id, directory }, trace.inner.clone())?;
+        Ok(bridge.deliver(false))
+    }
+    pub fn set_search_query(&self, query: String) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::QueueSearchQuery(query))
     }
-
-    pub fn poll_search_results(&self) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
-        self.dispatch_if_changed(AppCommand::PollSearchResults)
-    }
-
-    pub fn open_workspace(&self, path: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    pub fn open_workspace(&self, path: String) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::OpenWorkspace(PathBuf::from(path)))
     }
-
-    pub fn refresh_workspace(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    pub fn refresh_workspace(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::RefreshWorkspace)
     }
-
     pub fn move_entry(
         &self,
         path: String,
         directory: String,
-    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::MoveEntry {
-            id: Self::parse_id(path)?,
+            id: self.parse_id(path)?,
             directory,
         })
     }
-
     pub fn rename_entry(
         &self,
         path: String,
         new_name: String,
-    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::RenameEntry {
-            id: Self::parse_id(path)?,
+            id: self.parse_id(path)?,
             new_name,
         })
     }
-
-    pub fn delete_entry(&self, path: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::DeleteEntry(Self::parse_id(path)?))
+    pub fn delete_entry(&self, path: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::DeleteEntry(self.parse_id(path)?))
     }
-
     pub fn create_entry(
         &self,
         path: String,
         directory: bool,
-    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::CreateEntry {
-            id: Self::parse_id(path)?,
+            id: self.parse_id(path)?,
             directory,
         })
     }
-
-    pub fn poll_workspace_changes(&self) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
-        self.dispatch_if_changed(AppCommand::PollWorkspaceChanges)
+    pub fn open_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::OpenDocument(self.parse_id(id)?))
     }
-
-    pub fn open_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::OpenDocument(Self::parse_id(id)?))
+    pub fn preview_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::PreviewDocument(self.parse_id(id)?))
     }
-
-    pub fn preview_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::PreviewDocument(Self::parse_id(id)?))
+    pub fn keep_document_open(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::KeepDocumentOpen(self.parse_id(id)?))
     }
-
-    pub fn keep_document_open(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::KeepDocumentOpen(Self::parse_id(id)?))
+    pub fn move_document_tab(
+        &self,
+        id: String,
+        index: u64,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::MoveDocumentTab {
+            id: self.parse_id(id)?,
+            index: index as usize,
+        })
     }
-
-    pub fn open_document_fast(&self, id: String) -> Result<OpenedDocument, WorkspaceError> {
-        self.open_document_fast_impl(id, false)
-    }
-
-    pub fn preview_document_fast(&self, id: String) -> Result<OpenedDocument, WorkspaceError> {
-        self.open_document_fast_impl(id, true)
-    }
-
     pub fn change_document(
         &self,
         id: String,
         content: String,
-    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::ChangeDocument {
-            id: Self::parse_id(id)?,
+            id: self.parse_id(id)?,
             content,
         })
     }
-
+    pub fn close_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::CloseDocument(self.parse_id(id)?))
+    }
     pub fn discard_and_close_document(
         &self,
         id: String,
-    ) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::DiscardAndCloseDocument(Self::parse_id(id)?))
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::DiscardAndCloseDocument(self.parse_id(id)?))
     }
-    pub fn close_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::CloseDocument(Self::parse_id(id)?))
+    pub fn save_and_close_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::SaveAndCloseDocument(self.parse_id(id)?))
     }
-    pub fn save_all_documents(&self) -> Result<WorkspaceSnapshot, WorkspaceError> {
+    pub fn save_all_documents(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::SaveAllDocuments)
     }
-
-    pub fn save_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::SaveDocument(Self::parse_id(id)?))
+    pub fn save_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::SaveDocument(self.parse_id(id)?))
     }
-
-    pub fn reload_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::ReloadDocument(Self::parse_id(id)?))
+    pub fn reload_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::ReloadDocument(self.parse_id(id)?))
     }
-
-    pub fn overwrite_document(&self, id: String) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        self.dispatch(AppCommand::OverwriteDocument(Self::parse_id(id)?))
+    pub fn overwrite_document(&self, id: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::OverwriteDocument(self.parse_id(id)?))
+    }
+    #[cfg(debug_assertions)]
+    pub fn delay_next_background_job(&self, milliseconds: u64) -> Result<(), WorkspaceError> {
+        self.lock()?
+            .session
+            .delay_next_background_job(std::time::Duration::from_millis(milliseconds));
+        Ok(())
     }
 }
-
 impl WorkspaceApplication {
-    fn open_document_fast_impl(
-        &self,
-        id: String,
-        preview: bool,
-    ) -> Result<OpenedDocument, WorkspaceError> {
-        let id = Self::parse_id(id)?;
-        let mut app = self
-            .inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?;
-        let command = if preview {
-            AppCommand::PreviewDocument(id.clone())
-        } else {
-            AppCommand::OpenDocument(id.clone())
-        };
-        let snapshot = app.dispatch(command)?;
-        let document = snapshot
-            .active_document
-            .ok_or_else(|| WorkspaceError::DocumentNotOpen(id.as_str().to_owned()))?;
-        Ok(OpenedDocument {
-            preview_document: snapshot.preview_document.map(|id| id.as_str().to_owned()),
-            open_documents: snapshot
-                .open_documents
-                .into_iter()
-                .map(|id| id.as_str().to_owned())
-                .collect(),
-            revision: snapshot.revision,
-            document: DocumentSnapshot {
-                id: document.id.as_str().to_owned(),
-                title: document.title,
-                content: document.content,
-                dirty: document.dirty,
-                external_change: document.external_change,
-            },
-        })
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, BridgeSession>, WorkspaceError> {
+        self.inner.lock().map_err(|_| WorkspaceError::LockPoisoned)
     }
-
-    fn parse_id(id: String) -> Result<DocumentId, WorkspaceError> {
-        DocumentId::parse(id).map_err(|_| WorkspaceError::InvalidDocumentId)
+    fn parse_id(&self, value: String) -> Result<DocumentId, WorkspaceError> {
+        match DocumentId::parse(value) {
+            Ok(id) => Ok(id),
+            Err(_) => {
+                self.lock()?.session.report(AppError::InvalidEntryName);
+                Err(AppError::InvalidEntryName.into())
+            }
+        }
     }
-
-    fn dispatch(&self, command: AppCommand) -> Result<WorkspaceSnapshot, WorkspaceError> {
-        let mut app = self
-            .inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?;
-        app.dispatch(command).map(Into::into).map_err(Into::into)
-    }
-
-    fn dispatch_if_changed(
-        &self,
-        command: AppCommand,
-    ) -> Result<Option<WorkspaceSnapshot>, WorkspaceError> {
-        let mut app = self
-            .inner
-            .lock()
-            .map_err(|_| WorkspaceError::LockPoisoned)?;
-        app.dispatch_if_changed(command)
-            .map(|snapshot| snapshot.map(Into::into))
-            .map_err(Into::into)
+    fn dispatch(&self, command: AppCommand) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge.session.dispatch(command)?;
+        Ok(bridge.deliver(false))
     }
 }
-
 impl Default for WorkspaceApplication {
     fn default() -> Self {
         Self::new()

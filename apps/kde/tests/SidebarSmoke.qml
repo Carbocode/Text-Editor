@@ -195,7 +195,7 @@ ApplicationWindow {
                         check(pane.treeMatchesSidebarEntries(), "Cached tree and sidebar disagree")
                         checkFileRows()
                         // Search updates while Files is active must not reset its tree.
-                        controller.search_files_now("no-such-content")
+                        controller.search_files("no-such-content")
                         check(pane.sidebarCaches[0] === filesCache, "Search invalidated Files cache")
                         pane.sidebarTab = 1
                         check(pane.sidebarEntries().length === 0, "Search cache was not invalidated")
@@ -239,7 +239,7 @@ ApplicationWindow {
                     check(pane.sidebarCaches[0] === filesCache, "Collapsed cache was rebuilt")
                     break
                 case 7:
-                    check(pane.treeRowForPath(expandedPath) === -1, "Tab switch lost collapsed state")
+                    check(pane.treeRowForPath(expandedPath) === -1, "Tab switch lost collapsed state: " + JSON.stringify(pane.collapsedDirectories) + " filter=" + pane.fileFilter + " restoring=" + pane.restoringFileTree)
                     console.log("KDE sidebar tab/cache/native row smoke test passed")
                     controller.open_document("src/new.rs")
                     pane.editorText = "first\nsecond\n"
@@ -312,10 +312,12 @@ ApplicationWindow {
                         "First folder click must select it")
                     folderDelegate.clicked()
                     check(pane.renamePath.length === 0, "Selected folder click must not start renaming")
+                    switchedAt = Date.now()
                     pane.beginRename("src")
                     break
                 case 13:
                     var renameField = pane.activeRenameEditor
+                    if ((!renameField || !renameField.visible) && Date.now() - switchedAt < 3000) { --step; break }
                     check(renameField && renameField.visible, "Inline rename field is missing: path=" + pane.renamePath + ", treeRows=" + tree.rows)
                     check(renameField.selectedText === "src", "Folder name was not selected: text=" + renameField.text + ", selected=" + renameField.selectedText + ", focus=" + renameField.activeFocus)
                     var renameRow = tree.itemAtCell(Qt.point(0, pane.treeRowForPath("src")))
@@ -359,7 +361,7 @@ ApplicationWindow {
                 case 16:
                     // The drop commits on the next turn; wait for its confirmation.
                     if (controller.move_pending) {
-                        controller.poll_workspace_changes()
+                        controller.poll()
                         --step
                         break
                     }
@@ -375,7 +377,7 @@ ApplicationWindow {
                     break
                 case 17:
                     if (waitingMoveSave) {
-                        controller.poll_workspace_changes()
+                        controller.poll()
                         if (controller.active_document_dirty && Date.now() - switchedAt < 3000) {
                             --step
                             break
@@ -443,9 +445,10 @@ ApplicationWindow {
                     break
                 case 21:
                     if (controller.search_in_progress) { --step; break }
+                    findItem(pane, "searchResults").forceLayout()
                     var searchFile = findItem(pane, "sidebarSearchFile:renamed.rs")
                     if (!searchFile && Date.now() - switchedAt < 3000) { --step; break }
-                    check(searchFile, "Search file row is missing for selected-click rename")
+                    check(searchFile, "Search file row is missing for selected-click rename: results=" + JSON.stringify(controller.search_results) + ", entries=" + JSON.stringify(pane.sidebarEntries()) + ", query=" + controller.search_query + ", error=" + controller.error_message + ", list count=" + findItem(pane, "searchResults").count)
                     searchFile.clicked()
                     check(pane.renamePath.length === 0, "Clicking a search file must not start renaming")
                     pane.beginRename("renamed.rs")
@@ -482,7 +485,7 @@ ApplicationWindow {
                 case 23:
                     if (controller.deletion_pending && Date.now() - switchedAt < 3000) { --step; break }
                     check(!controller.deletion_pending, "Deletion never finished")
-                    check(controller.error_message.indexOf("save all modified") !== -1, "Dirty deletion was not rejected")
+                    check(controller.error_message.indexOf("Save all modified") !== -1, "Dirty deletion was not rejected")
                     check(controller.active_document_text === "unsaved deletion", "Deletion lost unsaved edits")
                     controller.save_document()
                     pane.requestDelete("renamed.rs")
@@ -524,6 +527,12 @@ ApplicationWindow {
                     controller.rename_entry("tab-review-b.txt", "tab-review-renamed.txt")
                     check(tabEditor.canUndo && tabEditor.selectedText === "di", "Rename lost undo history or selection")
                     controller.save_all_documents()
+                    switchedAt = Date.now()
+                    break
+                case 26:
+                    var tabEditor = findItem(pane, "documentEditor")
+                    if (controller.move_pending && Date.now() - switchedAt < 3000) { --step; break }
+                    check(!controller.move_pending, "Queued Save All did not finish")
                     check(controller.dirty_document_ids.length === 0, "Save All did not save inactive documents")
                     controller.open_document("tab-review-a.txt")
                     tabEditor.insert(tabEditor.length, " discard")

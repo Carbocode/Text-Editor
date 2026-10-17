@@ -1,24 +1,50 @@
 # Architecture
 
+The editor uses a layered command/event architecture with native presentation adapters. Its dependency direction is enforced by `cargo xtask architecture`.
+
 ```text
-domain (document IDs and workspace values)
-   ├── filesystem (local directory and UTF-8 file I/O)
-   └── storage (SQLite metadata with versioned migrations)
-          ↓
-application (commands → events → state → snapshots)
-   ├── ffi-swift (UniFFI) → SwiftUI
-   ├── gnome (direct Rust) → GTK4/libadwaita
-   └── kde (direct Rust) → CXX-Qt/QML and Kirigami
+domain ← filesystem, storage
+    ↑          ↑
+    └── application::Session ← GTK, CXX-Qt, UniFFI ← SwiftUI
+syntax ← native text views
+application → optional diagnostic producer → diagnostic protocol
+separate diagnostic service/UI → diagnostic protocol
 ```
 
-Application::dispatch_with_events(AppCommand) validates intent, performs any required filesystem I/O, and returns the resulting AppEvent values plus an AppSnapshot. AppState applies only successful events and owns the authoritative document content, dirty state, and revision. A command that has no effect produces no events or revision change. Application::dispatch(AppCommand) keeps the snapshot-only API used by all three frontends. These transient events are not a persisted event log. The Rust core has no toolkit dependency. Frontends choose their own file icons and controls.
+Each editor window owns one `Session`. The synchronous `Application` and `AppState` are private to the application crate. Frontends send commands and render immutable snapshots; they do not execute editor rules, maintain backend queues, project pending paths, or manage worker failures themselves. Native presentation state—focus, selection, hover, scroll position, expanded folders and dialogs—stays in the native layer. See [ADR 0004](adr/0004-shared-session-and-editor-rules.md).
 
-The file tree includes regular files and directories recursively. Symlinks are skipped, and editor operations reject symlinked ancestor directories. A recursive `notify` watcher queues filesystem events. Each frontend calls `PollWorkspaceChanges` every 250 ms; the core scans only after an event, with a 30-second reconciliation scan to catch missed events. If the watcher cannot start, the core scans every two seconds. `RefreshWorkspace` rebuilds the file list, reloads clean open documents, marks dirty documents whose disk version changed, and queues a search update. `SaveDocument` checks the disk content against the loaded baseline before writing; a conflict requires an explicit reload or overwrite command. A removed loaded file remains visible as a conflict, and explicit overwrite can recreate it. Dirty documents block replacing the workspace. See [ADR 0001](adr/0001-native-platform-frontends.md) and [ADR 0002](adr/0002-transient-application-events.md).
+## Application modules
 
-The storage adapter records only recent workspace paths, names, and order. `Application::enable_persistence_default` loads them before frontend interaction; normal workspace opening updates the database and publishes the new list in the same snapshot. `Application::new` uses in-memory metadata for isolated tests and smoke runs. Document bytes are never stored in SQLite. See [ADR 0003](adr/0003-sqlite-metadata.md).
+- `command.rs`: the public intentions and exhaustive policies for diagnostics, path rebasing, composite steps, re-searching, scheduling and commands received while busy.
+- `handlers/`: workspace scanning/reconciliation, file operations, documents/tabs and search delivery. Handlers validate and produce events after successful I/O through injected ports.
+- `application.rs`: the command pipeline and checked revision commit. Successful steps in a composite operation remain committed when a later step fails.
+- `event.rs`, `state.rs`: facts and their reducer. `DocumentTable` maintains sorted entries and binary lookup; its mutators own summary-cache invalidation. Shared lists use copy-on-write.
+- `session.rs`: the only frontend runtime. It schedules filesystem operations, projects relocations and edits through the same reducer, replays deferred commands, rolls paths back on failure and publishes errors until the next successful user command.
+- `snapshot.rs`, `sidebar.rs`, `icons.rs`: shared immutable views, tree ordering and icon associations. `editor_generation` identifies the shown document independently of its path.
+- `worker.rs`, `search.rs`, `path_filter.rs`: the shared debounced worker and the two query services. Cancellation and generation checks discard superseded work.
 
-Search is an application command and event. `QueueSearchQuery` only records the query and clears the previous results, so typing never scans the workspace on the UI thread. One worker debounces queries for 150 ms, then searches on up to eight threads in priority order: open buffers, then files by depth, so root files come first. Like ripgrep and VS Code, it skips `.git` and files excluded by `.gitignore` files or `.git/info/exclude`; the tree still lists them, and open buffers are always searched. Matches stream to the frontends as they are found: the first batch at once, later ones at most every 100 ms, less often as the list grows, because frontends rebuild the list on each update. Each job has a generation; a newer query or an emptied field cancels the remaining work after the file each thread is reading, and `PollSearchResults` publishes only current batches. A search stops after 20,000 matches and sets `search_truncated`, which frontends report. Only content occurrences are results; a file name match alone is not one. A case-insensitive regex rules out files and lines quickly, and an exact matcher with Rust lowercase semantics computes each occurrence's line, column, Unicode scalar offsets for GTK, and UTF-16 offsets for AppKit and Qt. Files over 1 MiB or not UTF-8 are listed but not searched. Loaded document buffers take precedence over disk content, so unsaved edits update the results. Edits, renames and disk changes do not rerun a search: matches of open buffers are recomputed, renamed files keep their matches under the new path, and removed files drop out; `RefreshWorkspace` searches again. `SetSearchQuery` searches synchronously and is kept for tests. `AppState` keeps the query and current results; frontends render and navigate to individual occurrences in their sidebars. Opening a different workspace clears the query. SQLite full-text indexing is not used.
+## I/O and concurrency
 
-Snapshots share each list (`documents`, `directories`, `search_results`) through an `Arc` until an event changes it, so frontends compare pointers and skip reconverting unchanged paths. The Files name filter uses `PathFilter`, a separate worker that frontends own: typing queues the query, the worker debounces for 150 ms and lists matching files plus every folder that contains a match, and the frontend polls for the result. Only the latest query publishes, and an empty query resolves immediately. KDE and GNOME use it; macOS debounces the filter and already builds its sidebar index on a background queue.
+`WorkspaceFilesystem` is an injected port with explicit operations, implemented by `RealFilesystem`. It lists regular UTF-8-named entries, skips symlinks and validates ancestor directories for editor operations. Saves compare the disk version with the loaded baseline; conflicts require explicit reload or overwrite. Removed loaded files remain visible as conflicts. Dirty buffers prevent changing workspaces and deleting their subtree. SQLite stores only recent-workspace metadata, never document text.
 
-Document tabs keep a shared ordered list and an optional preview document ID. `PreviewDocument` opens or activates a preview; only a new preview replaces the previous preview, after the requested file has loaded successfully. `OpenDocument` opens permanently, and `KeepDocumentOpen` promotes an existing preview without switching selection. A real edit permanently clears preview status, including after undo. Tab reordering also promotes; rename and optimistic relocation remap the preview ID. The Swift fast-open result carries the same preview state as full snapshots.
+A session polls worker, watcher, text-search and name-filter results through one `poll` API. Native adapters use a fast timer (16 ms) while work is active and an idle interval (250 ms) otherwise. The watcher starts a background reconciliation after filesystem events, periodically every 30 seconds, or every two seconds without a watcher. A result from an older state revision cannot replace newer edits or paths.
+
+Rename, move, deletion and explicit refresh execute on the session worker. Relocation paths appear immediately; a progress indicator appears after 300 ms. Editing is projected during relocation and replayed with queued saves/opens; failed relocation rebases those commands to the original paths. Deletion pauses editing. Concurrent destructive/relocating requests are rejected. Opening a document and ordinary saves are currently inline; moving them to background execution is a command-policy decision, never a frontend worker.
+
+## Search and presentation
+
+Text search debounces for 150 ms, prioritizes open buffers and shallow files, honors ignore files and skips `.git`. It uses up to eight worker threads, skips non-UTF-8 or >1 MiB contents, streams current-generation matches and caps results at 20,000. Results carry Unicode-scalar and UTF-16 positions. Unsaved buffer edits update their matches; relocation preserves matches under the new path; explicit refresh re-searches. Empty queries cancel immediately. Name filtering runs through the same debounced worker and returns matching files/folders and their ancestors.
+
+Snapshot lists and text are shared with `Arc`. A changed dirty flag invalidates document summaries; later typing that leaves summaries unchanged preserves their identity. GTK/Qt skip unchanged conversions. UniFFI sends `WorkspaceUpdate`: omitted lists are unchanged, while `snapshot()` explicitly sends all lists. Qt search occurrences use records with numeric offsets and a `QAbstractListModel`; syntax spans are structured records.
+
+Sidebar rows are ordered in Rust: folders first, then case-insensitive name with an exact-name tie-break. Native adapters consume these rows or direct children; toolkit tree models may materialize collapsed branches lazily. Paths use `DocumentId` and `domain::path`; Swift calls the same functions through UniFFI.
+
+## Tabs and errors
+
+Open tabs have visual order and at most one replaceable clean preview. Explicit opening, editing, saving, keeping open or reordering promotes the preview. Renames retain editor generation; switching documents advances it. Closing and deletion choose the visual neighbor. `SaveAndCloseDocument` saves before closing and stops on failure. `SaveAllDocuments` follows tab order and retains completed saves if another conflicts.
+
+`AppError` owns error wording. A session snapshot carries the last failure; polls and deferred replay do not hide a relocation failure. Adapters render the text rather than classify errors by their wording. A caught worker panic returns the application and retains unsaved buffers.
+
+## Extending the editor
+
+Follow [the project skill](../.agents/skills/editor-change/SKILL.md) and [AGENTS.md](../AGENTS.md). Put behavior at its owning boundary; keep native widgets native. `cargo xtask verify core` includes dependency rules, formatting, Clippy and behavior tests. Adapter changes also require that platform's verification and the relevant [GUI smoke tests](development.md). No automatic check proves architectural perfection; these constraints make common regressions fail early and keep ownership reviewable.

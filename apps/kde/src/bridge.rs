@@ -1,8 +1,7 @@
 use cxx_qt::CxxQtType;
-use cxx_qt_lib::{QString, QStringList, QUrl};
+use cxx_qt_lib::{QList, QMap, QMapPair_QString_QVariant, QString, QStringList, QUrl, QVariant};
 use native_workspace_application::{
-    AppCommand, AppSnapshot, DocumentSummary, NativeApplication as Application, PathFilter,
-    PathFilterResult, SearchResult, file_icon_name, folder_icon_name,
+    AppCommand, AppError, AppSnapshot, Session, SidebarRowKind, file_icon_name, folder_icon_name,
 };
 use native_workspace_domain::DocumentId;
 use std::{path::PathBuf, pin::Pin, sync::Arc};
@@ -12,27 +11,25 @@ pub mod qobject {
     unsafe extern "C++" {
         include!("cxx-qt-lib/qstring.h");
         type QString = cxx_qt_lib::QString;
+        include!("cxx-qt-lib/qvariant.h");
+        type QVariant = cxx_qt_lib::QVariant;
         include!("cxx-qt-lib/qstringlist.h");
         type QStringList = cxx_qt_lib::QStringList;
+        include!("cxx-qt-lib/core/qlist/qlist_QVariant.h");
+        type QList_QVariant = cxx_qt_lib::QList<cxx_qt_lib::QVariant>;
     }
 
     extern "RustQt" {
         #[qobject]
         #[qml_element]
         #[qproperty(bool, devtools_available)]
-        #[qproperty(u64, counter)]
         #[qproperty(u64, revision)]
         #[qproperty(QString, workspace_name)]
         #[qproperty(QString, workspace_root)]
         #[qproperty(QString, search_query)]
         #[qproperty(bool, search_in_progress)]
         #[qproperty(bool, search_truncated)]
-        #[qproperty(QStringList, search_result_ids)]
-        #[qproperty(QStringList, search_result_snippets)]
-        #[qproperty(QStringList, search_result_lines)]
-        #[qproperty(QStringList, search_result_columns)]
-        #[qproperty(QStringList, search_result_starts)]
-        #[qproperty(QStringList, search_result_ends)]
+        #[qproperty(QList_QVariant, search_results)]
         #[qproperty(QString, file_filter_query)]
         #[qproperty(QStringList, file_filter_files)]
         #[qproperty(QStringList, file_filter_directories)]
@@ -72,19 +69,11 @@ pub mod qobject {
         #[qinvokable]
         fn drop_sidebar_ready(self: Pin<&mut Self>);
         #[qinvokable]
-        fn increment(self: Pin<&mut Self>);
-        #[qinvokable]
         fn initialize_persistence(self: Pin<&mut Self>);
         #[qinvokable]
         fn search_files(self: Pin<&mut Self>, query: &QString);
         #[qinvokable]
-        fn search_files_now(self: Pin<&mut Self>, query: &QString);
-        #[qinvokable]
         fn filter_files(self: Pin<&mut Self>, query: &QString);
-        #[qinvokable]
-        fn filter_files_now(self: Pin<&mut Self>, query: &QString);
-        #[qinvokable]
-        fn poll_file_filter(self: Pin<&mut Self>);
         #[qinvokable]
         fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString;
         #[qinvokable]
@@ -92,7 +81,23 @@ pub mod qobject {
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
-        fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QStringList;
+        fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QList_QVariant;
+        #[qinvokable]
+        fn sidebar_rows(
+            self: Pin<&mut Self>,
+            search: bool,
+            expanded: &QStringList,
+        ) -> QList_QVariant;
+        #[qinvokable]
+        fn can_move_entry(self: Pin<&mut Self>, path: &QString, directory: &QString) -> bool;
+        #[qinvokable]
+        fn poll(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn confirmation(self: Pin<&mut Self>, path: &QString, deleting: bool) -> QVariant;
+        #[cfg(debug_assertions)]
+        #[qinvokable]
+        fn delay_next_background_job(self: Pin<&mut Self>, milliseconds: u64);
+
         #[qinvokable]
         fn sidebar_has_children(self: Pin<&mut Self>, parent: &QString) -> bool;
         #[qinvokable]
@@ -106,10 +111,6 @@ pub mod qobject {
         #[qinvokable]
         fn refresh_workspace(self: Pin<&mut Self>);
         #[qinvokable]
-        fn poll_workspace_changes(self: Pin<&mut Self>);
-        #[qinvokable]
-        fn poll_search_results(self: Pin<&mut Self>);
-        #[qinvokable]
         fn open_document(self: Pin<&mut Self>, id: &QString);
         #[qinvokable]
         fn preview_document(self: Pin<&mut Self>, id: &QString);
@@ -118,9 +119,9 @@ pub mod qobject {
         #[qinvokable]
         fn change_document(self: Pin<&mut Self>, text: &QString);
         #[qinvokable]
-        fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList;
+        fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QList_QVariant;
         #[qinvokable]
-        fn minimap_glyphs(self: Pin<&mut Self>) -> QString;
+        fn minimap_glyphs(self: Pin<&mut Self>) -> QList_QVariant;
         #[qinvokable]
         fn save_document(self: Pin<&mut Self>);
         #[qinvokable]
@@ -140,19 +141,13 @@ pub mod qobject {
 
 #[derive(Default)]
 pub struct AppControllerRust {
-    counter: u64,
     revision: u64,
     workspace_name: QString,
     workspace_root: QString,
     search_query: QString,
     search_in_progress: bool,
     search_truncated: bool,
-    search_result_ids: QStringList,
-    search_result_snippets: QStringList,
-    search_result_lines: QStringList,
-    search_result_columns: QStringList,
-    search_result_starts: QStringList,
-    search_result_ends: QStringList,
+    search_results: QList<QVariant>,
     file_filter_query: QString,
     file_filter_files: QStringList,
     file_filter_directories: QStringList,
@@ -175,37 +170,231 @@ pub struct AppControllerRust {
     deletion_pending: bool,
     error_message: QString,
     devtools_available: bool,
-    application: Application,
-    background_move_error: Option<String>,
+    application: Session,
+    editor_generation: u64,
     drop_trace: Option<native_workspace_application::SidebarDropTrace>,
-    published: Option<PublishedLists>,
-    path_filter: PathFilter,
-    /// The latest name filter typed, refiltered when the paths change.
-    file_filter_input: String,
+    published: Option<AppSnapshot>,
 }
 
-/// The shared lists behind the last published properties.
-struct PublishedLists {
-    search_results: Arc<Vec<SearchResult>>,
-    query_empty: bool,
-    documents: Arc<Vec<DocumentSummary>>,
-    directories: Arc<Vec<String>>,
+fn text(value: &str) -> QVariant {
+    QVariant::from(&QString::from(value))
 }
-
-impl AppControllerRust {
-    /// The paths the sidebar currently shows, shared rather than copied.
-    fn published_paths(&self) -> (Arc<Vec<DocumentSummary>>, Arc<Vec<String>>) {
-        match &self.published {
-            Some(lists) => (lists.documents.clone(), lists.directories.clone()),
-            None => {
-                let snapshot = self.application.snapshot();
-                (snapshot.documents, snapshot.directories)
-            }
-        }
-    }
+fn object<const N: usize>(fields: [(&str, QVariant); N]) -> QVariant {
+    let map: QMap<QMapPair_QString_QVariant> = fields
+        .into_iter()
+        .map(|(k, v)| (QString::from(k), v))
+        .collect();
+    QVariant::from(&map)
+}
+fn strings<'a>(values: impl Iterator<Item = &'a str>) -> QStringList {
+    values.map(QString::from).collect()
 }
 
 impl qobject::AppController {
+    fn publish(mut self: Pin<&mut Self>) {
+        let snapshot = self.rust().application.snapshot();
+        self.as_mut().update_snapshot(snapshot);
+    }
+    fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
+        let _ = self.as_mut().rust_mut().application.dispatch(command);
+        self.publish();
+    }
+    fn with_id(
+        mut self: Pin<&mut Self>,
+        value: &QString,
+        command: impl FnOnce(DocumentId) -> AppCommand,
+    ) {
+        match DocumentId::parse(value.to_string()) {
+            Ok(id) => self.dispatch(command(id)),
+            Err(_) => {
+                self.as_mut()
+                    .rust_mut()
+                    .application
+                    .report(AppError::InvalidEntryName);
+                self.publish();
+            }
+        }
+    }
+    pub fn poll(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().application.poll();
+        if self.rust().revision != self.rust().application.revision() {
+            self.publish();
+        }
+    }
+    fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
+        self.as_mut().set_snapshot_updating(true);
+        let observer = self.rust().application.diagnostic_observer();
+        let started = observer.enabled().then(std::time::Instant::now);
+        if self.rust().editor_generation != snapshot.editor_generation {
+            self.as_mut().rust_mut().editor_generation = snapshot.editor_generation;
+            self.as_mut().document_switched();
+        }
+        let (documents_changed, directories_changed, search_changed, filter_changed) = self
+            .rust()
+            .published
+            .as_ref()
+            .map_or((true, true, true, true), |last| {
+                (
+                    !Arc::ptr_eq(&last.documents, &snapshot.documents),
+                    !Arc::ptr_eq(&last.directories, &snapshot.directories),
+                    !Arc::ptr_eq(&last.search_results, &snapshot.search_results),
+                    !Arc::ptr_eq(&last.file_filter, &snapshot.file_filter),
+                )
+            });
+        if documents_changed {
+            self.as_mut()
+                .set_document_ids(strings(snapshot.documents.iter().map(|d| d.id.as_str())));
+            self.as_mut().set_dirty_document_ids(strings(
+                snapshot
+                    .documents
+                    .iter()
+                    .filter(|d| d.dirty)
+                    .map(|d| d.id.as_str()),
+            ));
+            self.as_mut().set_conflicted_document_ids(strings(
+                snapshot
+                    .documents
+                    .iter()
+                    .filter(|d| d.external_change)
+                    .map(|d| d.id.as_str()),
+            ));
+        }
+        if directories_changed {
+            self.as_mut()
+                .set_directory_ids(strings(snapshot.directories.iter().map(String::as_str)));
+        }
+        if search_changed {
+            let results = snapshot
+                .search_results
+                .iter()
+                .map(|r| {
+                    object([
+                        ("id", text(r.id.as_str())),
+                        ("snippet", text(&r.snippet)),
+                        ("line", QVariant::from(&r.location.line)),
+                        ("column", QVariant::from(&r.location.column)),
+                        ("start", QVariant::from(&r.location.start_utf16)),
+                        ("end", QVariant::from(&r.location.end_utf16)),
+                    ])
+                })
+                .collect();
+            self.as_mut().set_search_results(results);
+        }
+        if filter_changed {
+            self.as_mut()
+                .set_file_filter_query(QString::from(snapshot.file_filter.query.trim()));
+            self.as_mut().set_file_filter_files(strings(
+                snapshot.file_filter.files.iter().map(String::as_str),
+            ));
+            self.as_mut().set_file_filter_directories(strings(
+                snapshot.file_filter.directories.iter().map(String::as_str),
+            ));
+        }
+        self.as_mut()
+            .set_file_filter_in_progress(snapshot.file_filter_in_progress);
+        self.as_mut()
+            .set_search_query(QString::from(&snapshot.search_query));
+        self.as_mut()
+            .set_search_in_progress(snapshot.search_in_progress);
+        self.as_mut()
+            .set_search_truncated(snapshot.search_truncated);
+        self.as_mut()
+            .set_workspace_name(QString::from(snapshot.workspace_name().unwrap_or_default()));
+        self.as_mut().set_workspace_root(QString::from(
+            snapshot
+                .workspace_root()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ));
+        self.as_mut().set_recent_workspace_paths(strings(
+            snapshot
+                .recent_workspaces
+                .iter()
+                .map(|w| w.root.to_str().unwrap_or_default()),
+        ));
+        self.as_mut().set_recent_workspace_names(strings(
+            snapshot.recent_workspaces.iter().map(|w| w.name.as_str()),
+        ));
+        self.as_mut().set_open_document_ids(strings(
+            snapshot.open_documents.iter().map(DocumentId::as_str),
+        ));
+        self.as_mut().set_preview_document_id(QString::from(
+            snapshot
+                .preview_document
+                .as_ref()
+                .map_or("", DocumentId::as_str),
+        ));
+        if let Some(doc) = &snapshot.active_document {
+            self.as_mut()
+                .set_active_document_id(QString::from(doc.id.as_str()));
+            self.as_mut()
+                .set_active_document_text(QString::from(doc.content.as_ref()));
+            self.as_mut().set_active_document_dirty(doc.dirty);
+            self.as_mut()
+                .set_active_document_external_change(doc.external_change);
+        } else {
+            self.as_mut().set_active_document_id(QString::default());
+            self.as_mut().set_active_document_text(QString::default());
+            self.as_mut().set_active_document_dirty(false);
+            self.as_mut().set_active_document_external_change(false);
+        }
+        self.as_mut().set_pending_move_target(QString::from(
+            snapshot
+                .activity
+                .relocation
+                .as_ref()
+                .filter(|_| snapshot.activity.relocation_slow)
+                .map_or("", |r| r.target.as_str()),
+        ));
+        self.as_mut().set_move_pending(snapshot.activity.busy);
+        self.as_mut()
+            .set_deletion_pending(snapshot.activity.deleting);
+        self.as_mut()
+            .set_error_message(QString::from(snapshot.error.as_deref().unwrap_or_default()));
+        self.as_mut().set_revision(snapshot.revision);
+        self.as_mut().set_snapshot_updating(false);
+        if let Some(started) = started {
+            observer.snapshot_applied(
+                snapshot.diagnostic_operation,
+                snapshot.revision,
+                started.elapsed().as_nanos() as u64,
+            );
+        }
+        self.as_mut().rust_mut().published = Some(snapshot);
+    }
+    pub fn confirmation(self: Pin<&mut Self>, value: &QString, deleting: bool) -> QVariant {
+        let value = value.to_string();
+        let prompt = if deleting {
+            native_workspace_application::delete_confirmation(&value)
+        } else {
+            native_workspace_application::close_confirmation(&value)
+        };
+        object([
+            ("title", text(&prompt.title)),
+            ("body", text(prompt.body)),
+            ("confirm", text(prompt.confirm)),
+            ("cancel", text(prompt.cancel)),
+            ("discard", text(prompt.discard)),
+        ])
+    }
+    #[cfg(debug_assertions)]
+    pub fn delay_next_background_job(mut self: Pin<&mut Self>, milliseconds: u64) {
+        self.as_mut()
+            .rust_mut()
+            .application
+            .delay_next_background_job(std::time::Duration::from_millis(milliseconds));
+    }
+    pub fn initialize_persistence(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().application.enable_devtools("qt");
+        self.as_mut()
+            .set_devtools_available(Session::devtools_supported());
+        let _ = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .enable_persistence_default();
+        self.publish();
+    }
     pub fn diagnostic_ui_heartbeat(self: Pin<&mut Self>) {
         self.rust().application.diagnostic_observer().ui_heartbeat();
     }
@@ -217,698 +406,221 @@ impl qobject::AppController {
         self.as_mut().rust_mut().drop_trace = Some(trace);
     }
     pub fn drop_preview_hidden(self: Pin<&mut Self>) {
-        if let Some(trace) = &self.rust().drop_trace {
-            trace.preview_hidden();
+        if let Some(t) = &self.rust().drop_trace {
+            t.preview_hidden();
         }
     }
     pub fn drop_handler_finished(self: Pin<&mut Self>, accepted: bool) {
-        if let Some(trace) = &self.rust().drop_trace {
-            trace.handler_finished(accepted);
+        if let Some(t) = &self.rust().drop_trace {
+            t.handler_finished(accepted);
         }
     }
     pub fn drop_sidebar_ready(self: Pin<&mut Self>) {
-        if let Some(trace) = &self.rust().drop_trace {
-            trace.sidebar_ready();
+        if let Some(t) = &self.rust().drop_trace {
+            t.sidebar_ready();
         }
     }
-    pub fn minimap_glyphs(self: Pin<&mut Self>) -> QString {
-        use std::fmt::Write;
-        let mut encoded = String::with_capacity(384);
-        for byte in native_workspace_syntax::minimap_glyphs() {
-            write!(encoded, "{byte:02X}").expect("write into string");
-        }
-        QString::from(encoded)
+    pub fn open_devtools(mut self: Pin<&mut Self>) {
+        self.as_mut().rust_mut().application.start_devtools("qt");
+        self.rust().application.diagnostic_observer().open_console();
     }
-
-    pub fn highlight_document(self: Pin<&mut Self>, text: &QString) -> QStringList {
-        let file_name = self.rust().active_document_id.to_string();
-        let text = text.to_string();
-        native_workspace_syntax::highlight(&file_name, &text)
-            .into_iter()
-            .map(|token| {
-                QString::from(format!(
-                    "{}:{}:{}",
-                    token.start_utf16,
-                    token.end_utf16,
-                    token.kind.code()
-                ))
-            })
-            .collect()
-    }
-
-    fn dispatch(mut self: Pin<&mut Self>, command: AppCommand) {
-        self.as_mut().rust_mut().application.enable_devtools("qt");
-        self.as_mut().rust_mut().background_move_error = None;
-        let trace = self.rust().drop_trace.clone();
-        let result = if let (AppCommand::MoveEntryOptimistic { id, directory }, Some(trace)) =
-            (&command, trace)
-        {
-            self.as_mut().rust_mut().application.dispatch_sidebar_move(
-                id.clone(),
-                directory.clone(),
-                true,
-                trace,
-            )
-        } else {
-            self.as_mut().rust_mut().application.dispatch(command)
-        };
-        match result {
-            Ok(snapshot) => {
-                self.as_mut().set_error_message(QString::default());
-                self.as_mut().update_snapshot(snapshot);
-            }
-            Err(error) => {
-                let snapshot = self.rust().application.snapshot();
-                self.as_mut().update_snapshot(snapshot);
-                self.as_mut()
-                    .set_error_message(QString::from(error.to_string()));
-            }
-        }
-        self.as_mut().sync_pending_move();
-        self.as_mut().report_background_error();
-    }
-
-    fn report_background_error(mut self: Pin<&mut Self>) {
-        if let Some(error) = self.as_mut().rust_mut().application.take_background_error() {
-            self.as_mut().rust_mut().background_move_error = Some(error.clone());
-            let snapshot = self.rust().application.snapshot();
-            self.as_mut().update_snapshot(snapshot);
-            self.set_error_message(QString::from(error));
-        }
-    }
-
-    fn sync_pending_move(mut self: Pin<&mut Self>) {
-        let target = self
-            .rust()
-            .application
-            .pending_move_target()
-            .map(|id| QString::from(id.as_str()))
-            .unwrap_or_default();
-        self.as_mut().set_pending_move_target(target);
-        let pending = self.rust().application.has_pending_move();
-        self.as_mut().set_move_pending(pending);
-        let deleting = self.rust().application.deletion_pending();
-        self.as_mut().set_deletion_pending(deleting);
-    }
-
-    fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
-        self.as_mut().set_snapshot_updating(true);
-        self.as_mut().sync_pending_move();
-        let previous_id = self.rust().active_document_id.to_string();
-        let next_id = snapshot
-            .active_document
-            .as_ref()
-            .map_or("", |doc| doc.id.as_str());
-        if previous_id != next_id {
-            let relocated = snapshot.open_documents.len() as isize
-                == self.rust().open_document_ids.len()
-                && !previous_id.is_empty()
-                && !snapshot
-                    .documents
-                    .iter()
-                    .any(|doc| doc.id.as_str() == previous_id);
-            if !relocated {
-                self.as_mut().document_switched();
-            }
-        }
-        let diagnostic_started = self
-            .rust()
-            .application
-            .devtools_enabled()
-            .then(std::time::Instant::now);
-        let diagnostic_operation = snapshot.diagnostic_operation;
-        let diagnostic_revision = snapshot.revision;
-        // Snapshots share unchanged lists. Converting tens of thousands of
-        // paths to Qt strings on every update stalled the UI after each move.
-        let query_empty = snapshot.search_query.0.trim().is_empty();
-        let (search_changed, documents_changed, directories_changed) = match &self.rust().published
-        {
-            Some(last) => (
-                !Arc::ptr_eq(&last.search_results, &snapshot.search_results)
-                    || last.query_empty != query_empty,
-                !Arc::ptr_eq(&last.documents, &snapshot.documents),
-                !Arc::ptr_eq(&last.directories, &snapshot.directories),
-            ),
-            None => (true, true, true),
-        };
-        if (documents_changed || directories_changed)
-            && !self.rust().file_filter_input.trim().is_empty()
-        {
-            let query = self.rust().file_filter_input.clone();
-            let (documents, directories) =
-                (snapshot.documents.clone(), snapshot.directories.clone());
-            self.as_mut()
-                .rust_mut()
-                .path_filter
-                .queue(&query, documents, directories);
-            self.as_mut().set_file_filter_in_progress(true);
-        }
-        self.as_mut().rust_mut().published = Some(PublishedLists {
-            search_results: snapshot.search_results.clone(),
-            query_empty,
-            documents: snapshot.documents.clone(),
-            directories: snapshot.directories.clone(),
-        });
-        self.as_mut().set_revision(snapshot.revision);
-        self.as_mut().set_counter(snapshot.diagnostic_counter);
-        self.as_mut()
-            .set_search_query(QString::from(snapshot.search_query.0));
-        self.as_mut()
-            .set_search_in_progress(snapshot.search_in_progress);
-        self.as_mut()
-            .set_search_truncated(snapshot.search_truncated);
-        if search_changed {
-            // An empty query lists every document without a match to show.
-            let results: &[SearchResult] = if query_empty {
-                &[]
-            } else {
-                &snapshot.search_results
-            };
-            self.as_mut().set_search_result_ids(
-                results
-                    .iter()
-                    .map(|result| QString::from(result.id.as_str()))
-                    .collect(),
-            );
-            self.as_mut().set_search_result_snippets(
-                results
-                    .iter()
-                    .map(|result| QString::from(result.snippet.as_deref().unwrap_or("")))
-                    .collect(),
-            );
-            self.as_mut().set_search_result_lines(
-                results
-                    .iter()
-                    .map(|result| {
-                        QString::from(
-                            result
-                                .location
-                                .as_ref()
-                                .map(|location| location.line.to_string())
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-            self.as_mut().set_search_result_columns(
-                results
-                    .iter()
-                    .map(|result| {
-                        QString::from(
-                            result
-                                .location
-                                .as_ref()
-                                .map(|location| location.column.to_string())
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-            self.as_mut().set_search_result_starts(
-                results
-                    .iter()
-                    .map(|result| {
-                        QString::from(
-                            result
-                                .location
-                                .as_ref()
-                                .map(|location| location.start_utf16.to_string())
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-            self.as_mut().set_search_result_ends(
-                results
-                    .iter()
-                    .map(|result| {
-                        QString::from(
-                            result
-                                .location
-                                .as_ref()
-                                .map(|location| location.end_utf16.to_string())
-                                .unwrap_or_default(),
-                        )
-                    })
-                    .collect(),
-            );
-        }
-        self.as_mut().set_recent_workspace_paths(
-            snapshot
-                .recent_workspaces
-                .iter()
-                .map(|item| QString::from(item.root.to_string_lossy().as_ref()))
-                .collect(),
-        );
-        self.as_mut().set_recent_workspace_names(
-            snapshot
-                .recent_workspaces
-                .iter()
-                .map(|item| QString::from(item.name.as_str()))
-                .collect(),
-        );
-        self.as_mut()
-            .set_workspace_name(QString::from(snapshot.workspace_name.unwrap_or_default()));
-        self.as_mut().set_workspace_root(QString::from(
-            snapshot
-                .workspace_root
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        ));
-        if documents_changed {
-            self.as_mut().set_document_ids(
-                snapshot
-                    .documents
-                    .iter()
-                    .map(|doc| QString::from(doc.id.as_str()))
-                    .collect(),
-            );
-            self.as_mut().set_dirty_document_ids(
-                snapshot
-                    .documents
-                    .iter()
-                    .filter(|doc| doc.dirty)
-                    .map(|doc| QString::from(doc.id.as_str()))
-                    .collect(),
-            );
-            self.as_mut().set_conflicted_document_ids(
-                snapshot
-                    .documents
-                    .iter()
-                    .filter(|doc| doc.external_change)
-                    .map(|doc| QString::from(doc.id.as_str()))
-                    .collect(),
-            );
-        }
-        if directories_changed {
-            self.as_mut().set_directory_ids(
-                snapshot
-                    .directories
-                    .iter()
-                    .map(|path| QString::from(path.as_str()))
-                    .collect(),
-            );
-        }
-        self.as_mut().set_open_document_ids(
-            snapshot
-                .open_documents
-                .iter()
-                .map(|id| QString::from(id.as_str()))
-                .collect(),
-        );
-        self.as_mut().set_preview_document_id(QString::from(
-            snapshot
-                .preview_document
-                .as_ref()
-                .map_or("", |id| id.as_str()),
-        ));
-        match snapshot.active_document {
-            Some(doc) => {
-                self.as_mut()
-                    .set_active_document_id(QString::from(doc.id.as_str()));
-                self.as_mut()
-                    .set_active_document_text(QString::from(doc.content));
-                self.as_mut().set_active_document_dirty(doc.dirty);
-                self.as_mut()
-                    .set_active_document_external_change(doc.external_change);
-            }
-            None => {
-                self.as_mut().set_active_document_id(QString::default());
-                self.as_mut().set_active_document_text(QString::default());
-                self.as_mut().set_active_document_dirty(false);
-                self.as_mut().set_active_document_external_change(false);
-            }
-        }
-        self.as_mut().set_snapshot_updating(false);
-        if let Some(started) = diagnostic_started {
-            self.rust().application.diagnostic_snapshot_applied(
-                diagnostic_operation,
-                diagnostic_revision,
-                started.elapsed().as_nanos() as u64,
-            );
-        }
-    }
-
-    pub fn increment(self: Pin<&mut Self>) {
-        self.dispatch(AppCommand::IncrementDiagnostic);
-    }
-
-    /// Typing only records the query; the core's worker debounces and searches.
     pub fn search_files(self: Pin<&mut Self>, query: &QString) {
         self.dispatch(AppCommand::QueueSearchQuery(query.to_string()));
     }
-
-    /// Searches on the calling thread. For smoke tests only.
-    pub fn search_files_now(self: Pin<&mut Self>, query: &QString) {
-        self.dispatch(AppCommand::SetSearchQuery(query.to_string()));
-    }
-
-    /// Typing only records the query; `poll_file_filter` publishes the
-    /// matches once the worker has debounced and listed them.
     pub fn filter_files(mut self: Pin<&mut Self>, query: &QString) {
-        let query = query.to_string();
-        let (documents, directories) = self.rust().published_paths();
-        self.as_mut().rust_mut().file_filter_input = query.clone();
-        let ready = self
-            .as_mut()
-            .rust_mut()
-            .path_filter
-            .queue(&query, documents, directories);
-        if let Some(result) = ready {
-            self.as_mut().publish_file_filter(result);
-        }
-        let pending = self.rust().path_filter.in_progress();
-        self.set_file_filter_in_progress(pending);
-    }
-
-    /// Filters on the calling thread. For smoke tests only.
-    pub fn filter_files_now(mut self: Pin<&mut Self>, query: &QString) {
-        let query = query.to_string();
-        let (documents, directories) = self.rust().published_paths();
-        self.as_mut().rust_mut().file_filter_input = query.clone();
-        let result =
-            self.as_mut()
-                .rust_mut()
-                .path_filter
-                .filter_now(&query, documents, directories);
-        self.as_mut().publish_file_filter(result);
-        self.set_file_filter_in_progress(false);
-    }
-
-    pub fn poll_file_filter(mut self: Pin<&mut Self>) {
-        if let Some(result) = self.as_mut().rust_mut().path_filter.poll() {
-            self.as_mut().publish_file_filter(result);
-        }
-        let pending = self.rust().path_filter.in_progress();
-        self.set_file_filter_in_progress(pending);
-    }
-
-    fn publish_file_filter(mut self: Pin<&mut Self>, result: PathFilterResult) {
-        self.as_mut().set_file_filter_files(
-            result
-                .files
-                .iter()
-                .map(|path| QString::from(path.as_str()))
-                .collect(),
-        );
-        self.as_mut().set_file_filter_directories(
-            result
-                .directories
-                .iter()
-                .map(|path| QString::from(path.as_str()))
-                .collect(),
-        );
-        self.set_file_filter_query(QString::from(result.query.trim()));
-    }
-
-    pub fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString {
-        QString::from(format!(
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
-            file_icon_name(&path.to_string())
-        ))
-    }
-
-    pub fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString {
-        QString::from(format!(
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
-            folder_icon_name(&path.to_string(), expanded)
-        ))
-    }
-
-    pub fn open_devtools(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().application.start_devtools("qt");
-        self.rust().application.open_devtools();
-    }
-
-    pub fn initialize_persistence(mut self: Pin<&mut Self>) {
-        self.as_mut().rust_mut().application.enable_devtools("qt");
-        let available = self.rust().application.devtools_supported();
-        self.as_mut().set_devtools_available(available);
-        let result = self
-            .as_mut()
+        self.as_mut()
             .rust_mut()
             .application
-            .enable_persistence_default();
-        match result {
-            Ok(snapshot) => self.update_snapshot(snapshot),
-            Err(error) => self.set_error_message(QString::from(error.to_string())),
-        }
+            .filter_files(&query.to_string());
+        self.publish();
     }
-
-    pub fn open_workspace(mut self: Pin<&mut Self>, input: &QString) {
+    pub fn file_icon(self: Pin<&mut Self>, value: &QString) -> QString {
+        QString::from(format!(
+            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
+            file_icon_name(&value.to_string())
+        ))
+    }
+    pub fn folder_icon(self: Pin<&mut Self>, value: &QString, expanded: bool) -> QString {
+        QString::from(format!(
+            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
+            folder_icon_name(&value.to_string(), expanded)
+        ))
+    }
+    pub fn open_workspace(self: Pin<&mut Self>, input: &QString) {
         let url = QUrl::from_user_input(input, &QString::default());
         let path = url
             .to_local_file()
-            .map(|value| PathBuf::from(value.to_string()))
+            .map(|v| PathBuf::from(v.to_string()))
             .unwrap_or_else(|| PathBuf::from(input.to_string()));
-        self.as_mut().dispatch(AppCommand::OpenWorkspace(path));
-        #[cfg(debug_assertions)]
-        if std::env::args().any(|arg| arg.starts_with("--smoke-drag="))
-            && let Some(delay) = std::env::args().find_map(|arg| {
-                arg.strip_prefix("--smoke-drag-delay-ms=")
-                    .and_then(|ms| ms.parse::<u64>().ok())
-            })
-        {
-            self.as_mut()
-                .rust_mut()
-                .application
-                .delay_next_drop_for_smoke(std::time::Duration::from_millis(delay));
-        }
+        self.dispatch(AppCommand::OpenWorkspace(path));
     }
-
-    pub fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QStringList {
+    pub fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QList<QVariant> {
         self.rust()
             .application
+            .snapshot()
             .sidebar_children(&parent.to_string())
             .into_iter()
-            .map(|child| {
-                let kind = if child.directory { 'd' } else { 'f' };
-                QString::from(format!("{kind}{}", child.path))
+            .map(|c| {
+                object([
+                    ("path", text(&c.path)),
+                    ("directory", QVariant::from(&c.directory)),
+                ])
             })
             .collect()
     }
-
     pub fn sidebar_has_children(self: Pin<&mut Self>, parent: &QString) -> bool {
         self.rust()
             .application
+            .snapshot()
             .sidebar_has_children(&parent.to_string())
     }
-
+    pub fn sidebar_rows(
+        self: Pin<&mut Self>,
+        search: bool,
+        expanded: &QStringList,
+    ) -> QList<QVariant> {
+        let snapshot = self.rust().application.snapshot();
+        let expanded: std::collections::HashSet<_> =
+            expanded.iter().map(ToString::to_string).collect();
+        let rows = if search {
+            snapshot.search_rows()
+        } else if snapshot.file_filter.is_active() {
+            snapshot.file_filter_rows()
+        } else {
+            snapshot.file_tree_rows(|p| expanded.contains(p))
+        };
+        rows.into_iter()
+            .map(|r| {
+                object([
+                    ("path", text(&r.path)),
+                    ("directory", QVariant::from(&r.is_directory())),
+                    (
+                        "result",
+                        QVariant::from(&match r.kind {
+                            SidebarRowKind::Match { result } => result as i64,
+                            _ => -1,
+                        }),
+                    ),
+                ])
+            })
+            .collect()
+    }
+    pub fn can_move_entry(self: Pin<&mut Self>, source: &QString, directory: &QString) -> bool {
+        DocumentId::parse(source.to_string()).is_ok_and(|id| {
+            self.rust()
+                .application
+                .can_move_entry(id, directory.to_string())
+        })
+    }
     pub fn move_entry(
         mut self: Pin<&mut Self>,
-        path: &QString,
+        value: &QString,
         directory: &QString,
-        text: &QString,
+        content: &QString,
     ) {
-        let id = match DocumentId::parse(path.to_string()) {
-            Ok(id) => id,
-            Err(_) => {
-                self.set_error_message(QString::from("Invalid relative path"));
-                return;
-            }
-        };
-        let edit = DocumentId::parse(self.rust().active_document_id.to_string())
-            .ok()
-            .filter(|_| text != &self.rust().active_document_text)
-            .map(|id| (id, text.to_string()));
+        if let Ok(id) = DocumentId::parse(self.rust().active_document_id.to_string()) {
+            let _ = self
+                .as_mut()
+                .rust_mut()
+                .application
+                .dispatch(AppCommand::ChangeDocument {
+                    id,
+                    content: content.to_string(),
+                });
+        }
         let trace = self.rust().drop_trace.clone().unwrap_or_default();
-        self.as_mut().rust_mut().background_move_error = None;
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .application
-            .dispatch_sidebar_move_with_edit(id, directory.to_string(), trace, edit);
-        match result {
-            Ok(snapshot) => {
-                self.as_mut().set_error_message(QString::default());
-                self.as_mut().update_snapshot(snapshot);
-            }
-            Err(error) => self
-                .as_mut()
-                .set_error_message(QString::from(error.to_string())),
-        }
-        self.as_mut().sync_pending_move();
-        self.as_mut().report_background_error();
-    }
-
-    pub fn rename_entry(mut self: Pin<&mut Self>, path: &QString, new_name: &QString) {
-        match DocumentId::parse(path.to_string()) {
-            Ok(id) => self.as_mut().dispatch(AppCommand::RenameEntry {
-                id,
-                new_name: new_name.to_string(),
-            }),
-            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
-        }
-    }
-
-    pub fn delete_entry(mut self: Pin<&mut Self>, path: &QString) {
-        match DocumentId::parse(path.to_string()) {
-            Ok(id) => self.as_mut().dispatch(AppCommand::DeleteEntry(id)),
-            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
-        }
-    }
-
-    pub fn create_entry(mut self: Pin<&mut Self>, path: &QString, directory: bool) {
-        match DocumentId::parse(path.to_string()) {
-            Ok(id) => self
-                .as_mut()
-                .dispatch(AppCommand::CreateEntry { id, directory }),
-            Err(_) => self.set_error_message(QString::from("Invalid relative path")),
-        }
-    }
-
-    pub fn refresh_workspace(mut self: Pin<&mut Self>) {
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .application
-            .dispatch(AppCommand::RefreshWorkspace);
-        match result {
-            Ok(snapshot) if snapshot.revision != self.rust().revision => {
-                self.as_mut().set_error_message(QString::default());
-                self.update_snapshot(snapshot);
-            }
-            Ok(_) => {}
-            Err(error) => self.set_error_message(QString::from(error.to_string())),
-        }
-    }
-
-    pub fn poll_workspace_changes(mut self: Pin<&mut Self>) {
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .application
-            .dispatch_if_changed(AppCommand::PollWorkspaceChanges);
-        match result {
-            Ok(Some(snapshot)) => {
-                if self.rust().background_move_error.is_none() {
-                    self.as_mut().set_error_message(QString::default());
-                }
-                self.as_mut().update_snapshot(snapshot);
-            }
-            Ok(None) => {}
-            Err(error) => self
-                .as_mut()
-                .set_error_message(QString::from(error.to_string())),
-        }
-        self.as_mut().sync_pending_move();
-        self.as_mut().report_background_error();
-    }
-
-    pub fn poll_search_results(mut self: Pin<&mut Self>) {
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .application
-            .dispatch_if_changed(AppCommand::PollSearchResults);
-        match result {
-            Ok(Some(snapshot)) => self.as_mut().update_snapshot(snapshot),
-            Ok(None) => {}
-            Err(error) => self
-                .as_mut()
-                .set_error_message(QString::from(error.to_string())),
-        }
-        self.as_mut().sync_pending_move();
-        self.as_mut().report_background_error();
-    }
-
-    pub fn open_document(mut self: Pin<&mut Self>, id: &QString) {
-        match DocumentId::parse(id.to_string()) {
+        match DocumentId::parse(value.to_string()) {
             Ok(id) => {
-                self.as_mut().dispatch(AppCommand::OpenDocument(id));
+                let _ = self.as_mut().rust_mut().application.dispatch_traced(
+                    AppCommand::MoveEntry {
+                        id,
+                        directory: directory.to_string(),
+                    },
+                    trace,
+                );
             }
             Err(_) => self
                 .as_mut()
-                .set_error_message(QString::from("Invalid document name")),
+                .rust_mut()
+                .application
+                .report(AppError::InvalidEntryName),
         }
-        self.as_mut().sync_pending_move();
-        self.as_mut().report_background_error();
+        self.publish();
     }
-
-    pub fn preview_document(mut self: Pin<&mut Self>, id: &QString) {
-        match DocumentId::parse(id.to_string()) {
-            Ok(id) => self.as_mut().dispatch(AppCommand::PreviewDocument(id)),
-            Err(_) => self
-                .as_mut()
-                .set_error_message(QString::from("Invalid document name")),
-        }
-        self.as_mut().sync_pending_move();
-        self.as_mut().report_background_error();
+    pub fn rename_entry(self: Pin<&mut Self>, value: &QString, name: &QString) {
+        self.with_id(value, |id| AppCommand::RenameEntry {
+            id,
+            new_name: name.to_string(),
+        });
     }
-
-    pub fn keep_document_open(mut self: Pin<&mut Self>, id: &QString) {
-        match DocumentId::parse(id.to_string()) {
-            Ok(id) => self.as_mut().dispatch(AppCommand::KeepDocumentOpen(id)),
-            Err(_) => self
-                .as_mut()
-                .set_error_message(QString::from("Invalid document name")),
-        }
-        self.as_mut().report_background_error();
+    pub fn delete_entry(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::DeleteEntry);
     }
-
-    pub fn change_document(mut self: Pin<&mut Self>, text: &QString) {
-        let id = self.rust().active_document_id.to_string();
-        match DocumentId::parse(id) {
-            Ok(id) => self.dispatch(AppCommand::ChangeDocument {
-                id,
-                content: text.to_string(),
-            }),
-            Err(_) => self
-                .as_mut()
-                .set_error_message(QString::from("No document is open")),
-        }
+    pub fn create_entry(self: Pin<&mut Self>, value: &QString, directory: bool) {
+        self.with_id(value, |id| AppCommand::CreateEntry { id, directory });
     }
-
-    pub fn save_document(mut self: Pin<&mut Self>) {
-        let id = self.rust().active_document_id.to_string();
-        match DocumentId::parse(id) {
-            Ok(id) => self.dispatch(AppCommand::SaveDocument(id)),
-            Err(_) => self
-                .as_mut()
-                .set_error_message(QString::from("No document is open")),
-        }
+    pub fn refresh_workspace(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::RefreshWorkspace);
     }
-
-    pub fn reload_document(mut self: Pin<&mut Self>) {
-        let id = self.rust().active_document_id.to_string();
-        match DocumentId::parse(id) {
-            Ok(id) => self.dispatch(AppCommand::ReloadDocument(id)),
-            Err(_) => self
-                .as_mut()
-                .set_error_message(QString::from("No document is open")),
-        }
+    pub fn open_document(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::OpenDocument);
     }
-
-    pub fn discard_and_close_document(self: Pin<&mut Self>, id: &QString) {
-        if let Ok(id) = DocumentId::parse(id.to_string()) {
-            self.dispatch(AppCommand::DiscardAndCloseDocument(id));
-        }
+    pub fn preview_document(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::PreviewDocument);
     }
-    pub fn save_and_close_document(mut self: Pin<&mut Self>, id: &QString) {
-        if let Ok(id) = DocumentId::parse(id.to_string()) {
-            self.as_mut().dispatch(AppCommand::SaveDocument(id.clone()));
-            if self.rust().error_message.to_string().is_empty() {
-                self.dispatch(AppCommand::CloseDocument(id));
-            }
-        }
+    pub fn keep_document_open(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::KeepDocumentOpen);
     }
-
+    pub fn change_document(self: Pin<&mut Self>, content: &QString) {
+        let value = self.rust().active_document_id.clone();
+        self.with_id(&value, |id| AppCommand::ChangeDocument {
+            id,
+            content: content.to_string(),
+        });
+    }
+    pub fn save_document(self: Pin<&mut Self>) {
+        let value = self.rust().active_document_id.clone();
+        self.with_id(&value, AppCommand::SaveDocument);
+    }
+    pub fn reload_document(self: Pin<&mut Self>) {
+        let value = self.rust().active_document_id.clone();
+        self.with_id(&value, AppCommand::ReloadDocument);
+    }
+    pub fn overwrite_document(self: Pin<&mut Self>) {
+        let value = self.rust().active_document_id.clone();
+        self.with_id(&value, AppCommand::OverwriteDocument);
+    }
     pub fn save_all_documents(self: Pin<&mut Self>) {
         self.dispatch(AppCommand::SaveAllDocuments);
     }
-    pub fn close_document(self: Pin<&mut Self>, id: &QString) {
-        if let Ok(id) = DocumentId::parse(id.to_string()) {
-            self.dispatch(AppCommand::CloseDocument(id));
-        }
+    pub fn close_document(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::CloseDocument);
     }
-
-    pub fn overwrite_document(mut self: Pin<&mut Self>) {
-        let id = self.rust().active_document_id.to_string();
-        match DocumentId::parse(id) {
-            Ok(id) => self.dispatch(AppCommand::OverwriteDocument(id)),
-            Err(_) => self
-                .as_mut()
-                .set_error_message(QString::from("No document is open")),
-        }
+    pub fn discard_and_close_document(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::DiscardAndCloseDocument);
+    }
+    pub fn save_and_close_document(self: Pin<&mut Self>, value: &QString) {
+        self.with_id(value, AppCommand::SaveAndCloseDocument);
+    }
+    pub fn highlight_document(self: Pin<&mut Self>, content: &QString) -> QList<QVariant> {
+        native_workspace_syntax::highlight(
+            &self.rust().active_document_id.to_string(),
+            &content.to_string(),
+        )
+        .into_iter()
+        .map(|t| {
+            object([
+                ("start", QVariant::from(&(t.start_utf16 as u64))),
+                ("end", QVariant::from(&(t.end_utf16 as u64))),
+                ("kind", QVariant::from(&(t.kind.code() as u32))),
+            ])
+        })
+        .collect()
+    }
+    pub fn minimap_glyphs(self: Pin<&mut Self>) -> QList<QVariant> {
+        native_workspace_syntax::minimap_glyphs()
+            .iter()
+            .map(|v| QVariant::from(&u32::from(*v)))
+            .collect()
     }
 }

@@ -2,13 +2,24 @@ use std::{env, path::PathBuf, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=icons.gresource.xml");
-    println!("cargo:rerun-if-changed=icons/native-workspace-branch-symbolic.svg");
-    println!("cargo:rerun-if-changed=icons/native-workspace-bookmark-symbolic.svg");
-
-    println!("cargo:rerun-if-changed=icons/native-workspace-modified-symbolic.svg");
-    println!("cargo:rerun-if-changed=icons/native-workspace-save-all-symbolic.svg");
-    println!("cargo:rerun-if-changed=icons/native-workspace-new-file-symbolic.svg");
-    println!("cargo:rerun-if-changed=icons/native-workspace-quit-symbolic.svg");
+    let dependencies = Command::new("glib-compile-resources")
+        .args([
+            "--sourcedir=icons",
+            "--generate-dependencies",
+            "icons.gresource.xml",
+        ])
+        .output()
+        .expect("glib-compile-resources is required for the GNOME frontend");
+    assert!(
+        dependencies.status.success(),
+        "failed to list GNOME icon dependencies"
+    );
+    for dependency in String::from_utf8(dependencies.stdout)
+        .expect("UTF-8 icon paths")
+        .lines()
+    {
+        println!("cargo:rerun-if-changed={dependency}");
+    }
 
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"))
         .join("icons.gresource");
