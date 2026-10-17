@@ -4,6 +4,7 @@
 mod core;
 mod delete;
 mod document_tabs;
+mod external_files;
 mod search;
 mod session;
 
@@ -91,6 +92,7 @@ pub(super) fn settle(session: &mut Session) -> AppSnapshot {
 #[allow(dead_code, reason = "hooks match the operations they need")]
 pub(super) enum Operation<'a> {
     Open,
+    Resolve,
     Read(&'a DocumentId),
     SearchRead(&'a DocumentId),
     Write(&'a DocumentId),
@@ -125,6 +127,20 @@ impl WorkspaceFilesystem for TestFilesystem {
     fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError> {
         self.check(Operation::Open, path)?;
         RealFilesystem.open_workspace(path)
+    }
+    fn resolve_file(&self, path: &Path) -> Result<std::path::PathBuf, FilesystemError> {
+        self.check(Operation::Resolve, path)?;
+        RealFilesystem.resolve_file(path)
+    }
+    fn move_file(
+        &self,
+        source: &Path,
+        root: &Path,
+        target: &DocumentId,
+    ) -> Result<(), FilesystemError> {
+        let id = DocumentId::from_document_path(source.to_str().unwrap()).unwrap();
+        self.check(Operation::Rename(&id, target), root)?;
+        RealFilesystem.move_file(source, root, target)
     }
     fn read_document(&self, root: &Path, id: &DocumentId) -> Result<String, FilesystemError> {
         self.check(Operation::Read(id), root)?;

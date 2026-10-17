@@ -92,7 +92,8 @@ impl AppSnapshot {
     /// Whether the folder has any entry, without listing its children.
     pub fn sidebar_has_children(&self, parent: &str) -> bool {
         if parent.is_empty() {
-            return !self.documents.is_empty() || !self.directories.is_empty();
+            return self.documents.iter().any(|d| !d.id.is_external())
+                || !self.directories.is_empty();
         }
         let prefix = format!("{parent}/");
         let first_under = |paths: &mut dyn Iterator<Item = &str>| {
@@ -254,6 +255,10 @@ fn direct_children<T>(
         let Some(rest) = item.strip_prefix(prefix) else {
             break;
         };
+        if item.starts_with('/') {
+            index += 1;
+            continue;
+        }
         match rest.find('/') {
             None => {
                 children.push(SidebarChild {

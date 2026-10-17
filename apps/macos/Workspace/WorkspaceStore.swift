@@ -38,7 +38,7 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published private(set) var pendingRelocation: Relocation?
     @Published private(set) var relocationSlow = false
-    @Published private(set) var deletionPending = false
+    @Published private(set) var editingPaused = false
     private(set) var backendBusy = false
     private let core: WorkspaceApplication
     let diagnosticsEnabled: Bool
@@ -94,6 +94,15 @@ final class WorkspaceStore: ObservableObject {
     }
     func sidebarDropRowReady(_ path: String) {
         if sidebarDropTarget == path { sidebarDropTrace?.sidebarReady() }
+    }
+    func canMoveFiles(_ urls: [URL], directory: String) -> Bool {
+        core.canMoveFiles(paths: urls.map(\.path), directory: directory)
+    }
+    @discardableResult func moveFiles(_ urls: [URL], directory: String) -> Bool {
+        request { try core.moveFiles(paths: urls.map(\.path), directory: directory) }
+    }
+    @discardableResult func openFiles(_ urls: [URL]) -> Bool {
+        request { try core.openFiles(paths: urls.map(\.path)) }
     }
     func canMoveEntry(_ source: String, directory: String) -> Bool {
         core.canMoveEntry(path: source, directory: directory)
@@ -214,7 +223,7 @@ final class WorkspaceStore: ObservableObject {
         let content = snapshot.activeDocument?.content ?? ""
         if content != editorText { editorContentRevision &+= 1; editorText = content }
         backendBusy = snapshot.activity.busy
-        if deletionPending != snapshot.activity.deleting { deletionPending = snapshot.activity.deleting }
+        if editingPaused != snapshot.activity.editingPaused { editingPaused = snapshot.activity.editingPaused }
         if pendingRelocation != snapshot.activity.relocation { pendingRelocation = snapshot.activity.relocation }
         if relocationSlow != snapshot.activity.relocationSlow { relocationSlow = snapshot.activity.relocationSlow }
         if fileFilterQuery != snapshot.fileFilterQuery { fileFilterQuery = snapshot.fileFilterQuery }

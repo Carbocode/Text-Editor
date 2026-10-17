@@ -1099,11 +1099,109 @@ pub(super) fn run(widgets: Widgets<'_>) {
                     .expect("native tabs screenshot");
             }
         }
+        external_file_drops(ui);
         if std::env::var_os("NATIVE_WORKSPACE_SMOKE_RECORD_DROP").is_some() {
             let app = app.clone();
             glib::timeout_add_local_once(std::time::Duration::from_secs(1), move || app.quit());
         } else {
             app.quit();
         }
+    }
+}
+
+fn external_file_drops(ui: &Ui) {
+    fn target(widget: &gtk::Widget, name: Option<&str>) -> Option<gtk::DropTarget> {
+        let found = widget
+            .observe_controllers()
+            .iter::<glib::Object>()
+            .filter_map(Result::ok)
+            .filter_map(|object| object.downcast::<gtk::DropTarget>().ok())
+            .find(|target| name.is_none_or(|name| target.name().as_deref() == Some(name)));
+        if found.is_some() {
+            return found;
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if let Some(found) = target(&widget, name) {
+                return Some(found);
+            }
+            child = widget.next_sibling();
+        }
+        None
+    }
+    let outside = std::env::temp_dir().join(format!(
+        "native-workspace-external-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&outside).unwrap();
+    let path = outside.join("external drop ü.txt");
+    std::fs::write(&path, "external saved").unwrap();
+    let files = gtk::gdk::FileList::from_array(&[gtk::gio::File::for_path(&path)]);
+    let value = glib::BoxedValue(files.to_value());
+    let open =
+        target(ui.window.upcast_ref(), Some("os-files-open")).expect("editor file drop target");
+    assert!(open.emit_by_name::<bool>("drop", &[&value, &0f64, &0f64]));
+    // The real drop callback dispatches from the next GTK main-loop turn.
+    let expected = std::fs::canonicalize(&path).unwrap();
+    finish_external_drop(ui, expected.to_str().unwrap());
+    let external = ui.snapshot.borrow().active_id().unwrap().clone();
+    assert!(external.is_external());
+    assert_eq!(
+        ui.buffer
+            .text(&ui.buffer.start_iter(), &ui.buffer.end_iter(), false),
+        "external saved"
+    );
+    ui.buffer.set_text("external edited");
+    let generation = ui.snapshot.borrow().editor_generation;
+    let move_target =
+        target(ui.sidebar().scroll.upcast_ref(), None).expect("tree file drop target");
+    assert!(move_target.emit_by_name::<bool>("drop", &[&value, &0f64, &0f64]));
+    finish_external_drop(ui, "external drop ü.txt");
+    let snapshot = ui.snapshot.borrow().clone();
+    assert_eq!(
+        snapshot.active_id().unwrap().as_str(),
+        "external drop ü.txt"
+    );
+    assert_eq!(snapshot.editor_generation, generation);
+    assert!(snapshot.active_document.as_ref().unwrap().dirty);
+    assert!(!path.exists());
+    ui.dispatch(AppCommand::SaveAllDocuments);
+    let root = snapshot.workspace_root().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("external drop ü.txt")).unwrap(),
+        "external edited"
+    );
+    // A repeated drop must reject the collision before touching the source.
+    std::fs::write(&path, "second source").unwrap();
+    assert!(!move_target.emit_by_name::<bool>("drop", &[&value, &0f64, &0f64]));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "second source");
+    std::fs::remove_dir_all(outside).unwrap();
+    println!("GTK external FileList drop/open/move/dirty-buffer/collision smoke test passed");
+}
+
+fn finish_external_drop(ui: &Ui, expected: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        glib::MainContext::default().iteration(false);
+        ui.poll_core();
+        let snapshot = ui.snapshot.borrow();
+        if !snapshot.activity.busy
+            && snapshot
+                .active_id()
+                .is_some_and(|id| id.as_str() == expected)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "External drop did not finish: {:?}",
+            snapshot.error
+        );
+        drop(snapshot);
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }

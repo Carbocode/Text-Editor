@@ -7,6 +7,9 @@ use std::{
     time::Duration,
 };
 
+type FileDropValidator = Rc<dyn Fn(&[std::path::PathBuf], &str) -> bool>;
+type FileDropHandler = Rc<dyn Fn(Vec<std::path::PathBuf>, String)>;
+
 type MoveValidator = Rc<dyn Fn(&str, &str) -> bool>;
 
 #[derive(Clone)]
@@ -16,6 +19,8 @@ pub struct Callbacks {
     pub delete: Rc<dyn Fn(String)>,
     pub move_entry: Rc<dyn Fn(String, String) -> bool>,
     pub can_move: MoveValidator,
+    pub can_move_files: FileDropValidator,
+    pub move_files: FileDropHandler,
     pub expand: Rc<dyn Fn(&str) -> bool>,
     pub collapse: Rc<dyn Fn(&str)>,
 }
@@ -30,6 +35,7 @@ pub struct Interactions {
     drop_widgets: RefCell<Vec<glib::WeakRef<gtk::Box>>>,
     dragged: RefCell<Option<String>>,
     active_drag: RefCell<Option<gdk::Drag>>,
+    external_paths: RefCell<Vec<std::path::PathBuf>>,
     hovered: RefCell<Option<String>>,
     hover_widget: RefCell<Option<glib::WeakRef<gtk::Box>>>,
     expand_timer: RefCell<Option<glib::SourceId>>,
@@ -112,6 +118,7 @@ impl Interactions {
     }
 
     pub fn finish_drag(&self) {
+        self.external_paths.borrow_mut().clear();
         self.finish_drag_to(None);
     }
 
@@ -218,6 +225,13 @@ impl Interactions {
     }
 
     fn can_drop(&self, directory: &str) -> bool {
+        if !self.external_paths.borrow().is_empty() {
+            return self
+                .callbacks
+                .borrow()
+                .as_ref()
+                .is_some_and(|c| (c.can_move_files)(&self.external_paths.borrow(), directory));
+        }
         let source = self.dragged.borrow().clone();
         let callbacks = self.callbacks.borrow().clone();
         match (source, callbacks) {
@@ -565,7 +579,96 @@ impl Interactions {
         self.attach_drop(widget, "", false);
     }
 
+    pub fn attach_external_drop(
+        self: &Rc<Self>,
+        widget: &impl IsA<gtk::Widget>,
+        directory: &str,
+        folder: bool,
+    ) {
+        let target = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::MOVE);
+        target.set_preload(true);
+        let state = self.clone();
+        let path = directory.to_owned();
+        let weak = widget.as_ref().downgrade();
+        let feedback = Rc::new(move |target: &gtk::DropTarget| {
+            let Some(files) = target.value_as::<gdk::FileList>() else {
+                return gdk::DragAction::empty();
+            };
+            let Some(paths) = file_paths(&files) else {
+                return gdk::DragAction::empty();
+            };
+            state.external_paths.replace(paths);
+            let valid = state.hover(&path, folder);
+            if let Some(widget) = weak.upgrade() {
+                widget.remove_css_class("sidebar-drop-valid");
+                widget.remove_css_class("sidebar-drop-invalid");
+                widget.add_css_class(if valid {
+                    "sidebar-drop-valid"
+                } else {
+                    "sidebar-drop-invalid"
+                });
+            }
+            if valid {
+                gdk::DragAction::MOVE
+            } else {
+                gdk::DragAction::empty()
+            }
+        });
+        let motion = feedback.clone();
+        target.connect_motion(move |target, _, _| motion(target));
+        let enter = feedback.clone();
+        target.connect_enter(move |target, _, _| enter(target));
+        target.connect_value_notify(move |target| {
+            feedback(target);
+        });
+        let state = self.clone();
+        let path = directory.to_owned();
+        let weak = widget.as_ref().downgrade();
+        target.connect_leave(move |_| {
+            state.leave(&path);
+            if let Some(widget) = weak.upgrade() {
+                widget.remove_css_class("sidebar-drop-valid");
+                widget.remove_css_class("sidebar-drop-invalid");
+            }
+            let state = state.clone();
+            glib::timeout_add_local_once(Duration::from_millis(80), move || {
+                if state.hovered.borrow().is_none() {
+                    state.finish_drag();
+                }
+            });
+        });
+        let state = self.clone();
+        let path = directory.to_owned();
+        target.connect_drop(move |_, value, _, _| {
+            let Ok(files) = value.get::<gdk::FileList>() else {
+                return false;
+            };
+            let Some(paths) = file_paths(&files) else {
+                return false;
+            };
+            let callbacks = state.callbacks.borrow().clone();
+            let Some(callbacks) = callbacks else {
+                return false;
+            };
+            if !(callbacks.can_move_files)(&paths, &path) {
+                return false;
+            }
+            state.restore_temporary_folders(Some(&path));
+            if !path.is_empty() {
+                (callbacks.expand)(&path);
+            }
+            state.temporary_folders.borrow_mut().clear();
+            state.finish_drag();
+            let directory = path.clone();
+            // Leave GTK's drop emission before replacing the row model.
+            glib::idle_add_local_once(move || (callbacks.move_files)(paths, directory));
+            true
+        });
+        widget.add_controller(target);
+    }
+
     fn attach_drop(self: &Rc<Self>, widget: &gtk::Box, directory: &str, folder: bool) {
+        self.attach_external_drop(widget, directory, folder);
         self.drop_widgets
             .borrow_mut()
             .retain(|widget| widget.upgrade().is_some());
@@ -652,6 +755,12 @@ impl Interactions {
     }
 }
 
+/// URI decoding belongs to GDK; only local files cross the application port.
+pub fn file_paths(files: &gdk::FileList) -> Option<Vec<std::path::PathBuf>> {
+    let paths: Option<Vec<_>> = files.files().iter().map(|file| file.path()).collect();
+    paths.filter(|paths| !paths.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +789,8 @@ mod tests {
                 recorded_moves.borrow_mut().push((source, directory));
                 true
             }),
+            can_move_files: Rc::new(|_, _| false),
+            move_files: Rc::new(|_, _| {}),
             can_move: Rc::new(|source, directory| source != directory),
             expand: Rc::new(move |directory| {
                 recorded.borrow_mut().push(directory.to_owned());
@@ -703,6 +814,8 @@ mod tests {
             rename: Rc::new(|_, _| true),
             delete: Rc::new(|_| {}),
             move_entry: Rc::new(|_, _| true),
+            can_move_files: Rc::new(|_, _| false),
+            move_files: Rc::new(|_, _| {}),
             can_move: Rc::new(|_, _| true),
             expand: Rc::new(move |path| expanded_open.borrow_mut().insert(path.into())),
             collapse: Rc::new(move |path| {

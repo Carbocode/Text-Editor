@@ -683,12 +683,43 @@ pub(super) fn build_window(app: &adw::Application) {
                 ui.queue_file_filter(search.text().as_str());
             });
     }
+    {
+        let target = gtk::DropTarget::new(
+            gtk::gdk::FileList::static_type(),
+            gtk::gdk::DragAction::COPY,
+        );
+        target.set_name(Some("os-files-open"));
+        target.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let ui = ui.clone();
+        target.connect_drop(move |_, value, _, _| {
+            let Ok(files) = value.get::<gtk::gdk::FileList>() else {
+                return false;
+            };
+            let Some(paths) = sidebar_interactions::file_paths(&files) else {
+                return false;
+            };
+            let ui = ui.clone();
+            glib::idle_add_local_once(move || {
+                let _ = ui.core.borrow_mut().dispatch(AppCommand::OpenFiles(paths));
+                ui.render_current();
+            });
+            true
+        });
+        content_view.add_controller(target);
+    }
+    for sidebar in &ui.sidebars {
+        sidebar
+            .interactions
+            .attach_external_drop(&sidebar.scroll, "", false);
+    }
     for sidebar in &ui.sidebars {
         let rename_ui = ui.clone();
         let delete_ui = ui.clone();
         let move_ui = ui.clone();
         let trace_ui = ui.clone();
         let validate_ui = ui.clone();
+        let external_validate_ui = ui.clone();
+        let external_move_ui = ui.clone();
         let expand_ui = ui.clone();
         let collapse_ui = ui.clone();
         sidebar
@@ -766,6 +797,19 @@ pub(super) fn build_window(app: &adw::Application) {
                             false
                         }
                     }
+                }),
+                can_move_files: Rc::new(move |paths, directory| {
+                    external_validate_ui
+                        .core
+                        .borrow()
+                        .can_move_files(paths, directory)
+                }),
+                move_files: Rc::new(move |paths, directory| {
+                    let _ = external_move_ui
+                        .core
+                        .borrow_mut()
+                        .dispatch(AppCommand::MoveFiles { paths, directory });
+                    external_move_ui.render_current();
                 }),
                 can_move: Rc::new(move |source, directory| {
                     DocumentId::parse(source).is_ok_and(|id| {

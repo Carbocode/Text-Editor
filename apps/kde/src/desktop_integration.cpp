@@ -1,5 +1,6 @@
 #include "desktop_integration.h"
 #include "../tests/cursor_probe.h"
+#include "../tests/file_drop_probe.h"
 
 #include <KColorSchemeManager>
 #include <QEvent>
@@ -45,6 +46,10 @@ extern "C" void configure_kde_desktop() {
     // TreeModel's QML helpers accept role names. The built-in tree editor uses
     // QAbstractItemModel's numeric roles, exposed unchanged by this Qt proxy.
     qmlRegisterType<QIdentityProxyModel>("org.nativeworkspace.Editor", 1, 0, "NativeTreeModel");
+    if (QGuiApplication::arguments().join(QChar(' ')).contains(QStringLiteral("--smoke-external="))) {
+        qmlRegisterSingletonType<FileDropProbe>("org.nativeworkspace.Test", 1, 0, "FileDropProbe",
+            [](QQmlEngine*, QJSEngine*) -> QObject* { return new FileDropProbe; });
+    }
     if (QGuiApplication::arguments().join(QChar(' ')).contains(QStringLiteral("--smoke-cursors="))) {
         qmlRegisterSingletonType<CursorProbe>("org.nativeworkspace.Test", 1, 0, "CursorProbe",
             [](QQmlEngine*, QJSEngine*) -> QObject* { return new CursorProbe; });

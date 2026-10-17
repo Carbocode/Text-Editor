@@ -72,6 +72,39 @@ The shared deletion tests cover inactive unsaved descendants, unrelated dirty bu
 
 In each frontend, open a workspace without opening a document. The editor area must show **No Document Open**, an **Open Folder…** action and keyboard shortcuts, with no text caret, line numbers or minimap. Resize the window to its minimum size and verify that the hub remains readable by scrolling. Open a file from the sidebar: the hub must give way to the editor. Close the last tab and verify that the hub returns; repeat after deleting the last clean open file. The sidebar must remain usable throughout. Check the displayed Open Folder, Save and Save All shortcuts (Command on macOS, Control on Linux, including GTK/Qt when running on macOS); Save shortcuts apply after opening/editing documents.
 
+## OS file drop verification
+
+With a disposable workspace open, drag several local files (including a name with
+spaces/Unicode and two files with the same basename) from the file manager onto
+the editor and tab strip. They must open as permanent, independently editable
+tabs. The workspace tree and search must not list external tabs. Edit an external
+file, save it and check its original disk path. Change it on disk and verify that
+Save refuses the conflict until explicit reload or overwrite.
+
+Drop external files onto folder/file rows and empty tree background. Verify the
+destination highlight, 450 ms closed-folder expansion and cancellation cleanup.
+A file row uses its parent; background uses the root. Moving an open dirty external
+file must preserve its text, tab and native editor identity, then save at the new
+location. Editing pauses during transfer. Repeat with a name collision, a missing
+source, a read-only destination, a symlink leaf and files on different filesystems:
+failures must retain the source and buffers, never overwrite destinations, and
+show the core error. Earlier successful moves in a batch remain visible.
+
+The GNOME workspace smoke includes native FileList drop signals through the same
+asynchronous callbacks as the app. The macOS pointer smoke sends AppKit file URL
+drags to the SwiftUI drop delegate, and WorkspaceStoreSmoke checks external
+buffers and moves through UniFFI. KDE's native URI-list smoke is:
+
+```sh
+target/debug/native-workspace-kde --smoke-external=/path/to/disposable-workspace \
+  --smoke-external-source=/path/to/external-file
+```
+
+The workspace must contain `src/main.rs`; the external source must be a disposable
+UTF-8 regular file. The smoke sends native drag events through QQuickWindow,
+checks folder expansion and moves the edited source into `src`. Run on supported
+native desktops; macOS toolkit checks do not verify Linux file-manager integration.
+
 ## Document tabs verification
 
 Open three files in a different order from their sidebar order. Tabs must keep the order in which they were opened; reopening a tab selects it without duplicating it. Edit two files and switch between them: both buffers and dirty markers must remain intact. Close an inactive clean tab and confirm that the active document stays selected. Close the active tab and confirm that its right neighbor (or the last remaining tab) becomes active.

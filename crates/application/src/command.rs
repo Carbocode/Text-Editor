@@ -12,6 +12,18 @@ use std::path::PathBuf;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppCommand {
     OpenWorkspace(PathBuf),
+    /// Open OS files permanently. Successful earlier files survive a later failure.
+    OpenFiles(Vec<PathBuf>),
+    OpenFile(PathBuf),
+    /// Move OS files into a workspace folder, never replacing a destination.
+    MoveFiles {
+        paths: Vec<PathBuf>,
+        directory: String,
+    },
+    MoveFile {
+        path: PathBuf,
+        directory: String,
+    },
     /// Rescan the tree and reconcile open buffers with the disk.
     RefreshWorkspace,
     /// Collect watcher events and finished background scans.
@@ -68,7 +80,7 @@ pub enum Schedule {
     /// On the session worker; the published state moves immediately.
     Relocation,
     /// On the session worker; editing pauses until it finishes.
-    Deletion,
+    Exclusive,
     /// On the session worker; nothing is projected.
     Background,
 }
@@ -90,6 +102,10 @@ impl AppCommand {
     pub(crate) fn diagnostic_name(&self) -> &'static str {
         match self {
             Self::OpenWorkspace(_) => "command.workspace_open",
+            Self::OpenFiles(_) => "command.files_open",
+            Self::OpenFile(_) => "command.file_open",
+            Self::MoveFiles { .. } => "command.files_move",
+            Self::MoveFile { .. } => "command.file_move",
             Self::RefreshWorkspace => "command.workspace_refresh",
             Self::PollWorkspaceChanges => "command.workspace_poll",
             Self::QueueSearchQuery(_) => "command.search_input",
@@ -119,7 +135,17 @@ impl AppCommand {
         let folder =
             |directory: String| path::rebase(&directory, from.as_str(), to.as_str()).into_owned();
         match self {
-            Self::OpenWorkspace(_)
+            Self::MoveFiles { paths, directory } => Self::MoveFiles {
+                paths,
+                directory: folder(directory),
+            },
+            Self::MoveFile { path, directory } => Self::MoveFile {
+                path,
+                directory: folder(directory),
+            },
+            Self::OpenFiles(_)
+            | Self::OpenFile(_)
+            | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
@@ -184,7 +210,11 @@ impl AppCommand {
                     target,
                 }))
             }
-            Self::OpenWorkspace(_)
+            Self::OpenFiles(_)
+            | Self::OpenFile(_)
+            | Self::MoveFiles { .. }
+            | Self::MoveFile { .. }
+            | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
@@ -210,6 +240,17 @@ impl AppCommand {
     /// its own so a failure never hides earlier successful steps.
     pub(crate) fn steps(&self, dirty_tabs: impl FnOnce() -> Vec<DocumentId>) -> Option<Vec<Self>> {
         match self {
+            Self::OpenFiles(paths) => Some(paths.iter().cloned().map(Self::OpenFile).collect()),
+            Self::MoveFiles { paths, directory } => Some(
+                paths
+                    .iter()
+                    .cloned()
+                    .map(|path| Self::MoveFile {
+                        path,
+                        directory: directory.clone(),
+                    })
+                    .collect(),
+            ),
             Self::SaveAllDocuments => {
                 Some(dirty_tabs().into_iter().map(Self::SaveDocument).collect())
             }
@@ -217,7 +258,9 @@ impl AppCommand {
                 Self::SaveDocument(id.clone()),
                 Self::CloseDocument(id.clone()),
             ]),
-            Self::OpenWorkspace(_)
+            Self::OpenFile(_)
+            | Self::MoveFile { .. }
+            | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
@@ -243,11 +286,15 @@ impl AppCommand {
     /// buffer or changing the tree makes disk content authoritative again.
     pub(crate) fn researches(&self) -> bool {
         match self {
-            Self::RefreshWorkspace
+            Self::MoveFiles { .. }
+            | Self::MoveFile { .. }
+            | Self::RefreshWorkspace
             | Self::DeleteEntry(_)
             | Self::CloseDocument(_)
             | Self::DiscardAndCloseDocument(_) => true,
-            Self::OpenWorkspace(_)
+            Self::OpenFiles(_)
+            | Self::OpenFile(_)
+            | Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
             | Self::PollSearchResults
@@ -270,8 +317,10 @@ impl AppCommand {
     pub(crate) fn schedule(&self) -> Schedule {
         match self {
             Self::RenameEntry { .. } | Self::MoveEntry { .. } => Schedule::Relocation,
-            Self::DeleteEntry(_) => Schedule::Deletion,
-            Self::RefreshWorkspace => Schedule::Background,
+            Self::MoveFiles { .. } | Self::MoveFile { .. } | Self::DeleteEntry(_) => {
+                Schedule::Exclusive
+            }
+            Self::OpenFiles(_) | Self::OpenFile(_) | Self::RefreshWorkspace => Schedule::Background,
             Self::OpenWorkspace(_)
             | Self::PollWorkspaceChanges
             | Self::QueueSearchQuery(_)
@@ -294,18 +343,22 @@ impl AppCommand {
 
     /// Policy while the worker runs a command scheduled as `running`.
     pub(crate) fn while_busy(&self, running: Schedule) -> BusyPolicy {
-        let deleting = running == Schedule::Deletion;
+        let exclusive = running == Schedule::Exclusive;
         match self {
             Self::PollWorkspaceChanges | Self::PollSearchResults => BusyPolicy::Skip,
-            // Deletion may remove the edited document, so editing pauses.
-            Self::ChangeDocument { .. } if deleting => BusyPolicy::Reject,
+            // Exclusive operations may remove or relocate the edited document.
+            Self::ChangeDocument { .. } if exclusive => BusyPolicy::Reject,
             Self::ChangeDocument { .. } => BusyPolicy::ProjectEdit,
             // Destructive or relocating commands never queue behind another.
-            Self::DeleteEntry(_) | Self::RenameEntry { .. } | Self::MoveEntry { .. } => {
-                BusyPolicy::Reject
-            }
-            _ if deleting => BusyPolicy::Reject,
-            Self::OpenWorkspace(_)
+            Self::MoveFiles { .. }
+            | Self::MoveFile { .. }
+            | Self::DeleteEntry(_)
+            | Self::RenameEntry { .. }
+            | Self::MoveEntry { .. } => BusyPolicy::Reject,
+            _ if exclusive => BusyPolicy::Reject,
+            Self::OpenFiles(_)
+            | Self::OpenFile(_)
+            | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace
             | Self::QueueSearchQuery(_)
             | Self::CreateEntry { .. }

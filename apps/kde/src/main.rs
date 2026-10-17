@@ -43,6 +43,10 @@ fn main() -> std::process::ExitCode {
                 || a.starts_with("--benchmark-workspace=")
         }) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/WorkspaceSmoke.qml"
+    } else if cfg!(debug_assertions)
+        && std::env::args().any(|argument| argument.starts_with("--smoke-external="))
+    {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/ExternalDropSmoke.qml"
     } else if std::env::args().any(|argument| argument.starts_with("--smoke-cursors=")) {
         "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/CursorSmoke.qml"
     } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar-layout=")) {

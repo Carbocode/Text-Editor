@@ -110,6 +110,9 @@ fn filter_paths(job: &Job, cancelled: impl Fn() -> bool) -> Option<PathFilterRes
         if index % 1024 == 0 && cancelled() {
             return None;
         }
+        if document.id.is_external() {
+            continue;
+        }
         let entry = document.id.as_str();
         if name_matches(entry) {
             files.push(entry.to_owned());

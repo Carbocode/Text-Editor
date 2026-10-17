@@ -54,13 +54,15 @@ fn main() {
             .qml_file("tests/SidebarLayoutSmoke.qml")
             .qml_file("tests/CursorSmoke.qml")
             .qml_file("tests/AppearanceSmoke.qml")
-            .qml_file("tests/DragSmoke.qml"),
+            .qml_file("tests/DragSmoke.qml")
+            .qml_file("tests/ExternalDropSmoke.qml"),
     )
     .qrc_resources(QResources::new().resource(resources))
     .qt_module("Network")
     .qt_module("Quick")
     .cpp_files([
         "tests/cursor_probe.h",
+        "tests/file_drop_probe.h",
         "src/syntax_highlighter.h",
         "src/syntax_highlighter.cpp",
         "src/search_results_model.h",

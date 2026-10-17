@@ -61,8 +61,8 @@ pub struct Activity {
     pub relocation: Option<Relocation>,
     /// The relocation has taken long enough to show a progress indicator.
     pub relocation_slow: bool,
-    /// A deletion runs; editing is paused until it finishes.
-    pub deleting: bool,
+    /// A deletion or OS file transfer runs; editing pauses until it finishes.
+    pub editing_paused: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,7 +73,7 @@ pub struct AppSnapshot {
     pub revision: u64,
     pub workspace: Option<Workspace>,
     pub recent_workspaces: Vec<RecentWorkspace>,
-    /// Workspace files and folders, sorted by path.
+    /// Workspace files and open external documents, sorted by identity.
     pub documents: Arc<Vec<DocumentSummary>>,
     pub directories: Arc<Vec<String>>,
     pub search_query: String,

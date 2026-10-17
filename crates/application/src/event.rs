@@ -43,6 +43,9 @@ pub enum AppEvent {
         finished: bool,
         truncated: bool,
     },
+    DocumentAdded {
+        id: DocumentId,
+    },
     DocumentLoaded {
         id: DocumentId,
         content: Arc<str>,
@@ -91,6 +94,7 @@ impl AppEvent {
                 ("search.results_applied", results.len() as u64)
             }
             Self::DocumentLoaded { content, .. } => ("document.loaded_bytes", content.len() as u64),
+            Self::DocumentAdded { .. } => ("document.added", 0),
             Self::DocumentOpened { .. } => ("document.opened", 0),
             Self::DocumentPreviewed { .. } => ("document.previewed", 0),
             Self::DocumentKeptOpen { .. } => ("document.kept_open", 0),
@@ -116,6 +120,7 @@ impl AppEvent {
             | Self::SearchQueryQueued { .. }
             | Self::SearchStarted
             | Self::SearchResultsUpdated { .. }
+            | Self::DocumentAdded { .. }
             | Self::DocumentOpened { .. }
             | Self::DocumentPreviewed { .. }
             | Self::DocumentKeptOpen { .. }

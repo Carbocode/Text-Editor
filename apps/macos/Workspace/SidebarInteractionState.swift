@@ -8,6 +8,7 @@ final class SidebarDragState: ObservableObject {
     @Published private(set) var directory: String?
     @Published private(set) var valid = false
     @Published private(set) var source: String?
+    private(set) var externalURLs: [URL] = []
     private var hoverToken = UUID()
     private var leaveToken = UUID()
     private var temporaryFolders: [String: () -> Void] = [:]
@@ -37,6 +38,12 @@ final class SidebarDragState: ObservableObject {
         }
         dragWatchdog = timer
         RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func beginExternal(_ urls: [URL]) {
+        if externalURLs == urls { return }
+        begin("external-file-drop")
+        externalURLs = urls
     }
 
     /// Enter/motion share a folder deadline. Native exit/enter pairs caused by
@@ -98,6 +105,7 @@ final class SidebarDragState: ObservableObject {
         dragWatchdog = nil
         releasedAt = nil
         source = nil
+        externalURLs = []
         hoverToken = UUID()
         leaveToken = UUID()
         if directory != nil { directory = nil }
