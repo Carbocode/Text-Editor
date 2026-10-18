@@ -3694,6 +3694,7 @@ dependencies = [
  "native-workspace-application",
  "native-workspace-domain",
  "native-workspace-syntax",
+ "pango",
  "pangocairo",
 ]
 

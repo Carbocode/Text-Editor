@@ -1,11 +1,21 @@
 //! Native GTK terminal presentation; PTY, emulation and tabs live in Session.
 use adw::prelude::*;
+use gtk::pango;
 use gtk::{gdk, glib};
 use native_workspace_application::{
-    Session, TerminalCommand as Command, TerminalInput as Input, TerminalKey, TerminalSnapshot,
-    terminal_close_confirmation,
+    Session, TerminalCommand as Command, TerminalFont, TerminalInput as Input, TerminalKey,
+    TerminalSnapshot, terminal_close_confirmation, terminal_font,
 };
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::Path,
+    rc::Rc,
+    sync::Arc,
+};
+
+const PADDING_X: f64 = 6.;
+const PADDING_Y: f64 = 4.;
 
 #[derive(Clone)]
 pub struct TerminalPanel {
@@ -21,6 +31,97 @@ pub struct TerminalPanel {
     #[cfg(debug_assertions)]
     keys: gtk::EventControllerKey,
 }
+/// Pango loads app fonts from files, so the core's faces are cached by content.
+fn write_face(path: &Path, face: &[u8]) -> std::io::Result<()> {
+    if path.is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path.parent().expect("font cache directory"))?;
+    let partial = path.with_extension(format!("{}.partial", std::process::id()));
+    std::fs::write(&partial, face)?;
+    std::fs::rename(partial, path)
+}
+
+/// Pango's CoreText font map cannot add files; fonts registered for the process appear in it.
+#[cfg(target_os = "macos")]
+fn add_face(_: &pango::FontMap, path: &Path) -> Result<(), String> {
+    use std::{ffi::c_void, os::unix::ffi::OsStrExt};
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFURLCreateFromFileSystemRepresentation(
+            allocator: *const c_void,
+            path: *const u8,
+            length: isize,
+            directory: u8,
+        ) -> *const c_void;
+        fn CFRelease(value: *const c_void);
+    }
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        fn CTFontManagerRegisterFontsForURL(
+            url: *const c_void,
+            scope: u32,
+            error: *mut *const c_void,
+        ) -> u8;
+    }
+    const PROCESS_SCOPE: u32 = 1;
+    // Registration is process-wide; later windows reuse it.
+    static REGISTERED: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut registered_paths = REGISTERED.lock().map_err(|error| error.to_string())?;
+    if registered_paths.iter().any(|known| known == path) {
+        return Ok(());
+    }
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: the URL is created from a live path buffer and released after registration.
+    let registered = unsafe {
+        let url = CFURLCreateFromFileSystemRepresentation(
+            std::ptr::null(),
+            bytes.as_ptr(),
+            bytes.len() as isize,
+            0,
+        );
+        if url.is_null() {
+            return Err("invalid font path".into());
+        }
+        let registered = CTFontManagerRegisterFontsForURL(url, PROCESS_SCOPE, std::ptr::null_mut());
+        CFRelease(url);
+        registered != 0
+    };
+    if !registered {
+        return Err("CoreText rejected the font".into());
+    }
+    registered_paths.push(path.to_owned());
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn add_face(map: &pango::FontMap, path: &Path) -> Result<(), String> {
+    use pango::prelude::FontMapExt;
+    map.add_font_file(path).map_err(|error| error.to_string())
+}
+
+/// The bundled terminal faces with the system fonts as fallbacks for other glyphs.
+fn terminal_font_map(font: &TerminalFont) -> pango::FontMap {
+    let map: pango::FontMap = pangocairo::FontMap::new();
+    let directory = glib::user_cache_dir().join("native-workspace/fonts");
+    for face in font.faces {
+        let mut hasher = DefaultHasher::new();
+        face.hash(&mut hasher);
+        let path = directory.join(format!("terminal-{:016x}.ttf", hasher.finish()));
+        let added = write_face(&path, face)
+            .map_err(|error| error.to_string())
+            .and_then(|()| add_face(&map, &path));
+        if let Err(error) = added {
+            eprintln!("Bundled terminal font unavailable: {error}");
+        }
+    }
+    // CoreText font maps list families when created, so take one after registration.
+    #[cfg(target_os = "macos")]
+    let map = pangocairo::FontMap::new().upcast();
+    map
+}
+
 fn dispatch(core: &RefCell<Session>, command: Command) {
     let result = core.borrow_mut().terminal_command(command);
     if let Err(error) = result {
@@ -85,6 +186,8 @@ impl TerminalPanel {
         surface.set_hexpand(true);
         surface.set_vexpand(true);
         surface.set_content_height(200);
+        let font = terminal_font();
+        surface.set_font_map(Some(&terminal_font_map(&font)));
         let status = gtk::Label::new(None);
         let state = Rc::new(RefCell::new(core.borrow().terminal_snapshot()));
         let selection = Rc::new(RefCell::new(None::<(usize, usize)>));
@@ -110,6 +213,10 @@ impl TerminalPanel {
                 color(frame.background);
                 let _ = cr.paint();
                 let selected = *selection.borrow();
+                let cols = usize::from(frame.cols);
+                // Fractional cell widths: snap edges so adjacent backgrounds do not blend.
+                let x = |column: usize| (PADDING_X + column as f64 * font.cell_width).round();
+                let y = |row: usize| (PADDING_Y + row as f64 * font.cell_height).round();
                 for (i, cell) in frame.cells.iter().enumerate() {
                     color(
                         if selected.is_some_and(|(a, b)| (a.min(b)..=a.max(b)).contains(&i)) {
@@ -118,17 +225,21 @@ impl TerminalPanel {
                             cell.background
                         },
                     );
+                    let (column, row) = (i % cols, i / cols);
                     cr.rectangle(
-                        6. + (i % usize::from(frame.cols)) as f64 * 9.,
-                        4. + (i / usize::from(frame.cols)) as f64 * 19.,
-                        9.,
-                        19.,
+                        x(column),
+                        y(row),
+                        x(column + 1) - x(column),
+                        y(row + 1) - y(row),
                     );
                     let _ = cr.fill();
                 }
                 let layout = area.create_pango_layout(None);
-                let font = gtk::pango::FontDescription::from_string("monospace 11");
-                layout.set_font_description(Some(&font));
+                let mut description = pango::FontDescription::new();
+                // A missing bundled face must still fall back to a monospace font.
+                description.set_family(&format!("{}, monospace", font.family));
+                description.set_absolute_size(font.size * f64::from(pango::SCALE));
+                layout.set_font_description(Some(&description));
                 for (i, cell) in frame
                     .cells
                     .iter()
@@ -147,15 +258,22 @@ impl TerminalPanel {
                     }
                     layout.set_markup(&text);
                     color(cell.foreground);
+                    // Place glyphs on the shared baseline, whatever face Pango falls back to.
+                    let baseline = f64::from(layout.baseline()) / f64::from(pango::SCALE);
                     cr.move_to(
-                        6. + (i % usize::from(frame.cols)) as f64 * 9.,
-                        4. + (i / usize::from(frame.cols)) as f64 * 19.,
+                        PADDING_X + (i % cols) as f64 * font.cell_width,
+                        PADDING_Y + (i / cols) as f64 * font.cell_height + font.baseline - baseline,
                     );
                     pangocairo::functions::show_layout(cr, &layout);
                 }
                 if let Some([x, y]) = frame.cursor {
                     color(0xffffff);
-                    cr.rectangle(6. + f64::from(x) * 9., 4. + f64::from(y) * 19., 9., 19.);
+                    cr.rectangle(
+                        PADDING_X + f64::from(x) * font.cell_width,
+                        PADDING_Y + f64::from(y) * font.cell_height,
+                        font.cell_width,
+                        font.cell_height,
+                    );
                     let _ = cr.stroke();
                 }
             });
@@ -328,8 +446,11 @@ impl TerminalPanel {
             let last = std::cell::Cell::new((0, 0, 0));
             surface.add_tick_callback(move |area, _| {
                 if let Some(id) = state.borrow().active {
-                    let cols = ((area.width() - 12) / 9).clamp(2, 500) as u16;
-                    let rows = ((area.height() - 8) / 19).clamp(1, 200) as u16;
+                    let font = terminal_font();
+                    let cols = ((f64::from(area.width()) - 2. * PADDING_X) / font.cell_width)
+                        .clamp(2., 500.) as u16;
+                    let rows = ((f64::from(area.height()) - 2. * PADDING_Y) / font.cell_height)
+                        .clamp(1., 200.) as u16;
                     if last.get() != (id, cols, rows) {
                         input(&core, &state, Input::Resize { cols, rows });
                         last.set((id, cols, rows));
@@ -580,6 +701,12 @@ pub fn smoke(panel: TerminalPanel, fixture: std::path::PathBuf) {
     });
 }
 fn cell_index(x: f64, y: f64, cols: u16, rows: u16) -> usize {
-    ((y - 4.) / 19.).max(0.).min(f64::from(rows - 1)) as usize * usize::from(cols)
-        + ((x - 6.) / 9.).max(0.).min(f64::from(cols - 1)) as usize
+    let font = terminal_font();
+    ((y - PADDING_Y) / font.cell_height)
+        .max(0.)
+        .min(f64::from(rows - 1)) as usize
+        * usize::from(cols)
+        + ((x - PADDING_X) / font.cell_width)
+            .max(0.)
+            .min(f64::from(cols - 1)) as usize
 }

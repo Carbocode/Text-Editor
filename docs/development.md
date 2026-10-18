@@ -254,12 +254,19 @@ Use the repository's `.agents/skills/editor-change/SKILL.md` when extending edit
 Terminal emulation uses the pure-Rust `alacritty_terminal` crate; it needs no
 toolchain beyond Cargo. See the [attribution](../assets/ALACRITTY_ATTRIBUTION.md).
 
+Every frontend draws terminals with the bundled JetBrains Mono Nerd Font Mono faces
+and the cell grid from `terminal_font()` in the core, so Powerline/Nerd Font prompt
+themes look the same on every desktop; the system fonts are only fallbacks for
+glyphs such as emoji. macOS loads the faces from memory, KDE registers them with
+`QFontDatabase`, and GNOME caches them under the user cache directory for Pango
+(requires Pango 1.56). See the [font attribution](../assets/fonts/ATTRIBUTION.md).
+
 Toggle the panel with the **Terminal** button at the end of the editor status bar
 (also **View → Terminal** on macOS and **Ctrl+`** on macOS and KDE); the panel
 opens below the status bar. Create two tabs, run `pwd` in
 both, change directory in one, and verify independent shells. Hide/show the panel
 and switch documents without restarting them. Resize while running an interactive
-program such as `vi`; check arrows, Tab, Ctrl-C, Unicode, colors and the alternate
+program such as `vi`; check arrows, Tab, Ctrl-C, Unicode, Powerline and Nerd Font prompt glyphs, colors and the alternate
 screen. Select text with the mouse; use Cmd-C/V on macOS or Ctrl-Shift-C/V on Linux.
 Scroll to inspect retained output. The first version uses a native CPU renderer;
 Kitty graphics, terminal search UI, shell integration and process restoration are

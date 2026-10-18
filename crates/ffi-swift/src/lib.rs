@@ -63,6 +63,28 @@ pub fn workspace_folder_icon(value: String, expanded: bool) -> String {
 }
 
 #[derive(Clone, uniffi::Record)]
+pub struct TerminalFont {
+    pub family: String,
+    pub size: f64,
+    pub cell_width: f64,
+    pub cell_height: f64,
+    pub baseline: f64,
+    pub faces: Vec<Vec<u8>>,
+}
+#[uniffi::export]
+pub fn workspace_terminal_font() -> TerminalFont {
+    let font = native_workspace_application::terminal_font();
+    TerminalFont {
+        family: font.family.into(),
+        size: font.size,
+        cell_width: font.cell_width,
+        cell_height: font.cell_height,
+        baseline: font.baseline,
+        faces: font.faces.map(<[u8]>::to_vec).into(),
+    }
+}
+
+#[derive(Clone, uniffi::Record)]
 pub struct Confirmation {
     pub title: String,
     pub body: String,

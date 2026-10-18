@@ -1,7 +1,6 @@
 #include "terminal_surface.h"
 #include <QPainter>
 #include <QFontDatabase>
-#include <QFontMetricsF>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QKeyEvent>
@@ -12,15 +11,33 @@
 #include <QClipboard>
 #include <QtQml/qqml.h>
 #include <algorithm>
+#include <cmath>
+
+namespace {
+// The core's bundled face and grid; set once before QML loads.
+struct TerminalFont { QString family; qreal size, cellWidth, cellHeight, baseline; };
+TerminalFont terminalFont;
+qreal snap(qreal value) { return std::round(value); }
+}
+
+extern "C" void configure_terminal_font(const char* family, double size, double cellWidth, double cellHeight,
+    double baseline, const unsigned char* const* faces, const size_t* lengths, size_t count) {
+    for (size_t i=0; i<count; ++i)
+        QFontDatabase::addApplicationFontFromData(QByteArray::fromRawData(reinterpret_cast<const char*>(faces[i]), qsizetype(lengths[i])));
+    terminalFont = {QString::fromUtf8(family), size, cellWidth, cellHeight, baseline};
+}
 
 TerminalSurface::TerminalSurface(QQuickItem* parent) : QQuickPaintedItem(parent) {
     setAcceptedMouseButtons(Qt::LeftButton);
     setFlag(ItemAcceptsInputMethod);
     setActiveFocusOnTab(true);
-    font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
-    font_.setPixelSize(14);
-    cellWidth_ = QFontMetricsF(font_).horizontalAdvance(QStringLiteral("M"));
-    cellHeight_ = QFontMetricsF(font_).height() + 2;
+    // Qt merges in system fonts for glyphs the bundled face lacks.
+    font_ = QFont(terminalFont.family);
+    font_.setStyleHint(QFont::Monospace);
+    font_.setPixelSize(qRound(terminalFont.size));
+    font_.setKerning(false);
+    cellWidth_ = terminalFont.cellWidth;
+    cellHeight_ = terminalFont.cellHeight;
 }
 void TerminalSurface::setSnapshot(const QString& value) {
     if (value == snapshot_) return;
@@ -47,14 +64,16 @@ void TerminalSurface::paint(QPainter* painter) {
     for (int i=0; i<cells.size(); ++i) {
         const auto cell = cells[i].toObject();
         const bool selected = anchor_ >= 0 && i >= std::min(anchor_,end_) && i <= std::max(anchor_,end_);
-        painter->fillRect(QRectF(6+(i%cols)*cellWidth_,4+(i/cols)*cellHeight_,cellWidth_,cellHeight_),QColor::fromRgb(selected ? 0x365880 : cell.value("background").toInt()));
+        // Fractional cell widths: snap edges so adjacent backgrounds do not blend.
+        const qreal x=snap(6+(i%cols)*cellWidth_), y=snap(4+(i/cols)*cellHeight_);
+        painter->fillRect(QRectF(x,y,snap(6+(i%cols+1)*cellWidth_)-x,snap(4+(i/cols+1)*cellHeight_)-y),QColor::fromRgb(selected ? 0x365880 : cell.value("background").toInt()));
     }
     for (int i=0; i<cells.size(); ++i) {
         const auto cell = cells[i].toObject();
         if (cell.value("width").toInt() == 0) continue;
         auto font = font_; font.setBold(cell.value("bold").toBool()); font.setItalic(cell.value("italic").toBool()); font.setUnderline(cell.value("underline").toBool());
         painter->setFont(font); painter->setPen(QColor::fromRgb(cell.value("foreground").toInt()));
-        painter->drawText(QPointF(6+(i%cols)*cellWidth_,4+(i/cols)*cellHeight_+QFontMetricsF(font).ascent()),cell.value("text").toString());
+        painter->drawText(QPointF(6+(i%cols)*cellWidth_,4+(i/cols)*cellHeight_+terminalFont.baseline),cell.value("text").toString());
     }
     const auto cursor = frame_.value("cursor").toArray();
     if (hasActiveFocus() && cursor.size()==2) {

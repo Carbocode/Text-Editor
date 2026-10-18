@@ -28,8 +28,8 @@ mod state;
 mod terminal;
 mod worker;
 pub use terminal::{
-    TerminalCell, TerminalCommand, TerminalFrame, TerminalInput, TerminalKey, TerminalSnapshot,
-    TerminalTab, terminal_close_confirmation,
+    TerminalCell, TerminalCommand, TerminalFont, TerminalFrame, TerminalInput, TerminalKey,
+    TerminalSnapshot, TerminalTab, terminal_close_confirmation, terminal_font,
 };
 
 #[cfg(test)]
