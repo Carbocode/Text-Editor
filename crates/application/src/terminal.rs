@@ -228,6 +228,54 @@ impl Terminals {
     }
 }
 
+/// The bundled terminal typeface and the cell grid every frontend lays out.
+///
+/// One font with fixed metrics keeps the grid, Powerline separators and Nerd Font
+/// icons identical across toolkits instead of depending on the host's monospace font.
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalFont {
+    pub family: &'static str,
+    /// Logical pixels; toolkits that size fonts in points must convert.
+    pub size: f64,
+    pub cell_width: f64,
+    pub cell_height: f64,
+    /// Baseline offset from the top of a cell.
+    pub baseline: f64,
+    /// Regular, bold, italic and bold italic TrueType faces for app-local registration.
+    pub faces: [&'static [u8]; 4],
+}
+
+macro_rules! terminal_face {
+    ($style:literal) => {
+        include_bytes!(concat!(
+            "../../../assets/fonts/JetBrainsMonoNLNerdFontMono-",
+            $style,
+            ".ttf"
+        ))
+    };
+}
+
+pub fn terminal_font() -> TerminalFont {
+    // Bundled face metrics in em: advance 0.6, ascent 1.02, descent 0.3, no line gap.
+    const SIZE: f64 = 13.;
+    let line = SIZE * (1.02 + 0.3);
+    let cell_height = line.ceil();
+    TerminalFont {
+        family: "JetBrainsMonoNL Nerd Font Mono",
+        size: SIZE,
+        cell_width: SIZE * 0.6,
+        cell_height,
+        // Centre the line so box drawing and Powerline glyphs span the whole cell.
+        baseline: (cell_height - line) / 2. + SIZE * 1.02,
+        faces: [
+            terminal_face!("Regular"),
+            terminal_face!("Bold"),
+            terminal_face!("Italic"),
+            terminal_face!("BoldItalic"),
+        ],
+    }
+}
+
 pub fn terminal_close_confirmation() -> crate::Confirmation {
     crate::Confirmation {
         title: "Terminate terminal processes?".into(),

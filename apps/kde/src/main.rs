@@ -6,6 +6,16 @@ unsafe extern "C" {
     fn register_terminal_surface();
     fn register_search_results_model();
     fn configure_kde_desktop();
+    fn configure_terminal_font(
+        family: *const std::ffi::c_char,
+        size: f64,
+        cell_width: f64,
+        cell_height: f64,
+        baseline: f64,
+        faces: *const *const u8,
+        lengths: *const usize,
+        count: usize,
+    );
 }
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QQuickStyle, QUrl};
@@ -37,6 +47,23 @@ fn main() -> std::process::ExitCode {
         QGuiApplication::set_desktop_file_name(&"org.nativeworkspace.App".into());
     }
     unsafe { configure_kde_desktop() };
+    let font = native_workspace_application::terminal_font();
+    let family = std::ffi::CString::new(font.family).expect("font family without NUL");
+    let faces = font.faces.map(<[u8]>::as_ptr);
+    let lengths = font.faces.map(<[u8]>::len);
+    // SAFETY: the faces are static and Qt copies the family before this returns.
+    unsafe {
+        configure_terminal_font(
+            family.as_ptr(),
+            font.size,
+            font.cell_width,
+            font.cell_height,
+            font.baseline,
+            faces.as_ptr(),
+            lengths.as_ptr(),
+            faces.len(),
+        );
+    }
     let mut engine = QQmlApplicationEngine::new();
     let qml =
         if cfg!(debug_assertions) && std::env::args().any(|a| a.starts_with("--smoke-terminal=")) {

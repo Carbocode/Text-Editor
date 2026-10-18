@@ -195,3 +195,34 @@ fn terminal_input_and_output_continue_during_a_blocked_filesystem_job() {
         .terminal_command(TerminalCommand::CloseAll { confirmed: true })
         .unwrap();
 }
+
+#[test]
+fn terminal_grid_metrics_match_every_bundled_face() {
+    fn table<'a>(face: &'a [u8], tag: &[u8]) -> &'a [u8] {
+        let count = usize::from(u16::from_be_bytes([face[4], face[5]]));
+        let record = (0..count)
+            .map(|i| &face[12 + i * 16..28 + i * 16])
+            .find(|record| &record[..4] == tag)
+            .expect("font table");
+        let offset = u32::from_be_bytes(record[8..12].try_into().unwrap()) as usize;
+        &face[offset..]
+    }
+    let i16_at =
+        |table: &[u8], at: usize| f64::from(i16::from_be_bytes([table[at], table[at + 1]]));
+    let font = terminal_font();
+    for face in font.faces {
+        let em = f64::from(u16::from_be_bytes(
+            table(face, b"head")[18..20].try_into().unwrap(),
+        ));
+        let hhea = table(face, b"hhea");
+        let (ascent, descent, gap) = (i16_at(hhea, 4), -i16_at(hhea, 6), i16_at(hhea, 8));
+        // Every glyph of a Nerd Font Mono face has the same advance.
+        let advance = f64::from(u16::from_be_bytes([hhea[10], hhea[11]]));
+        let line = (ascent + descent + gap) * font.size / em;
+        assert_eq!(advance * font.size / em, font.cell_width);
+        assert!((font.cell_height - line).abs() < 1.);
+        assert!(
+            (font.baseline - (font.cell_height - line) / 2. - ascent * font.size / em).abs() < 1e-9
+        );
+    }
+}

@@ -104,16 +104,22 @@ private final class TerminalNativeView: NSView, NSTextInputClient {
     private var anchor = 0
     var lastSize = NSSize.zero
     private var marked = NSAttributedString(string: "")
-    private let font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
-    // Indexed by bold | italic << 1; measured once rather than for every drawn cell.
-    private lazy var fonts: [NSFont] = [font, NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask),
-        NSFontManager.shared.convert(font, toHaveTrait: .italicFontMask),
-        NSFontManager.shared.convert(font, toHaveTrait: [.boldFontMask, .italicFontMask])]
-    private lazy var cellWidth: CGFloat = ("M" as NSString).size(withAttributes: [.font: font]).width
-    private let cellHeight: CGFloat = 18
+    // The core's bundled face and grid, so every frontend lays out the same cells.
+    private static let typeface = workspaceTerminalFont()
+    // Indexed by bold | italic << 1, the core's face order; CoreText's cascade covers missing glyphs.
+    private static let fonts: [NSFont] = typeface.faces.map { face in
+        guard let descriptor = CTFontManagerCreateFontDescriptorFromData(face as CFData) else {
+            return NSFont.monospacedSystemFont(ofSize: typeface.size, weight: .regular)
+        }
+        return CTFontCreateWithFontDescriptor(descriptor, typeface.size, nil) as NSFont
+    }
+    private let cellWidth = CGFloat(TerminalNativeView.typeface.cellWidth)
+    private let cellHeight = CGFloat(TerminalNativeView.typeface.cellHeight)
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
+    // AppKit no longer clips views by default; the dirty rect can extend over the editor above.
+    override var clipsToBounds: Bool { get { true } set { } }
     override func layout() { super.layout(); resizeGrid() }
     func resizeGrid() {
         guard id != 0 else { return }
@@ -125,7 +131,7 @@ private final class TerminalNativeView: NSView, NSTextInputClient {
     }
     private func origin(_ column: Int, _ row: Int) -> NSPoint { NSPoint(x: 6 + CGFloat(column) * cellWidth, y: 4 + CGFloat(row) * cellHeight) }
     override func draw(_ dirtyRect: NSRect) {
-        color(grid?.background ?? 0x191b1f).setFill(); dirtyRect.fill()
+        color(grid?.background ?? 0x191b1f).setFill(); dirtyRect.intersection(bounds).fill()
         guard let grid, grid.cols > 0 else { return }
         let first = max(0, Int((dirtyRect.minY - 4) / cellHeight)), last = min(grid.rows - 1, Int((dirtyRect.maxY - 4) / cellHeight))
         guard first <= last else { return }
@@ -140,7 +146,9 @@ private final class TerminalNativeView: NSView, NSTextInputClient {
                 while end < grid.cols, (selection?.contains(base + end) == true) == selected, grid.cells[base + end].background == background { end += 1 }
                 if selected || background != grid.background {
                     (selected ? NSColor.selectedTextBackgroundColor : color(background)).setFill()
-                    NSRect(origin: origin(column, row), size: NSSize(width: CGFloat(end - column) * cellWidth, height: cellHeight)).fill()
+                    // Fractional cell widths: snap to device pixels so adjacent runs do not blend.
+                    backingAlignedRect(NSRect(origin: origin(column, row), size: NSSize(width: CGFloat(end - column) * cellWidth, height: cellHeight)),
+                        options: .alignAllEdgesNearest).fill()
                 }
                 column = end
             }
@@ -158,9 +166,12 @@ private final class TerminalNativeView: NSView, NSTextInputClient {
                         text += next.text; end += 1
                     }
                 }
-                let attributes: [NSAttributedString.Key: Any] = [.font: fonts[(cell.bold ? 1 : 0) | (cell.italic ? 2 : 0)],
+                let font = Self.fonts[(cell.bold ? 1 : 0) | (cell.italic ? 2 : 0)]
+                let attributes: [NSAttributedString.Key: Any] = [.font: font, .ligature: 0,
                     .foregroundColor: color(cell.foreground), .underlineStyle: cell.underline ? NSUnderlineStyle.single.rawValue : 0]
-                (text as NSString).draw(at: origin(column, row), withAttributes: attributes)
+                // Align to the shared baseline; draw(at:) places the line's ascender at the point.
+                var point = origin(column, row); point.y += CGFloat(Self.typeface.baseline) - font.ascender
+                (text as NSString).draw(at: point, withAttributes: attributes)
                 column = end
             }
         }

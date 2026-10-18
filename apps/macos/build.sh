@@ -27,6 +27,7 @@ if [ "${NATIVE_WORKSPACE_DEVTOOLS_BUILD:-1}" = "1" ]; then
 fi
 mkdir -p apps/macos/.build/NativeWorkspace.app/Contents/Resources/licenses
 cp assets/ALACRITTY_LICENSE.txt apps/macos/.build/NativeWorkspace.app/Contents/Resources/licenses/
+cp assets/fonts/OFL.txt apps/macos/.build/NativeWorkspace.app/Contents/Resources/licenses/JetBrainsMono-NerdFont-OFL.txt
 cp apps/macos/ThirdParty/Bonsplit/LICENSE apps/macos/.build/NativeWorkspace.app/Contents/Resources/licenses/Bonsplit.txt
 cp apps/macos/Info.plist apps/macos/.build/NativeWorkspace.app/Contents/Info.plist
 cp assets/material-icon-theme/png/*.png apps/macos/.build/NativeWorkspace.app/Contents/Resources/icons/
