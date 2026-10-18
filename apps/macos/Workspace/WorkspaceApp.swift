@@ -36,6 +36,11 @@ private struct WorkspaceCommands: Commands {
             }
         }
         CommandGroup(replacing: .newItem) { }
+        CommandGroup(after: .toolbar) {
+            Button("Terminal") { store.toggleTerminal() }
+                .keyboardShortcut("`", modifiers: .control)
+                .disabled(store.workspaceName == nil || store.terminalQuitPending)
+        }
         CommandMenu("Search") {
             Button("Find in Files") { store.focusSearch(replace: false) }
                 .keyboardShortcut("f", modifiers: [.command, .shift])

@@ -10,7 +10,7 @@ use std::{cell::RefCell, rc::Rc, sync::Arc};
 #[derive(Clone)]
 pub struct TerminalPanel {
     pub root: gtk::Box,
-    bar: gtk::Box,
+    tabs: gtk::ListBox,
     surface: gtk::DrawingArea,
     status: gtk::Label,
     core: Rc<RefCell<Session>>,
@@ -33,12 +33,52 @@ fn input(core: &RefCell<Session>, state: &RefCell<Arc<TerminalSnapshot>>, input:
     }
 }
 
+/// The vertical tab column: actions on top, one sidebar row per terminal.
+fn tab_column(
+    core: &Rc<RefCell<Session>>,
+    state: &Rc<RefCell<Arc<TerminalSnapshot>>>,
+    tabs: &gtk::ListBox,
+) -> gtk::Box {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.set_size_request(180, -1);
+    // Expanding tab titles must not claim width from the terminal surface.
+    column.set_hexpand(false);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    actions.set_halign(gtk::Align::End);
+    actions.set_margin_top(4);
+    actions.set_margin_end(4);
+    let new = gtk::Button::from_icon_name("list-add-symbolic");
+    new.add_css_class("flat");
+    new.set_tooltip_text(Some("New terminal"));
+    let new_core = core.clone();
+    new.connect_clicked(move |_| dispatch(&new_core, Command::New));
+    actions.append(&new);
+    let activate_core = core.clone();
+    let state = state.clone();
+    tabs.connect_row_activated(move |_, row| {
+        let id = usize::try_from(row.index())
+            .ok()
+            .and_then(|i| state.borrow().tabs.get(i).map(|tab| tab.id));
+        if let Some(id) = id {
+            dispatch(&activate_core, Command::Activate(id));
+        }
+    });
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_vexpand(true);
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_child(Some(tabs));
+    column.append(&actions);
+    column.append(&scroll);
+    column
+}
+
 impl TerminalPanel {
     pub fn new(core: Rc<RefCell<Session>>, window: &adw::ApplicationWindow) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         root.set_visible(false);
         root.set_size_request(-1, 120);
-        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let tabs = gtk::ListBox::new();
+        tabs.add_css_class("navigation-sidebar");
         let surface = gtk::DrawingArea::new();
         surface.set_widget_name("terminalSurface");
         surface.set_focusable(true);
@@ -48,9 +88,12 @@ impl TerminalPanel {
         let status = gtk::Label::new(None);
         let state = Rc::new(RefCell::new(core.borrow().terminal_snapshot()));
         let selection = Rc::new(RefCell::new(None::<(usize, usize)>));
-        root.append(&bar);
-        root.append(&surface);
-        root.append(&status);
+        let screen = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        screen.append(&surface);
+        screen.append(&status);
+        root.append(&screen);
+        root.append(&gtk::Separator::new(gtk::Orientation::Vertical));
+        root.append(&tab_column(&core, &state, &tabs));
         {
             let state = state.clone();
             let selection = selection.clone();
@@ -297,7 +340,7 @@ impl TerminalPanel {
         }
         Self {
             root,
-            bar,
+            tabs,
             surface,
             status,
             core,
@@ -371,23 +414,26 @@ impl TerminalPanel {
         }
         let switched = next.active != self.state.borrow().active;
         if next.tabs != self.state.borrow().tabs || switched {
-            while let Some(child) = self.bar.first_child() {
-                self.bar.remove(&child);
+            while let Some(row) = self.tabs.first_child() {
+                self.tabs.remove(&row);
             }
             for tab in &next.tabs {
-                let button = gtk::ToggleButton::with_label(&tab.title);
-                button.set_active(next.active == Some(tab.id));
-                let core = self.core.clone();
-                let id = tab.id;
-                button.connect_clicked(move |_| dispatch(&core, Command::Activate(id)));
-                self.bar.append(&button);
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                row.append(&gtk::Image::from_icon_name("utilities-terminal-symbolic"));
+                let title = gtk::Label::new(Some(&tab.title));
+                title.set_hexpand(true);
+                title.set_xalign(0.);
+                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                row.append(&title);
                 let close = gtk::Button::from_icon_name("window-close-symbolic");
+                close.add_css_class("flat");
+                close.add_css_class("circular");
                 close.set_tooltip_text(Some("Close terminal"));
                 let core = self.core.clone();
                 let window = self.window.clone();
-                let running = tab.running;
+                let (id, busy) = (tab.id, tab.busy);
                 close.connect_clicked(move |_| {
-                    if !running {
+                    if !busy {
                         dispatch(
                             &core,
                             Command::Close {
@@ -421,22 +467,14 @@ impl TerminalPanel {
                     });
                     dialog.present(Some(&window));
                 });
-                self.bar.append(&close);
-            }
-            let new = gtk::Button::from_icon_name("list-add-symbolic");
-            new.set_tooltip_text(Some("New terminal"));
-            let core = self.core.clone();
-            new.connect_clicked(move |_| dispatch(&core, Command::New));
-            self.bar.append(&new);
-            let hide = gtk::Button::from_icon_name("pan-down-symbolic");
-            hide.set_tooltip_text(Some("Hide terminal"));
-            let root = self.root.downgrade();
-            hide.connect_clicked(move |_| {
-                if let Some(root) = root.upgrade() {
-                    root.set_visible(false);
+                row.append(&close);
+                let list_row = gtk::ListBoxRow::new();
+                list_row.set_child(Some(&row));
+                self.tabs.append(&list_row);
+                if next.active == Some(tab.id) {
+                    self.tabs.select_row(Some(&list_row));
                 }
-            });
-            self.bar.append(&hide);
+            }
         }
         self.status.set_label(
             next.tabs
@@ -520,7 +558,8 @@ pub fn smoke(panel: TerminalPanel, fixture: std::path::PathBuf) {
                             id: second,
                             confirmed: false
                         })
-                        .is_err()
+                        .is_ok(),
+                    "Closing an idle shell needs no confirmation"
                 );
                 dispatch(&panel.core, Command::CloseAll { confirmed: true });
                 stage = 5;

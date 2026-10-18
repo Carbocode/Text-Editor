@@ -48,6 +48,19 @@ fn terminal_tabs_are_independent_and_do_not_change_document_revisions() {
     session.terminal_command(TerminalCommand::New).unwrap();
     let second = session.terminal_snapshot().active.unwrap();
     assert_ne!(first, second);
+    session
+        .terminal_command(TerminalCommand::Input {
+            id: first,
+            input: crate::TerminalInput::Text("sleep 30\r".into()),
+        })
+        .unwrap();
+    wait_until(
+        || {
+            session.poll();
+            session.terminal_snapshot()
+        },
+        |snapshot| snapshot.tabs.iter().any(|t| t.id == first && t.busy),
+    );
     assert!(matches!(
         session.terminal_command(TerminalCommand::Close {
             id: first,
@@ -62,10 +75,17 @@ fn terminal_tabs_are_independent_and_do_not_change_document_revisions() {
     session
         .terminal_command(TerminalCommand::Close {
             id: second,
-            confirmed: true,
+            confirmed: false,
         })
         .unwrap();
     assert_eq!(session.terminal_snapshot().active, Some(first));
+    // A view may still resize the tab it just closed.
+    session
+        .terminal_command(TerminalCommand::Input {
+            id: second,
+            input: crate::TerminalInput::Resize { cols: 80, rows: 24 },
+        })
+        .unwrap();
     session.terminal_command(TerminalCommand::New).unwrap();
     assert!(session.terminal_snapshot().active.unwrap() > second);
     assert_eq!(session.revision(), revision);

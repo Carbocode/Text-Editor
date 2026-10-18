@@ -81,7 +81,7 @@ unsaved text and native presentation state are not persisted. See
 
 The existing Session owns transient terminal tabs and a separate terminal snapshot
 revision. `terminal.rs` reduces terminal lifecycle events independently of document
-state. The `terminal` I/O adapter owns PTY threads and libghostty-vt. Frontends draw
+state. The `terminal` I/O adapter owns PTY threads and the Alacritty emulator. Frontends draw
 immutable visible grids; they never parse terminal output or own shell processes.
 Session polls terminal updates even while filesystem work is active. See
 [ADR 0008](adr/0008-integrated-terminals.md).

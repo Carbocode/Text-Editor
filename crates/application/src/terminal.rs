@@ -28,6 +28,7 @@ pub struct TerminalTab {
     pub id: u64,
     pub title: String,
     pub running: bool,
+    pub busy: bool,
     pub status: String,
 }
 
@@ -98,6 +99,7 @@ impl Terminals {
                         revision: 0,
                         title: format!("Terminal {id}"),
                         running: true,
+                        busy: false,
                         status: "Starting…".into(),
                         frame: None,
                     },
@@ -109,7 +111,7 @@ impl Terminals {
             }
             TerminalCommand::Close { id, confirmed } => {
                 let tab = self.find(id)?;
-                if tab.update.running && !confirmed {
+                if tab.update.busy && !confirmed {
                     return Err(AppError::TerminalsRunning);
                 }
                 tab.process.stop();
@@ -125,13 +127,10 @@ impl Terminals {
                 TerminalEvent::AllClosed
             }
             TerminalCommand::Input { id, input } => {
-                let tab = self.find(id)?;
-                if !tab.update.running {
-                    return Err(AppError::Terminal(
-                        "Terminal has exited. Open a new terminal.".into(),
-                    ));
+                // Views may still deliver resizes or keys for a tab that just closed or exited.
+                if let Some(tab) = self.tabs.iter().find(|t| t.id == id && t.update.running) {
+                    tab.process.send(input).map_err(AppError::Terminal)?;
                 }
-                tab.process.send(input).map_err(AppError::Terminal)?;
                 return Ok(());
             }
         };
@@ -217,6 +216,7 @@ impl Terminals {
                     id: t.id,
                     title: t.update.title.clone(),
                     running: t.update.running,
+                    busy: t.update.busy,
                     status: t.update.status.clone(),
                 })
                 .collect(),

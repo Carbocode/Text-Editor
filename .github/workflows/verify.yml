@@ -15,9 +15,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify core
       - run: cargo xtask verify xtask
@@ -32,9 +29,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: devtools
@@ -49,9 +43,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify macos
   linux:
@@ -65,9 +56,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.frontend }}

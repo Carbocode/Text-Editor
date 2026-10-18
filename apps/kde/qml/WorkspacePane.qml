@@ -18,6 +18,7 @@ Item {
     Kirigami.Theme.highlightColor: systemColors.accent
     Kirigami.Theme.highlightedTextColor: systemColors.highlightedText
     signal terminalRequested()
+    property bool terminalVisible: false
     property var controller
     property bool enableBrowse: false
     property bool showingHome: true
@@ -1009,7 +1010,7 @@ Item {
     }
 
     readonly property list<Action> applicationActions: [homeAction, openAction, terminalAction, developerAction, quitAction]
-    readonly property list<Action> pageActions: [textZoomAction, saveAction, saveAllAction, terminalAction]
+    readonly property list<Action> pageActions: [textZoomAction, saveAction, saveAllAction]
     readonly property var syntaxColors: [Kirigami.Theme.textColor, Kirigami.Theme.linkColor,
         Kirigami.Theme.neutralTextColor, Kirigami.Theme.positiveTextColor,
         Kirigami.Theme.disabledTextColor, Kirigami.Theme.activeTextColor]
@@ -2145,6 +2146,15 @@ Item {
             }
             Label {
                 text: root.controller.editing_paused ? "Working…" : (root.controller.active_document_id.length === 0 ? "Ready" : (root.controller.active_document_dirty ? "Modified" : "Saved"))
+            }
+            ToolButton {
+                objectName: "toggleTerminal"
+                action: terminalAction
+                display: AbstractButton.IconOnly
+                checked: root.terminalVisible
+                ToolTip.text: "Show or Hide Terminal"
+                ToolTip.visible: hovered
+                ToolTip.delay: Kirigami.Units.toolTipDelay
             }
         }
     }

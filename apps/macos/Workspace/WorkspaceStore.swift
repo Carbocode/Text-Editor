@@ -8,10 +8,17 @@ extension Relocation {
     }
 }
 
+/// Terminal frames arrive at display rate; only the terminal panel observes them.
+@MainActor
+final class TerminalFeed: ObservableObject {
+    @Published fileprivate(set) var state = TerminalPanelState()
+}
+
 /// AppKit presentation state. Execution, optimistic state and errors belong to Session.
 @MainActor
 final class WorkspaceStore: ObservableObject {
-    @Published private(set) var terminals = TerminalPanelState()
+    let terminalFeed = TerminalFeed()
+    var terminals: TerminalPanelState { terminalFeed.state }
     @Published var terminalVisible = false
     @Published private(set) var terminalsRunning = false
     @Published private(set) var terminalQuitPending = false
@@ -102,6 +109,10 @@ final class WorkspaceStore: ObservableObject {
         terminalQuitPending = true
         terminalQuitCompletion = completion
         terminalAction("close_all", confirmed: true)
+    }
+    func toggleTerminal() {
+        if terminals.tabs.isEmpty { terminalAction("new") }
+        else { terminalVisible.toggle() }
     }
     func terminalAction(_ action: String, id: UInt64 = 0, confirmed: Bool = false) {
         request { try core.terminalAction(action: action, id: id, confirmed: confirmed) }
@@ -255,7 +266,7 @@ final class WorkspaceStore: ObservableObject {
     private func apply(_ snapshot: WorkspaceUpdate) {
         terminalsRunning = snapshot.terminalsRunning
         if !terminalsRunning, let completion = terminalQuitCompletion { terminalQuitCompletion = nil; DispatchQueue.main.async(execute: completion) }
-        if let data = snapshot.terminalJson.data(using: .utf8), let value = try? JSONDecoder().decode(TerminalPanelState.self, from: data), value.revision != terminals.revision { terminals = value }
+        if let data = snapshot.terminalJson.data(using: .utf8), let value = try? JSONDecoder().decode(TerminalPanelState.self, from: data), value.revision != terminals.revision { terminalFeed.state = value }
         if snapshot.terminalOnly { return }
         let started = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
         defer { if let started { core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started) } }
