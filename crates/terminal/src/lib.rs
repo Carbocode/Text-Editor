@@ -1,10 +1,18 @@
-//! PTY and Ghostty adapter. All blocking I/O and emulator handles stay off the UI.
-use ghostty_vt::{RenderState, Terminal, TerminalOptions, key, render, style::RgbColor, terminal};
+//! PTY and Alacritty adapter. All blocking I/O and emulator handles stay off the UI.
+use alacritty_terminal::{
+    Term,
+    event::{Event, EventListener},
+    grid::{Dimensions, Scroll},
+    term::{self, TermMode, cell::Flags, test::TermSize},
+    vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb},
+};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde::Serialize;
 use std::{
+    cell::RefCell,
     io::{Read, Write},
     path::PathBuf,
+    rc::Rc,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -16,6 +24,9 @@ use std::{
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_INPUT: usize = 64 * 1024;
+const SCROLLBACK: usize = 10_000;
+const FOREGROUND: u32 = 0xdcdfe4;
+const BACKGROUND: u32 = 0x191b1f;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Cell {
@@ -42,6 +53,8 @@ pub struct Update {
     pub revision: u64,
     pub title: String,
     pub running: bool,
+    /// A program other than the shell owns the terminal's foreground.
+    pub busy: bool,
     pub status: String,
     pub frame: Option<Arc<Frame>>,
 }
@@ -88,6 +101,7 @@ impl Process {
             revision: 0,
             title: "Terminal".into(),
             running: true,
+            busy: false,
             status: "Starting…".into(),
             frame: None,
         }));
@@ -110,6 +124,7 @@ impl Process {
                 };
                 if let Ok(mut update) = latest.lock() {
                     update.running = false;
+                    update.busy = false;
                     update.status = status;
                     update.revision += 1;
                 }
@@ -136,12 +151,11 @@ impl Process {
         if len > MAX_INPUT {
             return Err("Terminal input exceeds 64 KiB".into());
         }
-        self.sender
-            .try_send(Message::Input(input))
-            .map_err(|e| match e {
-                mpsc::TrySendError::Full(_) => "Terminal is busy; retry the input".into(),
-                mpsc::TrySendError::Disconnected(_) => "Terminal has exited".into(),
-            })
+        match self.sender.try_send(Message::Input(input)) {
+            Err(mpsc::TrySendError::Full(_)) => Err("Terminal is busy; retry the input".into()),
+            // The worker has exited; its final status is already being published.
+            Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => Ok(()),
+        }
     }
 
     /// No waiting on a worker holding a mutex.
@@ -163,6 +177,22 @@ impl Drop for Process {
 struct ChildGuard {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     master: Box<dyn portable_pty::MasterPty + Send>,
+}
+impl ChildGuard {
+    /// Job-control shells hand the PTY foreground to the program they run.
+    fn busy(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(
+                (self.master.process_group_leader(), self.child.process_id()),
+                (Some(group), Some(shell)) if u32::try_from(group).ok() != Some(shell)
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
 }
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -205,7 +235,7 @@ fn run(
     latest: &Mutex<Update>,
     stopped: &AtomicBool,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let mut emulator = Emulator::new(80, 24)?;
+    let mut emulator = Emulator::new(80, 24, SCROLLBACK);
     let pair = native_pty_system().openpty(size(80, 24))?;
     if !directory.is_dir() {
         return Err("The workspace directory is no longer available".into());
@@ -255,6 +285,7 @@ fn run(
     let mut dirty = true;
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
     let mut exited = None;
+    let mut busy = false;
     loop {
         if stopped.load(Ordering::Acquire) {
             return Ok("Terminated".into());
@@ -264,25 +295,22 @@ fn run(
         }
         match receiver.recv_timeout(FRAME_INTERVAL) {
             Ok(Message::Output(bytes)) => {
-                emulator.terminal.vt_write(&bytes);
+                emulator.write(&bytes);
                 dirty = true;
             }
             Ok(Message::Input(input)) => {
                 match input {
                     Input::Resize { cols, rows } => {
                         child.master.resize(size(cols, rows))?;
-                        emulator.terminal.resize(cols, rows, 0, 0)?;
+                        emulator.resize(cols, rows);
                     }
-                    Input::Scroll(lines) => emulator
-                        .terminal
-                        .scroll_viewport(terminal::ScrollViewport::Delta(lines as isize)),
+                    // Positive deltas scroll towards the bottom, as on every native view.
+                    Input::Scroll(lines) => emulator.term.scroll_display(Scroll::Delta(-lines)),
                     input => {
-                        let bytes = emulator.encode(input)?;
+                        let bytes = emulator.encode(input);
                         // This thread can apply PTY backpressure; Session never waits here.
                         writes.try_send(bytes)?;
-                        emulator
-                            .terminal
-                            .scroll_viewport(terminal::ScrollViewport::Bottom);
+                        emulator.term.scroll_display(Scroll::Bottom);
                     }
                 }
                 dirty = true;
@@ -298,7 +326,7 @@ fn run(
                         thread::sleep(Duration::from_millis(1));
                     }
                 }
-                publish(&mut emulator, latest)?;
+                publish(&mut emulator, latest);
                 return Ok(exited.map_or_else(
                     || "Exited".into(),
                     |s| format!("Exited ({})", s.exit_code()),
@@ -307,27 +335,29 @@ fn run(
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok("Terminated".into()),
         }
-        for event in emulator.terminal.events() {
-            if let terminal::Event::PtyWrite(bytes) = event {
-                writes.try_send(bytes)?;
+        if child.busy() != busy {
+            busy = !busy;
+            if let Ok(mut update) = latest.lock() {
+                update.busy = busy;
+                update.revision += 1;
             }
         }
+        emulator.finish_sync();
+        for reply in emulator.replies() {
+            writes.try_send(reply)?;
+        }
         if dirty && last_frame.elapsed() >= FRAME_INTERVAL {
-            publish(&mut emulator, latest)?;
+            publish(&mut emulator, latest);
             dirty = false;
             last_frame = Instant::now();
         }
     }
 }
 
-fn publish(
-    emulator: &mut Emulator,
-    latest: &Mutex<Update>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let frame = Arc::new(emulator.frame()?);
+fn publish(emulator: &mut Emulator, latest: &Mutex<Update>) {
+    let frame = Arc::new(emulator.frame());
     let title = emulator
-        .terminal
-        .title()?
+        .title
         .chars()
         .filter(|c| !c.is_control())
         .take(80)
@@ -340,7 +370,6 @@ fn publish(
         update.status.clear();
         update.revision += 1;
     }
-    Ok(())
 }
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -352,163 +381,303 @@ fn size(cols: u16, rows: u16) -> PtySize {
     }
 }
 
+/// Collects emulator requests; the worker drains them after each PTY read.
+#[derive(Clone, Default)]
+struct Events(Rc<RefCell<Vec<Event>>>);
+impl EventListener for Events {
+    fn send_event(&self, event: Event) {
+        self.0.borrow_mut().push(event);
+    }
+}
+
 struct Emulator {
-    terminal: Terminal,
-    render: RenderState,
-    keys: key::Encoder,
+    term: Term<Events>,
+    parser: Processor,
+    events: Events,
+    title: String,
 }
 impl Emulator {
-    fn new(cols: u16, rows: u16) -> ghostty_vt::error::Result<Self> {
-        let mut terminal = Terminal::new(TerminalOptions {
-            cols,
-            rows,
-            max_scrollback: 8 * 1024 * 1024,
-        })?;
-        terminal.set_scrollback_max_lines(Some(10_000))?;
-        terminal.set_default_fg_color(Some(RgbColor {
-            r: 220,
-            g: 223,
-            b: 228,
-        }))?;
-        terminal.set_default_bg_color(Some(RgbColor {
-            r: 25,
-            g: 27,
-            b: 31,
-        }))?;
-        terminal.set_clipboard_write_policy(terminal::ClipboardWritePolicy::Deny);
-        Ok(Self {
-            terminal,
-            render: RenderState::new()?,
-            keys: key::Encoder::new()?,
-        })
+    fn new(cols: u16, rows: u16, scrollback: usize) -> Self {
+        let events = Events::default();
+        let config = term::Config {
+            scrolling_history: scrollback,
+            osc52: term::Osc52::Disabled,
+            ..term::Config::default()
+        };
+        Self {
+            term: Term::new(config, &grid_size(cols, rows), events.clone()),
+            parser: Processor::new(),
+            events,
+            title: String::new(),
+        }
     }
 
-    fn encode(&mut self, input: Input) -> ghostty_vt::error::Result<Vec<u8>> {
+    fn write(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut self.term, bytes);
+    }
+
+    fn resize(&mut self, cols: u16, rows: u16) {
+        self.term.resize(grid_size(cols, rows));
+    }
+
+    /// Ends a synchronized update whose terminating sequence never arrived.
+    fn finish_sync(&mut self) {
+        if self
+            .parser
+            .sync_timeout()
+            .sync_timeout()
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.parser.stop_sync(&mut self.term);
+        }
+    }
+
+    /// Applies title changes and returns the bytes the terminal answers with.
+    fn replies(&mut self) -> Vec<Vec<u8>> {
+        let events = std::mem::take(&mut *self.events.0.borrow_mut());
+        let mut replies = Vec::new();
+        for event in events {
+            match event {
+                Event::Title(title) => self.title = title,
+                Event::ResetTitle => self.title.clear(),
+                Event::PtyWrite(text) => replies.push(text.into_bytes()),
+                Event::ColorRequest(index, format) => {
+                    let color = self.indexed(index);
+                    replies.push(
+                        format(Rgb {
+                            r: (color >> 16) as u8,
+                            g: (color >> 8) as u8,
+                            b: color as u8,
+                        })
+                        .into_bytes(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        replies
+    }
+
+    fn encode(&self, input: Input) -> Vec<u8> {
+        let mode = *self.term.mode();
         match input {
-            Input::Text(text) => Ok(text.into_bytes()),
-            Input::Paste(text) => {
-                let mut data = text.into_bytes();
-                let mut output = vec![0; data.len() + 32];
-                let bracketed = self.terminal.mode(terminal::Mode::BRACKETED_PASTE)?;
-                let len = ghostty_vt::paste::encode(&mut data, bracketed, &mut output)?;
-                output.truncate(len);
-                Ok(output)
+            Input::Text(text) => text.into_bytes(),
+            Input::Paste(text) if mode.contains(TermMode::BRACKETED_PASTE) => {
+                // A pasted end marker must not let the clipboard escape the bracket.
+                format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
             }
-            Input::Key(input) => {
-                let mut event = key::Event::new()?;
-                event
-                    .set_action(key::Action::Press)
-                    .set_key(key_name(&input.key))
-                    .set_mods(key::Mods::from_bits_truncate(input.modifiers));
-                if !input.text.is_empty() {
-                    event.set_utf8(Some(input.text));
-                }
-                self.keys.set_options_from_terminal(&self.terminal);
-                let mut output = Vec::new();
-                self.keys.encode_to_vec(&event, &mut output)?;
-                Ok(output)
-            }
-            Input::Resize { .. } | Input::Scroll(_) => Ok(Vec::new()),
+            Input::Paste(text) => text.replace("\r\n", "\r").replace('\n', "\r").into_bytes(),
+            Input::Key(input) => encode_key(&input, mode.contains(TermMode::APP_CURSOR)),
+            Input::Resize { .. } | Input::Scroll(_) => Vec::new(),
         }
     }
 
-    fn frame(&mut self) -> ghostty_vt::error::Result<Frame> {
-        let snapshot = self.render.update(&self.terminal)?;
-        let colors = snapshot.colors()?;
-        let mut rows = render::RowIterator::new()?;
-        let mut cells = render::CellIterator::new()?;
-        let mut output = Vec::new();
-        let mut row_iter = rows.update(&snapshot)?;
-        while let Some(row) = row_iter.next() {
-            let mut cell_iter = cells.update(row)?;
-            while let Some(cell) = cell_iter.next() {
-                let style = cell.style()?;
-                let mut text = String::new();
-                cell.graphemes_utf8(&mut text)?;
-                let mut foreground = rgb(cell.fg_color()?.unwrap_or(colors.foreground));
-                let mut background = rgb(cell.bg_color()?.unwrap_or(colors.background));
-                if style.inverse {
-                    std::mem::swap(&mut foreground, &mut background);
-                }
-                if style.invisible {
-                    foreground = background;
-                }
-                let width = match cell.raw_cell()?.wide()? {
-                    ghostty_vt::screen::CellWide::Wide => 2,
-                    ghostty_vt::screen::CellWide::SpacerTail => 0,
-                    _ => 1,
-                };
-                output.push(Cell {
-                    text,
-                    width,
-                    foreground,
-                    background,
-                    bold: style.bold,
-                    italic: style.italic,
-                    underline: style.underline != ghostty_vt::style::Underline::None,
-                });
-            }
+    fn color(&self, color: Color) -> u32 {
+        match color {
+            Color::Spec(rgb) => pack(rgb),
+            Color::Indexed(index) => self.indexed(usize::from(index)),
+            Color::Named(name) => self.indexed(name as usize),
         }
-        let cursor = snapshot.cursor()?;
-        let cursor = if cursor.visible {
-            cursor.viewport.map(|v| [v.x, v.y])
-        } else {
-            None
-        };
-        let frame = Frame {
-            cols: snapshot.cols()?,
-            rows: snapshot.rows()?,
-            cells: output,
+    }
+
+    /// Palette changes made by the program (OSC 4/10/11) win over the defaults.
+    fn indexed(&self, index: usize) -> u32 {
+        self.term.colors()[index].map_or_else(|| default_color(index), pack)
+    }
+
+    fn frame(&self) -> Frame {
+        let content = self.term.renderable_content();
+        let (cols, rows) = (self.term.columns(), self.term.screen_lines());
+        let mut cells = Vec::with_capacity(cols * rows);
+        for indexed in content.display_iter {
+            let cell = indexed.cell;
+            let mut foreground = self.color(cell.fg);
+            let mut background = self.color(cell.bg);
+            if cell.flags.contains(Flags::INVERSE) {
+                std::mem::swap(&mut foreground, &mut background);
+            }
+            if cell.flags.contains(Flags::DIM) {
+                foreground = dim(foreground);
+            }
+            if cell.flags.contains(Flags::HIDDEN) {
+                foreground = background;
+            }
+            let spacer = cell
+                .flags
+                .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER);
+            let mut text = String::new();
+            if !spacer && cell.c != ' ' {
+                text.push(cell.c);
+                text.extend(cell.zerowidth().into_iter().flatten());
+            }
+            cells.push(Cell {
+                text,
+                width: if cell.flags.contains(Flags::WIDE_CHAR) {
+                    2
+                } else if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    0
+                } else {
+                    1
+                },
+                foreground,
+                background,
+                bold: cell.flags.contains(Flags::BOLD),
+                italic: cell.flags.contains(Flags::ITALIC),
+                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+            });
+        }
+        let line = content.cursor.point.line.0 + content.display_offset as i32;
+        let cursor = (content.cursor.shape != CursorShape::Hidden
+            && (0..rows as i32).contains(&line))
+        .then_some([content.cursor.point.column.0 as u16, line as u16]);
+        Frame {
+            cols: cols as u16,
+            rows: rows as u16,
+            cells,
             cursor,
-            background: rgb(colors.background),
-        };
-        snapshot.clean()?;
-        Ok(frame)
+            background: self.indexed(NamedColor::Background as usize),
+        }
     }
 }
 
-fn rgb(color: RgbColor) -> u32 {
-    (u32::from(color.r) << 16) | (u32::from(color.g) << 8) | u32::from(color.b)
+fn grid_size(cols: u16, rows: u16) -> TermSize {
+    TermSize::new(usize::from(cols), usize::from(rows))
 }
 
-fn key_name(name: &str) -> key::Key {
-    use key::Key;
-    match name {
-        "Enter" => Key::Enter,
-        "Tab" => Key::Tab,
-        "Backspace" => Key::Backspace,
-        "Escape" => Key::Escape,
-        "Delete" => Key::Delete,
-        "Insert" => Key::Insert,
-        "Home" => Key::Home,
-        "End" => Key::End,
-        "PageUp" => Key::PageUp,
-        "PageDown" => Key::PageDown,
-        "ArrowUp" => Key::ArrowUp,
-        "ArrowDown" => Key::ArrowDown,
-        "ArrowLeft" => Key::ArrowLeft,
-        "ArrowRight" => Key::ArrowRight,
-        "F1" => Key::F1,
-        "F2" => Key::F2,
-        "F3" => Key::F3,
-        "F4" => Key::F4,
-        "F5" => Key::F5,
-        "F6" => Key::F6,
-        "F7" => Key::F7,
-        "F8" => Key::F8,
-        "F9" => Key::F9,
-        "F10" => Key::F10,
-        "F11" => Key::F11,
-        "F12" => Key::F12,
-        _ => {
-            let c = name.chars().next().unwrap_or('\0').to_ascii_lowercase();
-            if name.len() == 1 && c.is_ascii_alphabetic() {
-                Key::try_from(Key::A as i32 + i32::from(c as u8 - b'a'))
-                    .unwrap_or(Key::Unidentified)
-            } else {
-                Key::Unidentified
+fn pack(rgb: Rgb) -> u32 {
+    (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)
+}
+
+fn dim(rgb: u32) -> u32 {
+    let channel = |shift: u32| (((rgb >> shift) & 255) * 2 / 3) << shift;
+    channel(16) | channel(8) | channel(0)
+}
+
+/// The xterm palette plus the panel's default foreground and background.
+fn default_color(index: usize) -> u32 {
+    const ANSI: [u32; 16] = [
+        0x1d1f21, 0xcc6666, 0xb5bd68, 0xf0c674, 0x81a2be, 0xb294bb, 0x8abeb7, 0xc5c8c6, 0x666666,
+        0xd54e53, 0xb9ca4a, 0xe7c547, 0x7aa6da, 0xc397d8, 0x70c0b1, 0xeaeaea,
+    ];
+    let level = |v: usize| if v == 0 { 0 } else { 55 + v as u32 * 40 };
+    match index {
+        0..16 => ANSI[index],
+        16..232 => {
+            let i = index - 16;
+            (level(i / 36) << 16) | (level(i / 6 % 6) << 8) | level(i % 6)
+        }
+        232..256 => 0x010101 * (8 + 10 * (index - 232) as u32),
+        i if i == NamedColor::Background as usize => BACKGROUND,
+        i if (NamedColor::DimBlack as usize..=NamedColor::DimWhite as usize).contains(&i) => {
+            dim(ANSI[i - NamedColor::DimBlack as usize])
+        }
+        i if i == NamedColor::DimForeground as usize => dim(FOREGROUND),
+        _ => FOREGROUND,
+    }
+}
+
+/// xterm key encoding; modifiers use KeyInput's Shift=1, Ctrl=2, Alt=4, Super=8 bits.
+fn encode_key(input: &KeyInput, app_cursor: bool) -> Vec<u8> {
+    let (shift, ctrl, alt) = (
+        input.modifiers & 1 != 0,
+        input.modifiers & 2 != 0,
+        input.modifiers & 4 != 0,
+    );
+    // xterm's parameter: 1 + Shift(1) + Alt(2) + Ctrl(4) + Meta(8).
+    let param = 1
+        + u16::from(shift)
+        + 2 * u16::from(alt)
+        + 4 * u16::from(ctrl)
+        + 8 * u16::from(input.modifiers & 8 != 0);
+    let cursor = |end: char| {
+        if param > 1 {
+            format!("\x1b[1;{param}{end}")
+        } else if app_cursor {
+            format!("\x1bO{end}")
+        } else {
+            format!("\x1b[{end}")
+        }
+    };
+    let function = |end: char| {
+        if param > 1 {
+            format!("\x1b[1;{param}{end}")
+        } else {
+            format!("\x1bO{end}")
+        }
+    };
+    let tilde = |code: u8| {
+        if param > 1 {
+            format!("\x1b[{code};{param}~")
+        } else {
+            format!("\x1b[{code}~")
+        }
+    };
+    let prefix = |bytes: &str| {
+        if alt {
+            format!("\x1b{bytes}")
+        } else {
+            bytes.into()
+        }
+    };
+    let sequence = match input.key.as_str() {
+        "Enter" => prefix("\r"),
+        "Tab" if shift => "\x1b[Z".into(),
+        "Tab" => prefix("\t"),
+        "Backspace" => prefix(if ctrl { "\x08" } else { "\x7f" }),
+        "Escape" => prefix("\x1b"),
+        "ArrowUp" => cursor('A'),
+        "ArrowDown" => cursor('B'),
+        "ArrowRight" => cursor('C'),
+        "ArrowLeft" => cursor('D'),
+        "Home" => cursor('H'),
+        "End" => cursor('F'),
+        "Insert" => tilde(2),
+        "Delete" => tilde(3),
+        "PageUp" => tilde(5),
+        "PageDown" => tilde(6),
+        "F1" => function('P'),
+        "F2" => function('Q'),
+        "F3" => function('R'),
+        "F4" => function('S'),
+        "F5" => tilde(15),
+        "F6" => tilde(17),
+        "F7" => tilde(18),
+        "F8" => tilde(19),
+        "F9" => tilde(20),
+        "F10" => tilde(21),
+        "F11" => tilde(23),
+        "F12" => tilde(24),
+        key => {
+            let mut chars = key.chars();
+            let control = match (ctrl, chars.next(), chars.next()) {
+                (true, Some(c), None) => control_byte(c),
+                _ => None,
+            };
+            match control {
+                Some(byte) => prefix(&char::from(byte).to_string()),
+                None if input.text.is_empty() || input.text.chars().any(char::is_control) => {
+                    // A key without printable text (e.g. a bare modifier) sends nothing.
+                    String::new()
+                }
+                None => prefix(&input.text),
             }
         }
+    };
+    sequence.into_bytes()
+}
+
+/// The C0 byte xterm sends for Ctrl plus a character key.
+fn control_byte(key: char) -> Option<u8> {
+    match key.to_ascii_lowercase() {
+        c @ 'a'..='z' => Some(c as u8 - b'a' + 1),
+        '@' | ' ' | '2' => Some(0),
+        '[' | '3' => Some(0x1b),
+        '\\' | '4' => Some(0x1c),
+        ']' | '5' => Some(0x1d),
+        '^' | '6' => Some(0x1e),
+        '_' | '-' | '7' => Some(0x1f),
+        '?' | '8' => Some(0x7f),
+        _ => None,
     }
 }
 
@@ -538,79 +707,87 @@ mod tests {
     }
 
     #[test]
-    fn ghostty_preserves_split_utf8_graphemes_styles_and_cursor_addressing() {
-        let mut emulator = Emulator::new(20, 4).unwrap();
+    fn emulator_preserves_split_utf8_graphemes_styles_and_cursor_addressing() {
+        let mut emulator = Emulator::new(20, 4, SCROLLBACK);
         let bytes = "\x1b[31mRED\x1b[0m\r\n界e\u{301}".as_bytes();
         for byte in bytes {
-            emulator.terminal.vt_write(&[*byte]);
+            emulator.write(&[*byte]);
         }
-        let frame = emulator.frame().unwrap();
+        let frame = emulator.frame();
         assert!(text(&frame).contains("界e\u{301}"));
         assert_eq!(frame.cells[20].width, 2);
         assert_eq!(frame.cells[21].width, 0);
         assert_ne!(frame.cells[0].foreground, frame.cells[4].foreground);
-        emulator.terminal.vt_write(b"\x1b[1;1HX");
-        assert_eq!(emulator.frame().unwrap().cells[0].text, "X");
+        assert_eq!(frame.cursor, Some([3, 1]));
+        emulator.write(b"\x1b[1;1HX");
+        assert_eq!(emulator.frame().cells[0].text, "X");
     }
 
     #[test]
     fn key_and_paste_encoding_follow_application_modes_and_resize() {
-        let mut emulator = Emulator::new(20, 4).unwrap();
-        emulator.terminal.vt_write(b"\x1b[?1h\x1b[?2004h");
+        let mut emulator = Emulator::new(20, 4, SCROLLBACK);
+        let key = |key: &str, text: &str, modifiers| {
+            Input::Key(KeyInput {
+                key: key.into(),
+                text: text.into(),
+                modifiers,
+            })
+        };
+        assert_eq!(emulator.encode(key("ArrowUp", "", 0)), b"\x1b[A");
+        assert_eq!(emulator.encode(key("ArrowUp", "", 2)), b"\x1b[1;5A");
+        assert_eq!(emulator.encode(key("c", "\x03", 2)), b"\x03");
+        assert_eq!(emulator.encode(key("b", "b", 4)), b"\x1bb");
+        assert_eq!(emulator.encode(key("Shift_L", "", 1)), b"");
+        assert_eq!(emulator.encode(Input::Paste("a\nb".into())), b"a\rb");
+        emulator.write(b"\x1b[?1h\x1b[?2004h");
+        assert_eq!(emulator.encode(key("ArrowUp", "", 0)), b"\x1bOA");
         assert_eq!(
-            emulator
-                .encode(Input::Key(KeyInput {
-                    key: "ArrowUp".into(),
-                    text: String::new(),
-                    modifiers: 0
-                }))
-                .unwrap(),
-            b"\x1bOA"
+            emulator.encode(Input::Paste("a\nb\x1b[201~".into())),
+            b"\x1b[200~a\nb[201~\x1b[201~"
         );
-        assert_eq!(
-            emulator.encode(Input::Paste("a\nb".into())).unwrap(),
-            b"\x1b[200~a\nb\x1b[201~"
-        );
-        emulator.terminal.vt_write(b"\x1b[?1049hALT");
-        assert!(text(&emulator.frame().unwrap()).starts_with("ALT"));
-        emulator.terminal.resize(35, 6, 0, 0).unwrap();
-        let frame = emulator.frame().unwrap();
+        emulator.write(b"\x1b[?1049hALT");
+        assert!(text(&emulator.frame()).starts_with("ALT"));
+        emulator.resize(35, 6);
+        let frame = emulator.frame();
         assert_eq!((frame.cols, frame.rows, frame.cells.len()), (35, 6, 210));
-        emulator.terminal.vt_write(b"\x1b[?1049l");
-        assert!(!text(&emulator.frame().unwrap()).contains("ALT"));
+        emulator.write(b"\x1b[?1049l");
+        assert!(!text(&emulator.frame()).contains("ALT"));
+    }
+
+    #[test]
+    fn requests_are_answered_and_titles_published_without_osc52_clipboard_access() {
+        let mut emulator = Emulator::new(20, 4, SCROLLBACK);
+        emulator.write(b"\x1b]0;build\x07\x1b[6n\x1b]11;?\x07\x1b]52;c;aGk=\x07");
+        let replies = emulator.replies();
+        assert_eq!(emulator.title, "build");
+        assert!(replies.contains(&b"\x1b[1;1R".to_vec()));
+        assert!(
+            replies
+                .iter()
+                .any(|r| r.starts_with(b"\x1b]11;rgb:1919/1b1b/1f1f"))
+        );
+        assert_eq!(replies.len(), 2);
     }
 
     #[test]
     fn sustained_output_keeps_scrollback_bounded_and_the_latest_screen() {
-        let mut emulator = Emulator::new(80, 24).unwrap();
-        emulator
-            .terminal
-            .set_scrollback_max_lines(Some(100))
-            .unwrap();
+        let mut emulator = Emulator::new(80, 24, 100);
         for _ in 0..1000 {
-            emulator
-                .terminal
-                .vt_write(b"A line of sustained output\r\n");
+            emulator.write(b"A line of sustained output\r\n");
         }
-        emulator.terminal.vt_write(b"LAST_FRAME");
-        // Ghostty prunes whole pages and retains at least one historical page.
-        // Repeated output must plateau instead of retaining every input line.
-        let retained = emulator.terminal.scrollback_rows().unwrap();
-        assert!(retained < 1000, "retained {retained} rows");
+        assert_eq!(emulator.term.history_size(), 100);
         for _ in 0..1000 {
-            emulator.terminal.vt_write(b"More sustained output\r\n");
+            emulator.write(b"More sustained output\r\n");
         }
-        assert!(emulator.terminal.scrollback_rows().unwrap() < 1000);
-        emulator.terminal.vt_write(b"LAST_FRAME");
-        assert!(text(&emulator.frame().unwrap()).contains("LAST_FRAME"));
-        emulator
-            .terminal
-            .scroll_viewport(terminal::ScrollViewport::Delta(-50));
-        assert!(!text(&emulator.frame().unwrap()).contains("LAST_FRAME"));
-        emulator
-            .terminal
-            .scroll_viewport(terminal::ScrollViewport::Bottom);
-        assert!(text(&emulator.frame().unwrap()).contains("LAST_FRAME"));
+        assert_eq!(emulator.term.history_size(), 100);
+        emulator.write(b"LAST_FRAME");
+        assert!(text(&emulator.frame()).contains("LAST_FRAME"));
+        emulator.term.scroll_display(Scroll::Delta(50));
+        let frame = emulator.frame();
+        assert!(!text(&frame).contains("LAST_FRAME"));
+        assert_eq!(frame.cursor, None);
+        emulator.term.scroll_display(Scroll::Bottom);
+        assert!(text(&emulator.frame()).contains("LAST_FRAME"));
     }
 
     #[test]
@@ -631,6 +808,23 @@ mod tests {
         let final_state = wait(&process, |u| !u.running);
         assert!(text(final_state.frame.as_ref().unwrap()).contains("RESULT:independent input"));
         assert!(final_state.status.contains('7'));
+    }
+
+    #[test]
+    fn foreground_programs_mark_an_interactive_shell_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.arg("-i");
+        command.env("PS1", "READY$ ");
+        let process = Process::spawn_command(dir.path().into(), Some(command)).unwrap();
+        let idle = wait(&process, |u| {
+            u.frame.as_ref().is_some_and(|f| text(f).contains("READY$"))
+        });
+        assert!(!idle.busy);
+        process.send(Input::Text("sleep 30\r".into())).unwrap();
+        wait(&process, |u| u.busy);
+        process.send(Input::Text("\x03".into())).unwrap();
+        assert!(wait(&process, |u| !u.busy).running);
     }
 
     #[test]

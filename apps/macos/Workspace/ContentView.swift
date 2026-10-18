@@ -20,6 +20,8 @@ struct ContentView: View {
     private var appliedFileNameQuery: String { store.fileFilterQuery }
     @State private var sidebarBottomBarHeight: CGFloat = 44
     @State private var sidebarRootDropHeight: CGFloat = 0
+    @AppStorage("terminalHeight") private var terminalHeight = 240.0
+    @State private var detailHeight: CGFloat = 0
     @State private var expandedDirectories: Set<String> = []
     @State private var selectedDirectory: String?
     @State private var currentWorkspaceRoot: String?
@@ -467,10 +469,17 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 480)
             .disabled(store.editingPaused || store.terminalQuitPending)
         } detail: {
-            VSplitView {
+            // VSplitView ignores ideal heights and opens the terminal at half the window.
+            VStack(spacing: 0) {
                 editorDetail.disabled(store.editingPaused || store.terminalQuitPending)
-                if store.terminalVisible { TerminalPanel(store: store).disabled(store.terminalQuitPending).frame(minHeight: 100, idealHeight: 240) }
+                if store.terminalVisible {
+                    let maximum = max(100, detailHeight - 160)
+                    TerminalResizeHandle(height: $terminalHeight, maximum: maximum)
+                    TerminalPanel(store: store).disabled(store.terminalQuitPending)
+                        .frame(height: min(max(100, terminalHeight), maximum))
+                }
             }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { detailHeight = $0 }
                 .onDrop(of: [.fileURL], delegate: ExternalFileDrop(entered: { !$0.isEmpty },
                     exited: {}, dropped: { store.openFiles($0) }, operation: .copy))
                 .toolbar {
@@ -503,11 +512,6 @@ struct ContentView: View {
                     }
                     ToolbarSpacer(.fixed, placement: .primaryAction)
                     ToolbarItem(placement: .primaryAction) {
-                        Button("Terminal", systemImage: "terminal") {
-                            if store.terminals.tabs.isEmpty { store.terminalAction("new") }
-                            else { store.terminalVisible.toggle() }
-                        }
-                        .keyboardShortcut("`", modifiers: .control)
                         ApplicationMenu(store: store, openFolder: { choosingWorkspace = true })
                     }
                 }
@@ -626,6 +630,12 @@ struct ContentView: View {
                 Text(store.activeDocument?.title ?? "No document")
                 Spacer()
                 Text(store.editingPaused ? "Working…" : (store.activeDocument == nil ? "Ready" : (store.hasDirtyActiveDocument ? "Modified" : "Saved")))
+                Button("Terminal", systemImage: "terminal") { store.toggleTerminal() }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(store.terminalVisible ? Color.accentColor : .secondary)
+                    .help("Show or Hide Terminal")
+                    .accessibilityIdentifier("toggleTerminal")
             }
             .font(.caption)
             .foregroundStyle(.secondary)

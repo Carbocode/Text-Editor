@@ -51,7 +51,7 @@ and [ADR 0007](docs/adr/0007-session-restoration.md).
 
 Phase 12 adds an integrated terminal panel with independent tabs in each native
 frontend. New shells start in the workspace root; hiding the panel retains them.
-Ghostty's libghostty-vt provides shared emulation, with native rendering and shared
+The Rust `alacritty_terminal` crate provides shared emulation, with native rendering and shared
 PTY/process ownership through Session. Live terminal closure and application exit
 require confirmation. Close running terminals before changing workspace. Restarting
 the app does not restore processes. See [terminal verification](docs/development.md#integrated-terminal-verification).

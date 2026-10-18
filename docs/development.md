@@ -251,32 +251,31 @@ Use the repository's `.agents/skills/editor-change/SKILL.md` when extending edit
 
 ## Integrated terminal verification
 
-Terminal builds require **Zig 0.16.x**, on PATH or selected with `ZIG=/absolute/path/to/zig`.
-The pinned Rust bindings download and checksum-verify Ghostty's official source
-archive on the first build. `GHOSTTY_SOURCE_DIR` and `GHOSTTY_ZIG_SYSTEM_DIR` support
-offline builds; the source must match the pinned revision in
-[attribution](../assets/GHOSTTY_ATTRIBUTION.md). Runtime use needs no Zig installation.
-`cargo xtask doctor` reports the build prerequisite.
+Terminal emulation uses the pure-Rust `alacritty_terminal` crate; it needs no
+toolchain beyond Cargo. See the [attribution](../assets/ALACRITTY_ATTRIBUTION.md).
 
-Open **Terminal** in the workspace toolbar/menu. Create two tabs, run `pwd` in
+Toggle the panel with the **Terminal** button at the end of the editor status bar
+(also **View → Terminal** on macOS and **Ctrl+`** on macOS and KDE); the panel
+opens below the status bar. Create two tabs, run `pwd` in
 both, change directory in one, and verify independent shells. Hide/show the panel
 and switch documents without restarting them. Resize while running an interactive
 program such as `vi`; check arrows, Tab, Ctrl-C, Unicode, colors and the alternate
 screen. Select text with the mouse; use Cmd-C/V on macOS or Ctrl-Shift-C/V on Linux.
 Scroll to inspect retained output. The first version uses a native CPU renderer;
 Kitty graphics, terminal search UI, shell integration and process restoration are
-not exposed. Each window permits at most 16 tabs. Ghostty scrollback budgets are configured to
-10,000 lines and 8 MiB per terminal, enforced at its allocation-page granularity; individual input messages are limited to 64 KiB.
+not exposed. Each window permits at most 16 tabs. Scrollback is limited to
+10,000 lines per terminal; individual input messages are limited to 64 KiB.
 
 Generate sustained output in one tab while typing in another and editing a file.
-Filesystem moves must not pause terminal input/output. Close a running tab:
+Filesystem moves must not pause terminal input/output. Close a tab at an idle
+prompt: it closes without confirmation or an error. Run `sleep 30` and close it:
 Cancel retains it; Terminate closes it and its foreground processes. Try changing
 workspace through both the chooser and OS requests with live terminals: the core
 must reject the switch and preserve documents. Exit with terminals active:
 Cancel keeps the app open; confirmation waits asynchronously for termination.
 Shell startup failures and nonzero exit statuses must remain visible in the panel.
 
-`cargo xtask verify core` includes real PTY tests, Ghostty mode/Unicode/style tests,
+`cargo xtask verify core` includes real PTY tests, emulator mode/Unicode/style/reply tests,
 tab lifecycle and filesystem concurrency tests. Run the adapter checks and native
 terminal smoke modes on supported desktops; macOS GTK/Qt checks do not establish
 Linux desktop behavior.

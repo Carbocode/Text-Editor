@@ -19,9 +19,14 @@ struct TerminalSmoke {
             }
         }
         wait { store.workspaceRoot != nil && !store.backendBusy }
-        store.terminalAction("new")
+        store.toggleTerminal()
         wait { store.terminals.frame != nil }
         let first = store.terminals.active!
+        precondition(store.terminalVisible)
+        store.toggleTerminal()
+        precondition(!store.terminalVisible)
+        store.toggleTerminal()
+        precondition(store.terminalVisible && store.terminals.active == first && store.terminals.tabs.count == 1)
         let host = NSHostingView(rootView: TerminalPanel(store: store))
         let window = NSWindow(contentRect: NSRect(x: 100,y: 100,width: 720,height: 320),styleMask: [.titled,.resizable],backing: .buffered,defer: false)
         window.contentView = host
@@ -46,9 +51,8 @@ struct TerminalSmoke {
         window.setContentSize(NSSize(width: 500,height: 250))
         wait { (store.terminals.frame?.cols ?? 100) < 70 }
         store.terminalAction("close",id: second,confirmed: false)
-        precondition(store.terminals.tabs.count == 2)
-        store.terminalAction("close",id: second,confirmed: true)
         wait { store.terminals.tabs.count == 1 }
+        precondition(store.errorMessage == nil, "Closing an idle shell reported an error")
         store.terminalAction("close_all",confirmed: true)
         wait { !store.terminalsRunning }
         window.orderOut(nil)

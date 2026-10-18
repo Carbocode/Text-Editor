@@ -41,6 +41,7 @@ Kirigami.ApplicationWindow {
             controller: controller
             enableBrowse: true
             onBrowseRequested: folderDialog.open()
+            terminalVisible: terminalPanel.visible
             onTerminalRequested: terminalPanel.toggle()
         }
         TerminalPanel {

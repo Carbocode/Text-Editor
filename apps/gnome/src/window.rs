@@ -412,19 +412,45 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     editor_stack.add_named(&document_tabs, Some("documents"));
     let core = Rc::new(RefCell::new(core));
     let terminal = crate::terminal::TerminalPanel::new(core.clone(), &window);
+    let status = gtk::Label::new(Some("Select a document"));
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    footer.set_margin_top(4);
+    footer.set_margin_bottom(4);
+    footer.set_margin_start(12);
+    footer.set_margin_end(6);
+    status.set_hexpand(true);
+    status.set_xalign(0.0);
+    footer.append(&status);
+    let terminal_toggle = gtk::ToggleButton::new();
+    terminal_toggle.set_icon_name("utilities-terminal-symbolic");
+    terminal_toggle.set_tooltip_text(Some("Show or Hide Terminal"));
+    terminal_toggle.add_css_class("flat");
+    terminal
+        .root
+        .bind_property("visible", &terminal_toggle, "active")
+        .sync_create()
+        .build();
+    {
+        let terminal = terminal.clone();
+        terminal_toggle.connect_clicked(move |button| {
+            if button.is_active() != terminal.root.is_visible() {
+                terminal.toggle();
+            }
+        });
+    }
+    footer.append(&terminal_toggle);
+    // The status bar belongs to the editor, so the terminal opens below it.
+    let editor_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    editor_area.append(&editor_stack);
+    editor_area.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    editor_area.append(&footer);
     let terminal_split = gtk::Paned::new(gtk::Orientation::Vertical);
-    terminal_split.set_start_child(Some(&editor_stack));
+    terminal_split.set_start_child(Some(&editor_area));
     terminal_split.set_end_child(Some(&terminal.root));
     terminal_split.set_resize_start_child(true);
     terminal_split.set_resize_end_child(false);
     terminal_split.set_shrink_start_child(false);
     terminal_split.set_position(450);
-    let terminal_toggle = icon_button("Terminal", "utilities-terminal-symbolic");
-    {
-        let terminal = terminal.clone();
-        terminal_toggle.connect_clicked(move |_| terminal.toggle());
-    }
-    content_header.pack_end(&terminal_toggle);
     content_body.append(&terminal_split);
     content_view.set_content(Some(&content_body));
     let split = adw::OverlaySplitView::new();
@@ -449,16 +475,6 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
             toggle_sidebar.set_active(split.shows_sidebar());
         });
     }
-    let status = gtk::Label::new(Some("Select a document"));
-    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    footer.set_margin_top(8);
-    footer.set_margin_bottom(8);
-    footer.set_margin_start(12);
-    footer.set_margin_end(12);
-    status.set_hexpand(true);
-    status.set_xalign(0.0);
-    footer.append(&status);
-    content_view.add_bottom_bar(&footer);
     let home_window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Native Workspace")

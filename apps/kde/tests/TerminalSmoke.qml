@@ -38,6 +38,7 @@ ApplicationWindow {
                 if(stage===0) { controller.terminal_action("new",0,false);stage=1 }
                 else if(stage===1 && state.frame) {
                     first=state.active
+                    check(find(panel,"terminalSurface").width>panel.width/2,"Tab column covers the terminal")
                     TerminalProbe.type(find(panel,"terminalSurface"),"printf 'NATIVE_%s\\n' TERMINAL")
                     stage=2
                 } else if(stage===2 && text(state).includes("NATIVE_TERMINAL")) {
@@ -51,9 +52,11 @@ ApplicationWindow {
                     width=500;stage=5
                 } else if(stage===5 && state.frame && state.frame.cols<70) {
                     controller.terminal_action("close",second,false)
-                    check(controller.error_message.length>0,"Unconfirmed close was accepted")
-                    controller.terminal_action("close_all",0,true);stage=6
-                } else if(stage===6 && !controller.terminals_running) {
+                    check(controller.error_message.length===0,"Closing an idle shell reported an error")
+                    stage=6
+                } else if(stage===6 && state.tabs.length===1) {
+                    controller.terminal_action("close_all",0,true);stage=7
+                } else if(stage===7 && !controller.terminals_running) {
                     check(state.tabs.length===0,"Terminal tabs survived close")
                     console.log("KDE native terminal input/render/resize/tab isolation/termination smoke passed")
                     Qt.quit()

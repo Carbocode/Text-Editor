@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Dialogs
+import org.kde.kirigami as Kirigami
 import org.nativeworkspace.Terminal 1.0
 
 Item {
@@ -16,46 +17,68 @@ Item {
         visible = !visible
         surface.forceActiveFocus()
     }
-    ColumnLayout {
+    RowLayout {
         anchors.fill: parent
         spacing: 0
-        RowLayout {
+        ColumnLayout {
+            Layout.fillHeight: true
             Layout.fillWidth: true
-            ScrollView {
+            spacing: 0
+            TerminalSurface {
+                id: surface
+                objectName: "terminalSurface"
+                Layout.fillHeight: true
                 Layout.fillWidth: true
-                Layout.preferredHeight: tabs.implicitHeight
-                Row {
-                    id: tabs
-                    Repeater {
-                        model: root.tabsModel
-                        Row {
-                            required property var modelData
-                            ToolButton { text: modelData.title; checked: root.state.active === modelData.id; checkable: true; onClicked: root.controller.terminal_action("activate",modelData.id,false) }
-                            ToolButton { text: "×"; Accessible.name: "Close terminal"; onClicked: {
-                                if (modelData.running) { root.closing=modelData.id; closeDialog.open() }
-                                else root.controller.terminal_action("close",modelData.id,false)
-                            } }
+                snapshot: root.controller.terminal_json
+                onKeyInput: (key,text,modifiers,paste) => { if (root.state.active !== null) root.controller.terminal_input(root.state.active,key,text,modifiers,paste) }
+                onResized: (cols,rows) => Qt.callLater(function() { if (root.state.active !== null) root.controller.terminal_resize(root.state.active,cols,rows) })
+                onScrolled: lines => { if (root.state.active !== null) root.controller.terminal_scroll(root.state.active,lines) }
+            }
+            Label {
+                Layout.fillWidth: true
+                text: { const tab=root.state.tabs.find(t => t.id===root.state.active); return tab ? tab.status : "" }
+                visible: text.length>0
+            }
+        }
+        Kirigami.Separator { Layout.fillHeight: true }
+        ColumnLayout {
+            Layout.fillHeight: true
+            Layout.fillWidth: false
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 10
+            spacing: 0
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                ToolButton { icon.name: "list-add"; display: AbstractButton.IconOnly; text: "New terminal"; ToolTip.text: text; ToolTip.visible: hovered; onClicked: root.controller.terminal_action("new",0,false) }
+            }
+            ListView {
+                Layout.fillHeight: true
+                Layout.fillWidth: true
+                clip: true
+                model: root.tabsModel
+                delegate: Kirigami.SubtitleDelegate {
+                    id: tabDelegate
+                    required property var modelData
+                    width: ListView.view.width
+                    text: modelData.title
+                    icon.name: "utilities-terminal"
+                    highlighted: root.state.active === modelData.id
+                    onClicked: root.controller.terminal_action("activate",modelData.id,false)
+                    rightPadding: closeButton.width
+                    ToolButton {
+                        id: closeButton
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        icon.name: "window-close"
+                        display: AbstractButton.IconOnly
+                        text: "Close terminal"
+                        Accessible.name: text
+                        onClicked: {
+                            if (tabDelegate.modelData.busy) { root.closing=tabDelegate.modelData.id; closeDialog.open() }
+                            else root.controller.terminal_action("close",tabDelegate.modelData.id,false)
                         }
                     }
                 }
             }
-            ToolButton { text: "+"; Accessible.name: "New terminal"; onClicked: root.controller.terminal_action("new",0,false) }
-            ToolButton { text: "⌄"; Accessible.name: "Hide terminal"; onClicked: root.visible=false }
-        }
-        TerminalSurface {
-            id: surface
-            objectName: "terminalSurface"
-            Layout.fillHeight: true
-            Layout.fillWidth: true
-            snapshot: root.controller.terminal_json
-            onKeyInput: (key,text,modifiers,paste) => { if (root.state.active !== null) root.controller.terminal_input(root.state.active,key,text,modifiers,paste) }
-            onResized: (cols,rows) => Qt.callLater(function() { if (root.state.active !== null) root.controller.terminal_resize(root.state.active,cols,rows) })
-            onScrolled: lines => { if (root.state.active !== null) root.controller.terminal_scroll(root.state.active,lines) }
-        }
-        Label {
-            Layout.fillWidth: true
-            text: { const tab=root.state.tabs.find(t => t.id===root.state.active); return tab ? tab.status : "" }
-            visible: text.length>0
         }
     }
     Dialog {
