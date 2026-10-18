@@ -65,6 +65,13 @@ fn add_face(_: &pango::FontMap, path: &Path) -> Result<(), String> {
         ) -> u8;
     }
     const PROCESS_SCOPE: u32 = 1;
+    // Registration is process-wide; later windows reuse it.
+    static REGISTERED: std::sync::Mutex<Vec<std::path::PathBuf>> =
+        std::sync::Mutex::new(Vec::new());
+    let mut registered_paths = REGISTERED.lock().map_err(|error| error.to_string())?;
+    if registered_paths.iter().any(|known| known == path) {
+        return Ok(());
+    }
     let bytes = path.as_os_str().as_bytes();
     // SAFETY: the URL is created from a live path buffer and released after registration.
     let registered = unsafe {
@@ -81,9 +88,11 @@ fn add_face(_: &pango::FontMap, path: &Path) -> Result<(), String> {
         CFRelease(url);
         registered != 0
     };
-    registered
-        .then_some(())
-        .ok_or_else(|| "CoreText rejected the font".into())
+    if !registered {
+        return Err("CoreText rejected the font".into());
+    }
+    registered_paths.push(path.to_owned());
+    Ok(())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -95,28 +104,21 @@ fn add_face(map: &pango::FontMap, path: &Path) -> Result<(), String> {
 /// The bundled terminal faces with the system fonts as fallbacks for other glyphs.
 fn terminal_font_map(font: &TerminalFont) -> pango::FontMap {
     let map: pango::FontMap = pangocairo::FontMap::new();
-    let register = || {
-        let directory = glib::user_cache_dir().join("native-workspace/fonts");
-        for face in font.faces {
-            let mut hasher = DefaultHasher::new();
-            face.hash(&mut hasher);
-            let path = directory.join(format!("terminal-{:016x}.ttf", hasher.finish()));
-            let added = write_face(&path, face)
-                .map_err(|error| error.to_string())
-                .and_then(|()| add_face(&map, &path));
-            if let Err(error) = added {
-                eprintln!("Bundled terminal font unavailable: {error}");
-            }
+    let directory = glib::user_cache_dir().join("native-workspace/fonts");
+    for face in font.faces {
+        let mut hasher = DefaultHasher::new();
+        face.hash(&mut hasher);
+        let path = directory.join(format!("terminal-{:016x}.ttf", hasher.finish()));
+        let added = write_face(&path, face)
+            .map_err(|error| error.to_string())
+            .and_then(|()| add_face(&map, &path));
+        if let Err(error) = added {
+            eprintln!("Bundled terminal font unavailable: {error}");
         }
-    };
-    // CoreText registration is process-wide and rejects a second registration.
-    #[cfg(target_os = "macos")]
-    {
-        static REGISTERED: std::sync::Once = std::sync::Once::new();
-        REGISTERED.call_once(register);
     }
-    #[cfg(not(target_os = "macos"))]
-    register();
+    // CoreText font maps list families when created, so take one after registration.
+    #[cfg(target_os = "macos")]
+    let map = pangocairo::FontMap::new().upcast();
     map
 }
 
