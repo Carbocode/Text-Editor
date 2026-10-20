@@ -10,6 +10,8 @@ pub use patch::{PatchKind, PatchLine};
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GitSnapshot {
     pub loaded: bool,
+    /// Workspace-relative file and ancestor decorations (M, A, U, D, R, !).
+    pub decorations: std::collections::BTreeMap<String, String>,
     pub roots: Vec<std::path::PathBuf>,
     pub selected_root: Option<std::path::PathBuf>,
     pub repository: Option<GitRepository>,
@@ -27,6 +29,7 @@ impl Default for GitSnapshot {
     fn default() -> Self {
         Self {
             loaded: false,
+            decorations: Default::default(),
             roots: Vec::new(),
             selected_root: None,
             repository: None,
@@ -600,4 +603,61 @@ pub(crate) fn conflict_choices(text: &str) -> (String, String, String) {
         }
     }
     (current, incoming, both)
+}
+
+/// Build once per inspection; native adapters only choose their palette.
+pub(crate) fn decorate_repository(
+    decorations: &mut std::collections::BTreeMap<String, String>,
+    workspace: &std::path::Path,
+    repository: &GitRepository,
+) {
+    fn rank(status: &str) -> u8 {
+        match status {
+            "U" => 6,
+            "M" => 5,
+            "D" => 4,
+            "R" => 3,
+            "A" => 2,
+            _ => 1,
+        }
+    }
+    let mut insert = |relative: &str, status: &str, ancestors: bool| {
+        let absolute = repository.root.join(relative);
+        let Ok(path) = absolute.strip_prefix(workspace) else {
+            return;
+        };
+        let Some(path) = path.to_str() else { return };
+        if native_workspace_domain::DocumentId::parse(path).is_err() {
+            return;
+        }
+        for path in std::iter::once(path).chain(
+            native_workspace_domain::path::ancestors(path).take(if ancestors {
+                usize::MAX
+            } else {
+                0
+            }),
+        ) {
+            let entry = decorations.entry(path.to_owned()).or_default();
+            if rank(status) > rank(entry) || entry.is_empty() {
+                *entry = status.to_owned();
+            }
+        }
+    };
+    for ignored in &repository.ignored {
+        insert(ignored, "!", false);
+    }
+    for change in &repository.changes {
+        let status = if change.conflicted {
+            "U"
+        } else if change.index == "A" || change.index == "?" {
+            "A"
+        } else if change.index == "D" || change.worktree == "D" {
+            "D"
+        } else if change.index == "R" || change.worktree == "R" {
+            "R"
+        } else {
+            "M"
+        };
+        insert(&change.path, status, true);
+    }
 }

@@ -164,6 +164,8 @@ pub mod qobject {
         #[qinvokable]
         fn can_move_files(self: Pin<&mut Self>, urls: &QStringList, directory: &QString) -> bool;
         #[qinvokable]
+        fn sidebar_git_status(self: Pin<&mut Self>, path: &QString) -> QString;
+        #[qinvokable]
         fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QList_QVariant;
         #[qinvokable]
         fn sidebar_rows(
@@ -900,6 +902,14 @@ impl qobject::AppController {
             .map(|v| PathBuf::from(v.to_string()))
             .unwrap_or_else(|| PathBuf::from(input.to_string()));
         self.dispatch(AppCommand::OpenWorkspace(path));
+    }
+    pub fn sidebar_git_status(self: Pin<&mut Self>, path: &QString) -> QString {
+        QString::from(
+            self.rust()
+                .application
+                .snapshot()
+                .sidebar_git_status(&path.to_string()),
+        )
     }
     pub fn sidebar_children(self: Pin<&mut Self>, parent: &QString) -> QList<QVariant> {
         self.rust()

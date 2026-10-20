@@ -338,7 +338,7 @@ final class WorkspaceStore: ObservableObject {
         if snapshot.terminalOnly { return }
         let started = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
         defer { if let started { core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started) } }
-        let sidebarChanged = snapshot.documents != nil || snapshot.directories != nil || snapshot.searchResults != nil
+        let sidebarChanged = snapshot.gitJson != nil || snapshot.documents != nil || snapshot.directories != nil || snapshot.searchResults != nil
             || snapshot.fileFilterFiles != nil || fileFilterQuery != snapshot.fileFilterQuery
         revision = snapshot.revision
         if workspaceName != snapshot.workspaceName { workspaceName = snapshot.workspaceName }

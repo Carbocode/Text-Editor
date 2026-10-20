@@ -60,6 +60,15 @@ The Search sidebar matches UTF-8 file contents; the Files field filters entry na
 
 ## Git Source Control verification
 
+The Files tree loads Git status automatically and refreshes every five seconds,
+including when Source Control is closed. Added/untracked entries show green `A`,
+modified entries amber `M`, renamed entries amber `R`, deleted entries red `D`,
+and conflicts red `U`. Ancestor folders inherit the highest-priority change
+(conflict, modified, deleted, renamed, added), including while collapsed. Ignored
+files/folders show muted `!`; ignoring a folder also mutes its descendants without
+marking unrelated ancestors. Decorations include discovered nested repositories
+and use workspace-relative paths when opening a repository subfolder.
+
 Git must be available on PATH. Configure author identity from Git Actions or the
 installed Git configuration. Remote authentication uses existing Git credential
 and SSH helpers. Use disposable repositories for mutation smoke tests.

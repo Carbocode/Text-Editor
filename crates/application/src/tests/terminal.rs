@@ -42,6 +42,8 @@ fn terminal_tabs_are_independent_and_do_not_change_document_revisions() {
     session
         .dispatch(AppCommand::OpenDocument(id("a.txt")))
         .unwrap();
+    // Establish the baseline after the initial automatic Git inspection.
+    settle(&mut session);
     let revision = session.revision();
     session.terminal_command(TerminalCommand::New).unwrap();
     let first = session.terminal_snapshot().active.unwrap();

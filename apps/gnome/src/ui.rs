@@ -141,6 +141,7 @@ pub(super) struct SidebarEntry {
     pub(super) title: String,
     pub(super) depth: usize,
     pub(super) suffix: Option<&'static str>,
+    pub(super) git_status: String,
 }
 
 impl SidebarRow {
@@ -463,6 +464,10 @@ impl Ui {
         }
         if self.snapshot.borrow().file_filter != snapshot.file_filter {
             self.sidebars[0].dirty.set(true);
+        }
+        if self.snapshot.borrow().git.decorations != snapshot.git.decorations {
+            self.sidebars[0].dirty.set(true);
+            self.sidebars[1].dirty.set(true);
         }
         self.git.render(self, &snapshot);
         self.updating.set(true);
@@ -836,6 +841,7 @@ impl Ui {
                     && left.title == right.title
                     && left.depth == right.depth
                     && left.suffix == right.suffix
+                    && left.git_status == right.git_status
                     && std::mem::discriminant(&left.row) == std::mem::discriminant(&right.row)
             };
             let start = old

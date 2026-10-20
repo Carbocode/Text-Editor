@@ -54,3 +54,9 @@ button.git-file { padding: 1px 4px; min-height: 22px; }
 .git-ref-more { background: alpha(currentColor, 0.1); }
 .git-ref-head { color: @error_color; background: alpha(@error_color, 0.14); }
 .git-detail { padding: 6px 8px; margin: 2px 8px 4px 0; border-radius: 6px; background: alpha(currentColor, 0.05); }
+
+.git-badge { font-weight: bold; }
+.git-a { color: #4e9a63; }
+.git-m, .git-r { color: #c88b30; }
+.git-d, .git-u { color: #e05b60; }
+.git-\! { color: #888888; }

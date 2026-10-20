@@ -192,6 +192,8 @@ ApplicationWindow {
                     pane.sidebarEntries()
                     break
                 case 3:
+                    // Git polling can own the worker after the timed tab loop.
+                    if (controller.move_pending) { --step; break }
                     if (nameFilterTypedAt === 0) {
                         check(pane.treeRowForPath(expandedPath) >= 0, "Tab switch lost folder expansion")
                         check(pane.treeMatchesSidebarEntries(), "Cached tree and sidebar disagree")
@@ -334,7 +336,7 @@ ApplicationWindow {
                     input.keyClick(Qt.Key_Return)
                     break
                 case 14:
-                    check(controller.error_message.length === 0, "Folder rename failed")
+                    check(controller.error_message.length === 0, "Folder rename failed: " + controller.error_message)
                     check(controller.active_document_id === "renamed/new.rs", "Rename lost active document")
                     check(controller.active_document_text === "unsaved rename" && controller.active_document_dirty,
                         "Rename lost unsaved edits")

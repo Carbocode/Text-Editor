@@ -724,6 +724,19 @@ Item {
         return Array.from(fileFilter.length > 0 ? controller.file_filter_files : controller.document_ids)
     }
 
+    function gitStatus(path) {
+        // Register the snapshot dependency; interpretation stays in Rust.
+        var revision = controller.git_json
+        return revision.length > 0 ? controller.sidebar_git_status(path) : ""
+    }
+    function gitColor(status) {
+        if (status === "A") return "#4e9a63"
+        if (status === "M" || status === "R") return "#c88b30"
+        if (status === "D" || status === "U") return "#e05b60"
+        if (status === "!") return Kirigami.Theme.disabledTextColor
+        return Kirigami.Theme.textColor
+    }
+
     function entryIcon(path, directory, expanded) {
         return directory ? controller.folder_icon(path, expanded) : controller.file_icon(path)
     }
@@ -1411,6 +1424,7 @@ Item {
                                 }
                                 delegate: TreeViewDelegate {
                                     id: treeRow
+                                    property string gitStatus: entry ? root.gitStatus(entry.path) : ""
                                     text: model.display
                                     icon.source: entry ? root.entryIcon(entry.path, entry.directory, expanded) : ""
                                     icon.color: "transparent"
@@ -1449,11 +1463,23 @@ Item {
                                             color: treeRow.highlighted ? systemColors.highlightedText : treeRow.Kirigami.Theme.textColor
                                             Accessible.name: "Unsaved changes"
                                         }
+                                        // Last item: a fixed trailing column like VS Code.
+                                        Label {
+                                            objectName: "sidebarGit:" + (treeRow.entry ? treeRow.entry.path : "")
+                                            text: treeRow.gitStatus
+                                            color: root.gitColor(treeRow.gitStatus)
+                                            font.bold: true
+                                            width: Kirigami.Units.iconSizes.small
+                                            horizontalAlignment: Text.AlignHCenter
+                                            visible: text.length > 0
+                                            Accessible.name: "Git status: " + text
+                                        }
                                     }
                                     contentItem: Kirigami.IconTitleSubtitle {
                                         title: treeRow.text
                                         icon: icon.fromControlsIcon(treeRow.icon)
                                         font: treeRow.font
+                                        Kirigami.Theme.textColor: root.gitColor(treeRow.gitStatus)
                                         selected: treeRow.highlighted
                                         visible: !treeRow.editing
                                     }

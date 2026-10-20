@@ -48,6 +48,7 @@ struct ContentView: View {
 
         let id: String
         let depth: Int
+        let gitStatus: String
         let kind: Kind
     }
 
@@ -55,14 +56,14 @@ struct ContentView: View {
         guard sidebarTab.hasTree else { sidebarRows = []; return }
         sidebarRows = store.sidebarRows(search: sidebarTab == .search, expanded: expandedDirectories).compactMap { row in
             if row.directory {
-                return SidebarOutlineRow(id: "entry:\(row.path)", depth: Int(row.depth), kind: .directory(row.path))
+                return SidebarOutlineRow(id: "entry:\(row.path)", depth: Int(row.depth), gitStatus: row.gitStatus, kind: .directory(row.path))
             }
             if let index = row.resultIndex, let position = Int(exactly: index), store.searchResults.indices.contains(position) {
-                return SidebarOutlineRow(id: "match:\(position)", depth: Int(row.depth),
+                return SidebarOutlineRow(id: "match:\(position)", depth: Int(row.depth), gitStatus: row.gitStatus,
                     kind: .match(SearchMatchRow(index: position, result: store.searchResults[position])))
             }
             let file = DocumentSummary(id: row.path, title: row.title, dirty: row.dirty, externalChange: row.externalChange)
-            return SidebarOutlineRow(id: "entry:\(row.path)", depth: Int(row.depth), kind: .file(SearchFileGroup(id: row.path, file: file)))
+            return SidebarOutlineRow(id: "entry:\(row.path)", depth: Int(row.depth), gitStatus: row.gitStatus, kind: .file(SearchFileGroup(id: row.path, file: file)))
         }
     }
 
@@ -70,6 +71,26 @@ struct ContentView: View {
         if expandedDirectories.contains(path) { expandedDirectories.remove(path) }
         else { expandedDirectories.insert(path) }
         rebuildSidebarIndex()
+    }
+
+    private func gitColor(_ status: String) -> Color {
+        switch status {
+        case "A": return .green
+        case "M", "R": return .orange
+        case "D", "U": return .red
+        case "!": return .secondary
+        default: return .primary
+        }
+    }
+
+    @ViewBuilder private func gitBadge(_ status: String, path: String) -> some View {
+        if !status.isEmpty {
+            // Fixed trailing column, like VS Code's decoration badges.
+            Text(status).font(.caption.monospaced().weight(.semibold)).foregroundStyle(gitColor(status))
+                .frame(width: 12, alignment: .center)
+                .accessibilityLabel("Git status: \(status)")
+                .accessibilityIdentifier("sidebarGit:" + path)
+        }
     }
 
     @ViewBuilder private func sidebarRow(_ row: SidebarOutlineRow) -> some View {
@@ -91,8 +112,10 @@ struct ContentView: View {
                         SidebarEntryIcon(draft: renameDraft, originalPath: path,
                                          displayPath: path, directory: true,
                                          expanded: expandedDirectories.contains(path) || sidebarTab == .search || !appliedFileNameQuery.isEmpty)
-                        entryName(path).opacity(isPendingMove(path) ? 0.5 : 1)
+                        entryName(path).foregroundStyle(gitColor(row.gitStatus)).opacity(isPendingMove(path) ? 0.5 : 1)
+                        Spacer(minLength: 0)
                         pendingMoveIndicator(path)
+                        gitBadge(row.gitStatus, path: path)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -120,7 +143,7 @@ struct ContentView: View {
                 HStack(spacing: 8) {
                     SidebarEntryIcon(draft: renameDraft, originalPath: group.id,
                                      displayPath: group.id)
-                    entryName(group.id).opacity(isPendingMove(group.id) ? 0.5 : 1)
+                    entryName(group.id).foregroundStyle(gitColor(row.gitStatus)).opacity(isPendingMove(group.id) ? 0.5 : 1)
                     Spacer(minLength: 0)
                     pendingMoveIndicator(group.id)
                     if store.openDocuments.contains(where: { $0 == group.id }) {
@@ -135,6 +158,7 @@ struct ContentView: View {
                         Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
                     if group.file.dirty || (store.activeDocument.map { $0.id } == group.id && store.hasDirtyActiveDocument) { Circle().fill(.secondary).frame(width: 6, height: 6) }
+                    gitBadge(row.gitStatus, path: group.id)
                 }
                 .padding(.leading, CGFloat(row.depth) * 14 + 8)
                 .frame(maxWidth: .infinity, alignment: .leading)

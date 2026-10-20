@@ -32,6 +32,8 @@ pub struct GitRepository {
     pub root: PathBuf,
     pub branch: String,
     pub changes: Vec<GitChange>,
+    /// Ignored files and collapsed ignored directories, repository-relative.
+    pub ignored: Vec<String>,
     pub head: String,
     pub branches: Vec<GitBranch>,
     pub remotes: Vec<GitRemote>,
@@ -164,6 +166,26 @@ pub(super) fn repository(root: &Path) -> Result<Option<GitRepository>, Filesyste
         ],
     )?;
     let changes = parse_status(root, &bytes)?;
+    let ignored = checked(
+        root,
+        &[
+            "ls-files",
+            "--full-name",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+            "--",
+            ".",
+        ],
+    )?
+    .split(|b| *b == 0)
+    .filter_map(|record| std::str::from_utf8(record).ok())
+    .map(|path| path.trim_end_matches('/'))
+    .filter(|path| DocumentId::parse(*path).is_ok())
+    .map(str::to_owned)
+    .collect();
     let (symbolic, _) = output(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
     let branch = if symbolic.status.success() {
         String::from_utf8_lossy(&symbolic.stdout)
@@ -181,6 +203,7 @@ pub(super) fn repository(root: &Path) -> Result<Option<GitRepository>, Filesyste
             root: repo_root,
             branch,
             changes,
+            ignored,
             head: String::new(),
             branches: Vec::new(),
             remotes: Vec::new(),

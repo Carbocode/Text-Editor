@@ -94,8 +94,9 @@ partial-staging patches, merge-result validation, graph lanes/colors, typed
 references and numbered diff lines. Native adapters render the shared graph and maintain their sidebar divider, dialogs,
 drafts and selections. Mutations reconcile documents even after partial failures.
 Worktree operations require saved buffers and pause editing; metadata operations
-and remote fetch/push keep editing responsive. The visible Git sidebar refreshes
-every five seconds without hiding errors. See [ADR 0010](adr/0010-git-source-control.md).
+and remote fetch/push keep editing responsive. Git status refreshes every five seconds for every open workspace without hiding
+errors. Shared workspace-relative decorations color Files entries and aggregate
+changes on ancestor folders; ignored directory decorations apply to descendants. See [ADR 0010](adr/0010-git-source-control.md).
 
 ## Tabs and errors
 

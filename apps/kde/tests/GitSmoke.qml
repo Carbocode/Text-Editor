@@ -41,6 +41,7 @@ ApplicationWindow {
                     const graph=find(panel,"gitGraph")
                     check(graph!==null && Math.abs(graph.height/panel.height-0.5)<0.15,"Git sidebar is not split in half")
                     check(state.loaded && !!state.repository, "Git repository missing")
+                    check(controller.sidebar_git_status("note.txt") === "M", "Files decoration missing")
                     const change = state.repository.changes.find(c => c.path === "note.txt")
                     check(change && change.staged && change.unstaged, "Index/worktree changes missing")
                     panel.review("note.txt", true)
@@ -78,6 +79,7 @@ ApplicationWindow {
                 else {
                     check(state.history[0].commit.subject.startsWith("Native commit"),"Native commit did not update graph")
                     check(state.repository.changes.length===0,"Commit left staged changes")
+                    check(controller.sidebar_git_status("note.txt") === "", "Files decoration stayed stale after commit")
                     check(state.history[0].head && state.history[0].commit.refs.some(r=>r.current&&r.kind==="branch") && state.history[0].commit.refs.length===3,"Reference badges missing")
                     check(state.graph_width===1,"Linear history should use one lane")
                     console.log("KDE Git status and staged/working-tree diff smoke passed")

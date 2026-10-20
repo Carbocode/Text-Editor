@@ -54,6 +54,23 @@ impl SidebarRow {
 }
 
 impl AppSnapshot {
+    /// Changed ancestors are precomputed; ignored directories apply to descendants.
+    pub fn sidebar_git_status(&self, entry: &str) -> &str {
+        self.git
+            .decorations
+            .get(entry)
+            .map(String::as_str)
+            .unwrap_or_else(|| {
+                if path::ancestors(entry)
+                    .any(|parent| self.git.decorations.get(parent).is_some_and(|s| s == "!"))
+                {
+                    "!"
+                } else {
+                    ""
+                }
+            })
+    }
+
     /// Direct children of `parent` ("" for the root) in sidebar order.
     pub fn sidebar_children(&self, parent: &str) -> Vec<SidebarChild> {
         let prefix = if parent.is_empty() {
