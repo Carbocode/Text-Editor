@@ -33,7 +33,6 @@ const SLOW_RELOCATION: Duration = Duration::from_millis(300);
 
 pub struct Session {
     last_git_poll: Instant,
-    git_visible: bool,
     terminals: crate::terminal::Terminals,
     /// `None` while the worker owns the application.
     core: Option<Application>,
@@ -90,8 +89,7 @@ impl Session {
 
     pub(crate) fn with_application(core: Application) -> Self {
         Self {
-            last_git_poll: Instant::now(),
-            git_visible: false,
+            last_git_poll: Instant::now() - Duration::from_secs(5),
             terminals: crate::terminal::Terminals::new(core.live_terminals.clone()),
             published: core.snapshot(),
             core_revision: core.revision(),
@@ -109,7 +107,9 @@ impl Session {
     }
 
     pub fn set_git_visible(&mut self, visible: bool) {
-        self.git_visible = visible;
+        if visible {
+            self.last_git_poll = Instant::now() - Duration::from_secs(5);
+        }
     }
     pub fn git_request(
         &mut self,
@@ -312,8 +312,7 @@ impl Session {
             }
         }
         if self.worker.is_none()
-            && self.git_visible
-            && self.published.git.loaded
+            && self.published.workspace_root().is_some()
             && self.last_git_poll.elapsed() >= Duration::from_secs(5)
         {
             self.last_git_poll = Instant::now();
@@ -552,7 +551,17 @@ impl Session {
             } else {
                 Schedule::Background
             };
-            self.start_job(deferred, schedule, None, SidebarDropTrace::default(), true);
+            // A successful queued intention clears an older error. Failures from
+            // this job or reported while it ran must survive the replay.
+            let preserve_error =
+                reply.error.is_some() || worker.error_version != self.error_version;
+            self.start_job(
+                deferred,
+                schedule,
+                None,
+                SidebarDropTrace::default(),
+                preserve_error,
+            );
             if let Some(error) = reply.error {
                 let _ = self.fail(error);
             }

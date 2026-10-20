@@ -1110,3 +1110,83 @@ fn git_patch_lines_number_hunks_and_keep_header_like_content_inside_hunks() {
     assert_eq!((lines[5].old, lines[6].new), (Some(4), Some(4)));
     assert!(lines[5].changed && !lines[1].changed);
 }
+
+#[test]
+fn files_tree_git_decorations_include_ancestors_ignored_and_subworkspaces() {
+    let dir = repository();
+    let root = dir.path();
+    fs::write(root.join(".gitignore"), "cache/\n*.log\n").unwrap();
+    fs::create_dir_all(root.join("sub/new/deep")).unwrap();
+    fs::create_dir_all(root.join("cache/deep")).unwrap();
+    fs::write(root.join("cache/deep/file.txt"), "ignored").unwrap();
+    fs::write(root.join("sub/debug.log"), "ignored").unwrap();
+    fs::write(root.join("sub/new/deep/added.txt"), "new").unwrap();
+    fs::write(root.join("sub/note.txt"), "modified").unwrap();
+    let mut app = session(root);
+    let view = refresh(&mut app);
+    for path in ["sub/new", "sub/new/deep", "sub/new/deep/added.txt"] {
+        assert_eq!(view.sidebar_git_status(path), "A", "{path}");
+    }
+    assert_eq!(view.sidebar_git_status("sub"), "M");
+    assert_eq!(view.sidebar_git_status("sub/note.txt"), "M");
+    assert_eq!(view.sidebar_git_status("cache"), "!");
+    assert_eq!(view.sidebar_git_status("cache/deep/file.txt"), "!");
+    assert_eq!(view.sidebar_git_status("sub/debug.log"), "!");
+    assert_eq!(view.sidebar_git_status("cache-other/file.txt"), "");
+    assert_eq!(view.sidebar_git_status("file.txt"), "");
+    assert!(
+        !view
+            .git
+            .repository
+            .as_ref()
+            .unwrap()
+            .changes
+            .iter()
+            .any(|c| c.path.contains("debug.log"))
+    );
+    let mut app = session(&root.join("sub"));
+    let view = refresh(&mut app);
+    assert_eq!(view.sidebar_git_status("note.txt"), "M");
+    assert_eq!(view.sidebar_git_status("new"), "A");
+    assert_eq!(view.sidebar_git_status("debug.log"), "!");
+    fs::write(root.join("sub/note.txt"), "note\n").unwrap();
+    fs::remove_file(root.join("sub/new/deep/added.txt")).unwrap();
+    let view = refresh(&mut app);
+    assert_eq!(view.sidebar_git_status("note.txt"), "");
+    assert_eq!(view.sidebar_git_status("new"), "");
+}
+
+#[test]
+fn files_tree_loads_git_without_opening_source_control() {
+    let dir = repository();
+    fs::write(dir.path().join("sub/note.txt"), "changed").unwrap();
+    let mut app = session(dir.path());
+    let view = wait_until(
+        || {
+            app.poll();
+            app.snapshot()
+        },
+        |s| s.git.loaded,
+    );
+    assert_eq!(view.sidebar_git_status("sub"), "M");
+}
+
+#[test]
+fn files_tree_decorations_include_nested_repositories_independently_of_selection() {
+    let dir = repository();
+    let nested = dir.path().join("nested");
+    fs::create_dir_all(nested.join("src")).unwrap();
+    git(&nested, &["init", "-q"]);
+    fs::write(nested.join("src/new.txt"), "new").unwrap();
+    fs::write(dir.path().join("sub/note.txt"), "changed").unwrap();
+    let mut app = session(dir.path());
+    let view = refresh(&mut app);
+    assert_eq!(view.sidebar_git_status("nested/src"), "A");
+    assert_eq!(view.sidebar_git_status("nested/src/new.txt"), "A");
+    assert_eq!(view.sidebar_git_status("sub"), "M");
+    app.dispatch(AppCommand::SelectGitRepository(nested))
+        .unwrap();
+    let view = settle(&mut app);
+    assert_eq!(view.sidebar_git_status("nested/src/new.txt"), "A");
+    assert_eq!(view.sidebar_git_status("sub"), "M");
+}

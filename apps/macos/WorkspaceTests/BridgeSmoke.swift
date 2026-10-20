@@ -38,6 +38,7 @@ struct BridgeSmoke {
         let polledFailure = try state()
         precondition(polledFailure.error == invalid.error)
         _ = try app.openDocument(id: "README.md")
+        _ = try settle() // Opening may queue behind automatic Git inspection.
         let firstEdit = try app.changeDocument(id: "README.md", content: "after 💡 after")
         precondition(firstEdit.activeDocument?.dirty == true)
         // An edit does not serialize workspace paths or unchanged matches.

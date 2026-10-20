@@ -44,6 +44,7 @@ pub(super) fn sidebar_entry(
         }
     };
     Some(SidebarEntry {
+        git_status: snapshot.sidebar_git_status(&row.path).into(),
         row: kind,
         path: row.path,
         title,
@@ -180,7 +181,7 @@ pub(super) fn sidebar_resize_handle(split: &adw::OverlaySplitView) -> gtk::Box {
 }
 
 pub(super) fn sidebar_entry_widget(entry: &SidebarEntry, collapsed: bool) -> gtk::Box {
-    match &entry.row {
+    let widget = match &entry.row {
         SidebarRow::Directory(path) => sidebar_row(
             &entry.title,
             entry.depth,
@@ -196,7 +197,18 @@ pub(super) fn sidebar_entry_widget(entry: &SidebarEntry, collapsed: bool) -> gtk
             entry.suffix,
         ),
         SidebarRow::Match(_) => sidebar_row(&entry.title, entry.depth, None, None, None),
+    };
+    if !entry.git_status.is_empty() {
+        widget.add_css_class(&format!("git-{}", entry.git_status.to_lowercase()));
+        // The title expands, so the last child is a fixed trailing column.
+        let badge = gtk::Label::new(Some(&entry.git_status));
+        badge.add_css_class("git-badge");
+        badge.set_width_chars(2);
+        badge.set_halign(gtk::Align::End);
+        badge.set_tooltip_text(Some(&format!("Git status: {}", entry.git_status)));
+        widget.append(&badge);
     }
+    widget
 }
 
 pub(super) fn icon_for(name: &str) -> gtk::gdk::Texture {

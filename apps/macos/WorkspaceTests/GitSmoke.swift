@@ -29,6 +29,11 @@ struct GitSmoke {
         try "staged\n".write(to: file, atomically: true, encoding: .utf8)
         try git(["add", "note.txt"])
         try "working tree\n".write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("new/deep"), withIntermediateDirectories: true)
+        try "new".write(to: root.appendingPathComponent("new/deep/added.txt"), atomically: true, encoding: .utf8)
+        try "cache/\n".write(to: root.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("cache"), withIntermediateDirectories: true)
+        try "ignored".write(to: root.appendingPathComponent("cache/file.txt"), atomically: true, encoding: .utf8)
         let core = WorkspaceApplication()
         let store = WorkspaceStore(core: core, persistence: false)
         store.openWorkspace(root)
@@ -52,6 +57,13 @@ struct GitSmoke {
             }
             if !condition() { print("Git sidebar timeout at line \(line): loaded=\(store.git.loaded), busy=\(store.backendBusy), actions=\(find("gitActions") != nil), tab=\(find("sidebarTab:git") != nil)") }
             precondition(condition(), "Git sidebar did not become ready: \(store.errorMessage ?? "")")
+        }
+        // Files decorations arrive before selecting Source Control.
+        wait { store.git.loaded && !store.backendBusy }
+        let rows = store.sidebarRows(search: false, expanded: ["new", "new/deep", "cache"])
+        for (path, status) in [("note.txt", "M"), ("new", "A"), ("new/deep", "A"),
+                               ("new/deep/added.txt", "A"), ("cache", "!"), ("cache/file.txt", "!")] {
+            precondition(rows.first(where: { $0.path == path })?.gitStatus == status, path)
         }
         func element(_ identifier: String, in parent: Any) -> (any NSAccessibilityElementProtocol)? {
             if let accessible = parent as? any NSAccessibilityElementProtocol,
@@ -77,7 +89,11 @@ struct GitSmoke {
             }
         }
         wait { find("sidebarTab:git") != nil }
-        precondition(!store.git.loaded, "Git should load through the actual sidebar tab")
+        // Folder and file badges share one trailing column regardless of name length.
+        wait { ["new", "cache", "note.txt"].allSatisfy { find("sidebarGit:" + $0) != nil } }
+        let badges = ["new", "cache", "note.txt"].map { find("sidebarGit:" + $0)!.accessibilityFrame() }
+        precondition(badges.allSatisfy { abs($0.maxX - badges[0].maxX) < 1 }, "Git badges are not right-aligned: \(badges)")
+        precondition(store.git.loaded, "Files should load Git before opening Source Control")
         click("sidebarTab:git")
         wait { store.git.loaded && !store.backendBusy && find("gitActions") != nil }
         precondition(store.git.repository != nil && !store.git.history.isEmpty)
@@ -112,7 +128,7 @@ struct GitSmoke {
         precondition(store.openPaths([root]))
         wait { store.git.loaded && !store.backendBusy }
         checkToolbar()
-        let change = store.git.repository?.changes.first
+        let change = store.git.repository?.changes.first(where: { $0.path == "note.txt" })
         precondition(change?.path == "note.txt" && change?.staged == true && change?.unstaged == true)
         store.showGitDiff("note.txt", staged: true)
         finish()

@@ -182,6 +182,7 @@ pub struct Activity {
 
 #[derive(Clone, uniffi::Record)]
 pub struct SidebarRow {
+    pub git_status: String,
     pub title: String,
     pub dirty: bool,
     pub external_change: bool,
@@ -665,6 +666,7 @@ impl WorkspaceApplication {
         Ok(rows
             .into_iter()
             .map(|r| SidebarRow {
+                git_status: snapshot.sidebar_git_status(&r.path).into(),
                 title: path::name(&r.path).into(),
                 dirty: snapshot.document_summary(&r.path).is_some_and(|d| d.dirty),
                 external_change: snapshot

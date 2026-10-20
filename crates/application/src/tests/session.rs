@@ -318,7 +318,8 @@ fn errors_stay_published_until_the_next_successful_command() {
     session
         .dispatch(AppCommand::OpenDocument(id("a.md")))
         .unwrap();
-    assert!(session.snapshot().error.is_none());
+    // The successful open may queue behind automatic Git inspection.
+    assert!(settle(&mut session).error.is_none());
 }
 
 #[test]

@@ -33,16 +33,14 @@ impl Application {
             }
         }
         candidates.truncate(32);
-        let roots: Vec<_> = candidates
-            .into_iter()
-            .filter(|root| {
-                self.filesystem
-                    .git_repository(root)
-                    .ok()
-                    .flatten()
-                    .is_some()
-            })
-            .collect();
+        let mut roots = Vec::new();
+        let mut decorations = std::collections::BTreeMap::new();
+        for candidate in candidates {
+            if let Some(repository) = self.filesystem.git_repository(&candidate)? {
+                crate::git::decorate_repository(&mut decorations, workspace, &repository);
+                roots.push(candidate);
+            }
+        }
         let selected = self
             .state()
             .git
@@ -63,6 +61,7 @@ impl Application {
         };
         let mut snapshot = GitSnapshot {
             loaded: true,
+            decorations,
             roots,
             selected_root: selected.clone(),
             repository,
