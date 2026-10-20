@@ -1,7 +1,11 @@
 //! Native Git controls and graph rendering; Git policy and graph geometry are shared.
 use crate::ui::Ui;
 use adw::prelude::*;
-use native_workspace_application::{AppCommand, AppSnapshot, GitAction, git_action_confirmation};
+use native_workspace_application::{
+    AppCommand, AppSnapshot, GitAction, GitChange, GitRefKind, GraphCommit, PatchKind,
+    git_action_confirmation,
+};
+use native_workspace_domain::path;
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -43,6 +47,314 @@ pub(super) struct GitPanel {
     error: gtk::Label,
     updating: Rc<Cell<bool>>,
     review: Rc<RefCell<Option<Review>>>,
+    selected: Rc<RefCell<Option<String>>>,
+}
+
+const LANE: f64 = 12.0;
+const ROW: i32 = 24;
+const MAX_LANES: usize = 14;
+const COLORS: [(f64, f64, f64); 8] = [
+    (0.24, 0.56, 0.98),
+    (0.96, 0.55, 0.20),
+    (0.62, 0.42, 0.94),
+    (0.25, 0.72, 0.47),
+    (0.93, 0.36, 0.56),
+    (0.18, 0.70, 0.76),
+    (0.85, 0.70, 0.16),
+    (0.55, 0.60, 0.68),
+];
+
+/// Status letters and colors are presentation; classification comes from Git.
+fn status(code: &str) -> (&str, &'static str) {
+    match code {
+        "?" => ("U", "git-added"),
+        "A" => ("A", "git-added"),
+        "D" => ("D", "git-deleted"),
+        "R" | "C" => (code, "git-renamed"),
+        _ => (code, "git-modified"),
+    }
+}
+fn change_status(change: &GitChange, staged: bool) -> (&str, &'static str) {
+    if change.conflicted {
+        ("!", "git-deleted")
+    } else {
+        status(if staged {
+            &change.index
+        } else {
+            &change.worktree
+        })
+    }
+}
+
+/// Icon, file name, dimmed folder and a colored status letter.
+fn file_label(file: &str, letter: &str, class: &str) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let icon = gtk::Image::from_paintable(Some(&crate::sidebar::icon_for(file)));
+    icon.set_pixel_size(14);
+    row.append(&icon);
+    let name = gtk::Label::new(Some(path::name(file)));
+    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    row.append(&name);
+    let folder = gtk::Label::new(Some(path::parent(file)));
+    folder.add_css_class("dim-label");
+    folder.add_css_class("caption");
+    folder.set_ellipsize(gtk::pango::EllipsizeMode::Start);
+    folder.set_hexpand(true);
+    folder.set_xalign(0.0);
+    row.append(&folder);
+    let code = gtk::Label::new(Some(letter));
+    code.add_css_class("git-status");
+    code.add_css_class(class);
+    row.append(&code);
+    row.set_tooltip_text(Some(file));
+    row
+}
+
+fn draw_graph(row: &GraphCommit, cr: &gtk::cairo::Context, height: f64) {
+    let x = |lane: usize| lane as f64 * LANE + LANE / 2.0 + 2.0;
+    cr.set_line_width(1.6);
+    cr.set_line_cap(gtk::cairo::LineCap::Round);
+    for edge in row.edges.iter().filter(|e| e.from.max(e.to) < MAX_LANES) {
+        let (r, g, b) = COLORS[edge.color % COLORS.len()];
+        cr.set_source_rgb(r, g, b);
+        let (ax, ay) = (x(edge.from), f64::from(edge.start) * height / 2.0);
+        let (bx, by) = (x(edge.to), f64::from(edge.end) * height / 2.0);
+        cr.move_to(ax, ay);
+        let mid = (ay + by) / 2.0;
+        cr.curve_to(ax, mid, bx, mid, bx, by);
+        let _ = cr.stroke();
+    }
+    if row.lane >= MAX_LANES {
+        return;
+    }
+    let (r, g, b) = COLORS[row.color % COLORS.len()];
+    let (cx, cy) = (x(row.lane), height / 2.0);
+    let radius = if row.head { 4.5 } else { 3.5 };
+    cr.arc(cx, cy, radius, 0.0, std::f64::consts::TAU);
+    if row.merge {
+        cr.set_source_rgb(0.5, 0.5, 0.5);
+        cr.set_operator(gtk::cairo::Operator::Clear);
+        let _ = cr.fill_preserve();
+        cr.set_operator(gtk::cairo::Operator::Over);
+        cr.set_source_rgb(r, g, b);
+        cr.set_line_width(1.8);
+        let _ = cr.stroke();
+    } else {
+        cr.set_source_rgb(r, g, b);
+        let _ = cr.fill();
+    }
+    if row.head {
+        cr.set_source_rgba(r, g, b, 0.55);
+        cr.set_line_width(1.2);
+        cr.arc(cx, cy, 6.5, 0.0, std::f64::consts::TAU);
+        let _ = cr.stroke();
+    }
+}
+
+/// Lanes continuing below a commit stay visible through its inline detail.
+fn draw_continuation(row: &GraphCommit, cr: &gtk::cairo::Context, height: f64) {
+    cr.set_line_width(1.6);
+    let mut drawn = HashSet::new();
+    for edge in &row.edges {
+        if edge.end == 2 && edge.to < MAX_LANES && drawn.insert(edge.to) {
+            let (r, g, b) = COLORS[edge.color % COLORS.len()];
+            cr.set_source_rgb(r, g, b);
+            let x = edge.to as f64 * LANE + LANE / 2.0 + 2.0;
+            cr.move_to(x, 0.0);
+            cr.line_to(x, height);
+            let _ = cr.stroke();
+        }
+    }
+}
+
+fn badge(name: &str, kind: GitRefKind, current: bool) -> gtk::Label {
+    let short = if name.chars().count() > 24 {
+        let chars: Vec<_> = name.chars().collect();
+        format!(
+            "{}…{}",
+            chars[..11].iter().collect::<String>(),
+            chars[chars.len() - 11..].iter().collect::<String>()
+        )
+    } else {
+        name.into()
+    };
+    let label = gtk::Label::new(Some(&match (kind, current) {
+        (GitRefKind::Tag, _) => format!("🏷 {short}"),
+        (GitRefKind::Remote, _) => format!("☁ {short}"),
+        (_, true) => format!("✓ {short}"),
+        _ => short,
+    }));
+    label.add_css_class("git-ref");
+    label.add_css_class(match kind {
+        GitRefKind::Head => "git-ref-head",
+        GitRefKind::Branch if current => "git-ref-current",
+        GitRefKind::Branch => "git-ref-branch",
+        GitRefKind::Remote => "git-ref-remote",
+        GitRefKind::Tag => "git-ref-tag",
+    });
+    label.set_tooltip_text(Some(name));
+    label
+}
+
+enum Item {
+    Run(&'static str, String),
+    /// A query whose result opens in the review window.
+    Inspect(&'static str, String),
+    Confirm(&'static str, String),
+    Form(&'static str, String),
+}
+
+/// Flat popover menu; each entry runs one typed Git request.
+fn popover_menu(ui: &Ui, items: Vec<(String, Item)>) -> gtk::Popover {
+    let options = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let popover = gtk::Popover::new();
+    let items: Vec<_> = items
+        .into_iter()
+        .map(|(title, item)| (title, Rc::new(item)))
+        .collect();
+    for (title, item) in items {
+        let choice = gtk::Button::with_label(&title);
+        choice.add_css_class("flat");
+        if let Some(label) = choice.child().and_downcast::<gtk::Label>() {
+            label.set_xalign(0.0);
+        }
+        let next = ui.clone();
+        let close = popover.clone();
+        choice.connect_clicked(move |_| {
+            close.popdown();
+            match &*item {
+                Item::Run(id, value) => action(&next, id, value.clone(), String::new(), false),
+                Item::Inspect(id, value) => {
+                    let value = value.clone();
+                    next.git
+                        .review(&next, |ui| action(ui, id, value, String::new(), false));
+                }
+                Item::Confirm(id, value) => confirm(&next, id, value.clone()),
+                Item::Form(id, value) => {
+                    let spec = next
+                        .snapshot
+                        .borrow()
+                        .git
+                        .actions
+                        .iter()
+                        .find(|a| a.id == *id)
+                        .cloned();
+                    if let Some(spec) = spec {
+                        form_with(&next, &spec, value);
+                    }
+                }
+            }
+        });
+        options.append(&choice);
+    }
+    popover.set_child(Some(&options));
+    popover
+}
+
+/// Builds the menu on secondary click and detaches it when closed, so rebuilt
+/// rows never keep popovers alive.
+fn context_menu(
+    widget: &impl IsA<gtk::Widget>,
+    ui: &Ui,
+    items: impl Fn() -> Vec<(String, Item)> + 'static,
+) {
+    let click = gtk::GestureClick::builder().button(3).build();
+    let ui = ui.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        let Some(widget) = gesture.widget() else {
+            return;
+        };
+        let popover = popover_menu(&ui, items());
+        popover.set_parent(&widget);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.connect_closed(|popover| {
+            let popover = popover.clone();
+            gtk::glib::idle_add_local_once(move || popover.unparent());
+        });
+        popover.popup();
+    });
+    widget.add_controller(click);
+}
+
+fn commit_items(id: &str) -> Vec<(String, Item)> {
+    let v = || id.to_owned();
+    vec![
+        ("Show Changes".into(), Item::Inspect("show_commit", v())),
+        ("Checkout (Detached)".into(), Item::Run("checkout", v())),
+        ("Create Branch Here…".into(), Item::Form("branch", v())),
+        ("Create Tag Here…".into(), Item::Form("tag", v())),
+        ("Merge into Current Branch".into(), Item::Run("merge", v())),
+        (
+            "Rebase Current Branch onto This…".into(),
+            Item::Confirm("rebase", v()),
+        ),
+        ("Cherry-pick".into(), Item::Run("cherry_pick", v())),
+        ("Revert Commit".into(), Item::Run("revert", v())),
+    ]
+}
+
+fn ref_items(name: &str, kind: GitRefKind, current: bool) -> Vec<(String, Item)> {
+    let v = || name.to_owned();
+    match kind {
+        GitRefKind::Branch if current => vec![("Rename…".into(), Item::Form("rename_branch", v()))],
+        GitRefKind::Branch => vec![
+            (format!("Checkout {name}"), Item::Run("checkout", v())),
+            ("Merge into Current Branch".into(), Item::Run("merge", v())),
+            (
+                "Rebase Current Branch onto This…".into(),
+                Item::Confirm("rebase", v()),
+            ),
+            ("Rename…".into(), Item::Form("rename_branch", v())),
+            ("Delete…".into(), Item::Form("delete_branch", v())),
+        ],
+        GitRefKind::Remote => vec![
+            ("Merge into Current Branch".into(), Item::Run("merge", v())),
+            (
+                "Rebase Current Branch onto This…".into(),
+                Item::Confirm("rebase", v()),
+            ),
+        ],
+        GitRefKind::Tag => vec![("Delete Tag…".into(), Item::Confirm("tag_delete", v()))],
+        GitRefKind::Head => vec![("Create Branch Here…".into(), Item::Form("branch", v()))],
+    }
+}
+
+/// Numbered, colored diff lines; other text (blame, errors) stays plain.
+fn fill_review(buffer: &gtk::TextBuffer, text: &str, snapshot: &AppSnapshot) {
+    let lines = &snapshot.git.patch_lines;
+    if snapshot.error.is_some() || lines.is_empty() {
+        buffer.set_text(text);
+        return;
+    }
+    buffer.set_text("");
+    let number = |n: Option<usize>| n.map_or(String::new(), |n| n.to_string());
+    for line in lines {
+        let mut end = buffer.end_iter();
+        buffer.insert_with_tags_by_name(
+            &mut end,
+            &format!("{:>5} {:>5} ", number(line.old), number(line.new)),
+            &["gutter"],
+        );
+        let tag = match line.kind {
+            PatchKind::Added => "added",
+            PatchKind::Removed => "removed",
+            PatchKind::Hunk => "hunk",
+            PatchKind::Meta => "meta",
+            PatchKind::Context => "",
+        };
+        let body = if line.text.ends_with('\n') {
+            line.text.clone()
+        } else {
+            format!("{}\n", line.text)
+        };
+        let mut end = buffer.end_iter();
+        if tag.is_empty() {
+            buffer.insert(&mut end, &body);
+        } else {
+            buffer.insert_with_tags_by_name(&mut end, &body, &[tag]);
+        }
+    }
 }
 
 fn scroll(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
@@ -57,6 +369,9 @@ fn action(ui: &Ui, id: &str, value: String, extra: String, flag: bool) {
     ui.render_current();
 }
 fn confirm(ui: &Ui, id: &'static str, value: String) {
+    confirm_with(ui, id, value, String::new());
+}
+fn confirm_with(ui: &Ui, id: &'static str, value: String, extra: String) {
     let prompt = git_action_confirmation();
     let dialog = adw::AlertDialog::builder()
         .heading(&prompt.title)
@@ -68,12 +383,24 @@ fn confirm(ui: &Ui, id: &'static str, value: String) {
     let next = ui.clone();
     dialog.connect_response(None, move |_, response| {
         if response == "apply" {
-            action(&next, id, value.clone(), String::new(), false);
+            action(&next, id, value.clone(), extra.clone(), false);
         }
     });
     dialog.present(Some(&ui.window));
 }
 fn form(ui: &Ui, spec: &GitAction) {
+    form_with(ui, spec, "");
+}
+/// `prefill` fills the field naming the selected commit or reference.
+fn form_with(ui: &Ui, spec: &GitAction, prefill: &str) {
+    if spec.first.is_empty() && spec.second.is_empty() && spec.option.is_empty() {
+        if spec.destructive {
+            confirm(ui, spec.id, String::new());
+        } else {
+            action(ui, spec.id, String::new(), String::new(), false);
+        }
+        return;
+    }
     let window = gtk::Window::builder()
         .title(spec.title)
         .transient_for(&ui.window)
@@ -93,6 +420,12 @@ fn form(ui: &Ui, spec: &GitAction) {
         .placeholder_text(spec.second)
         .visible(!spec.second.is_empty())
         .build();
+    // Branch/tag creation start from the selected commit; others name it first.
+    if matches!(spec.id, "branch" | "tag") {
+        second.set_text(prefill);
+    } else {
+        first.set_text(prefill);
+    }
     let option = gtk::CheckButton::with_label(spec.option);
     option.set_visible(!spec.option.is_empty());
     content.append(&first);
@@ -229,6 +562,7 @@ impl GitPanel {
             error,
             updating: Rc::default(),
             review: Rc::default(),
+            selected: Rc::default(),
         }
     }
     pub fn connect(&self, ui: &Ui) {
@@ -273,14 +607,29 @@ impl GitPanel {
         });
         let choices = gtk::Box::new(gtk::Orientation::Vertical, 2);
         choices.append(&self.extras);
-        for spec in &ui.snapshot.borrow().git.actions {
+        let snapshot = ui.snapshot.borrow();
+        let mut group = "";
+        for spec in &snapshot.git.actions {
+            if spec.group != group {
+                group = spec.group;
+                let heading = gtk::Label::new(Some(group));
+                heading.set_xalign(0.0);
+                heading.add_css_class("caption-heading");
+                heading.add_css_class("dim-label");
+                heading.set_margin_top(6);
+                choices.append(&heading);
+            }
             let button = gtk::Button::with_label(spec.title);
             button.add_css_class("flat");
+            if let Some(label) = button.child().and_downcast::<gtk::Label>() {
+                label.set_xalign(0.0);
+            }
             let next = ui.clone();
             let spec = spec.clone();
             button.connect_clicked(move |_| form(&next, &spec));
             choices.append(&button);
         }
+        drop(snapshot);
         let popover = gtk::Popover::new();
         let list = scroll(&choices);
         list.set_min_content_height(350);
@@ -294,6 +643,23 @@ impl GitPanel {
             .build();
         text.set_widget_name("gitDiffText");
         text.buffer().set_text("Loading…");
+        let table = text.buffer().tag_table();
+        for (name, background, foreground) in [
+            ("added", Some("rgba(46,160,67,0.18)"), None),
+            ("removed", Some("rgba(248,81,73,0.18)"), None),
+            ("hunk", Some("rgba(56,139,253,0.12)"), Some("#388bfd")),
+            ("meta", None, Some("#8b949e")),
+            ("gutter", None, Some("#8b949e")),
+        ] {
+            let tag = gtk::TextTag::new(Some(name));
+            if let Some(color) = background {
+                tag.set_paragraph_background(Some(color));
+            }
+            if let Some(color) = foreground {
+                tag.set_foreground(Some(color));
+            }
+            table.add(&tag);
+        }
         let split = gtk::Paned::new(gtk::Orientation::Horizontal);
         split.set_start_child(Some(&scroll(&text)));
         split.set_position(650);
@@ -472,7 +838,7 @@ impl GitPanel {
                     view.merge.append(&controls);
                     view.merge.append(&scroll(&draft));
                 }
-                view.buffer.set_text(&text);
+                fill_review(&view.buffer, &text, snapshot);
                 view.shown = text;
                 view.selected.borrow_mut().clear();
                 view.window.set_title(Some(
@@ -557,105 +923,125 @@ impl GitPanel {
                 abort.connect_clicked(move |_| confirm(&next, "abort", String::new()));
                 self.operation.append(&abort);
             }
-            for staged in [true, false] {
+            type Include = fn(&GitChange) -> bool;
+            let sections: [(&str, bool, Include); 3] = [
+                ("Merge Changes", false, |c| c.conflicted),
+                ("Staged Changes", true, |c| c.staged && !c.conflicted),
+                ("Changes", false, |c| c.unstaged && !c.conflicted),
+            ];
+            for (title, staged, include) in sections {
+                let changes: Vec<_> = repo.changes.iter().filter(|c| include(c)).collect();
+                if changes.is_empty() && title != "Changes" {
+                    continue;
+                }
                 let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                let label =
-                    gtk::Label::new(Some(if staged { "Staged Changes" } else { "Changes" }));
+                heading.add_css_class("git-section");
+                let label = gtk::Label::new(Some(&title.to_uppercase()));
                 label.set_xalign(0.0);
                 label.set_hexpand(true);
-                label.add_css_class("heading");
+                label.add_css_class("caption-heading");
+                label.add_css_class("dim-label");
                 heading.append(&label);
-                let all = gtk::Button::from_icon_name(if staged {
-                    "list-remove-symbolic"
-                } else {
-                    "list-add-symbolic"
-                });
-                all.set_tooltip_text(Some(if staged { "Unstage All" } else { "Stage All" }));
-                let next = ui.clone();
-                all.connect_clicked(move |_| {
-                    action(
-                        &next,
-                        if staged { "unstage" } else { "stage" },
-                        String::new(),
-                        String::new(),
-                        false,
-                    )
-                });
-                heading.append(&all);
-                self.rows.append(&heading);
-                for change in repo
-                    .changes
-                    .iter()
-                    .filter(|c| if staged { c.staged } else { c.unstaged })
-                {
-                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                    let button = gtk::Button::with_label(&change.path);
-                    button.set_widget_name("gitReview");
-                    button.add_css_class("flat");
-                    button.set_hexpand(true);
-                    let path = change.path.clone();
-                    let next = ui.clone();
-                    let panel = self.clone();
-                    button.connect_clicked(move |_| {
-                        panel.review(&next, |ui| {
-                            ui.dispatch(AppCommand::ShowGitDiff {
-                                path: path.clone(),
-                                staged,
-                            })
-                        })
-                    });
-                    row.append(&button);
-                    if change.conflicted {
-                        let resolve = gtk::Button::with_label("Resolve");
-                        let path = change.path.clone();
-                        let next = ui.clone();
-                        let panel = self.clone();
-                        resolve.connect_clicked(move |_| {
-                            panel.review(&next, |ui| {
-                                action(ui, "resolve", path.clone(), String::new(), false)
-                            })
-                        });
-                        row.append(&resolve);
-                    }
-                    let status = gtk::Label::new(Some(if change.conflicted {
-                        "!"
-                    } else if staged {
-                        &change.index
-                    } else {
-                        &change.worktree
-                    }));
-                    row.append(&status);
-                    let stage = gtk::Button::from_icon_name(if staged {
+                if title != "Merge Changes" {
+                    let all = gtk::Button::from_icon_name(if staged {
                         "list-remove-symbolic"
                     } else {
                         "list-add-symbolic"
                     });
-                    let path = change.path.clone();
+                    all.add_css_class("flat");
+                    all.set_sensitive(!changes.is_empty());
+                    all.set_tooltip_text(Some(if staged { "Unstage All" } else { "Stage All" }));
                     let next = ui.clone();
-                    stage.connect_clicked(move |_| {
+                    all.connect_clicked(move |_| {
                         action(
                             &next,
                             if staged { "unstage" } else { "stage" },
-                            path.clone(),
+                            String::new(),
                             String::new(),
                             false,
                         )
                     });
-                    row.append(&stage);
-                    if !staged {
+                    heading.append(&all);
+                }
+                let count = gtk::Label::new(Some(&changes.len().to_string()));
+                count.add_css_class("git-count");
+                heading.append(&count);
+                self.rows.append(&heading);
+                for change in changes {
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                    let (letter, class) = change_status(change, staged);
+                    let button = gtk::Button::new();
+                    button.set_child(Some(&file_label(&change.path, letter, class)));
+                    button.set_widget_name("gitReview");
+                    button.add_css_class("flat");
+                    button.add_css_class("git-file");
+                    button.set_hexpand(true);
+                    let path = change.path.clone();
+                    let next = ui.clone();
+                    let panel = self.clone();
+                    let conflicted = change.conflicted;
+                    button.connect_clicked(move |_| {
+                        let path = path.clone();
+                        panel.review(&next, move |ui| {
+                            if conflicted {
+                                action(ui, "resolve", path, String::new(), false)
+                            } else {
+                                ui.dispatch(AppCommand::ShowGitDiff { path, staged })
+                            }
+                        })
+                    });
+                    let path = change.path.clone();
+                    context_menu(&button, ui, move || {
+                        let p = || path.clone();
+                        let mut items = vec![
+                            ("File History".into(), Item::Inspect("file_history", p())),
+                            ("Blame".into(), Item::Inspect("blame", p())),
+                            ("Add to .gitignore".into(), Item::Run("ignore", p())),
+                        ];
+                        if !staged && !conflicted {
+                            items.push(("Discard Changes…".into(), Item::Confirm("discard", p())));
+                        }
+                        items
+                    });
+                    row.append(&button);
+                    if !staged && !conflicted {
                         let discard = gtk::Button::from_icon_name("edit-undo-symbolic");
+                        discard.add_css_class("flat");
                         discard.set_tooltip_text(Some("Discard Changes…"));
                         let path = change.path.clone();
                         let next = ui.clone();
                         discard.connect_clicked(move |_| confirm(&next, "discard", path.clone()));
                         row.append(&discard);
                     }
+                    if !conflicted {
+                        let stage = gtk::Button::from_icon_name(if staged {
+                            "list-remove-symbolic"
+                        } else {
+                            "list-add-symbolic"
+                        });
+                        stage.add_css_class("flat");
+                        stage.set_tooltip_text(Some(if staged { "Unstage" } else { "Stage" }));
+                        let path = change.path.clone();
+                        let next = ui.clone();
+                        stage.connect_clicked(move |_| {
+                            action(
+                                &next,
+                                if staged { "unstage" } else { "stage" },
+                                path.clone(),
+                                String::new(),
+                                false,
+                            )
+                        });
+                        row.append(&stage);
+                    }
                     self.rows.append(&row);
                 }
             }
             if repo.changes.is_empty() {
-                self.rows
-                    .append(&gtk::Label::new(Some("Working tree clean")));
+                let clean = gtk::Label::new(Some("No changes"));
+                clean.add_css_class("dim-label");
+                clean.set_xalign(0.0);
+                self.rows.append(&clean);
             }
         } else {
             self.summary
@@ -712,104 +1098,142 @@ impl GitPanel {
                 self.extras.append(&button);
             }
         }
+        let gutter = (snapshot.git.graph_width.clamp(1, MAX_LANES) as f64 * LANE + 4.0) as i32;
+        let detail = snapshot
+            .git
+            .inspection
+            .as_ref()
+            .and_then(|i| i.commit.as_ref());
         for row in &snapshot.git.history {
-            let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
             let drawing = gtk::DrawingArea::new();
-            drawing.set_content_width((row.columns.max(2) * 14) as i32);
-            drawing.set_content_height(48);
+            drawing.set_content_width(gutter);
+            drawing.set_content_height(ROW);
             let data = row.clone();
-            drawing.set_draw_func(move |_, cr, _, height| {
-                let colors = [
-                    (0.33, 0.60, 0.93),
-                    (0.87, 0.58, 0.27),
-                    (0.67, 0.47, 0.87),
-                    (0.33, 0.67, 0.47),
-                    (0.87, 0.47, 0.60),
-                    (0.33, 0.67, 0.67),
-                ];
-                cr.set_line_width(2.0);
-                for edge in &data.edges {
-                    let (r, g, b) = colors[edge.color % colors.len()];
-                    cr.set_source_rgb(r, g, b);
-                    let ax = edge.from as f64 * 14.0 + 7.0;
-                    let ay = edge.start as f64 * height as f64 / 2.0;
-                    let bx = edge.to as f64 * 14.0 + 7.0;
-                    let by = edge.end as f64 * height as f64 / 2.0;
-                    cr.move_to(ax, ay);
-                    cr.curve_to(ax, (ay + by) / 2.0, bx, (ay + by) / 2.0, bx, by);
-                    let _ = cr.stroke();
-                }
-                let (r, g, b) = colors[data.lane % colors.len()];
-                cr.set_source_rgb(r, g, b);
-                cr.arc(
-                    data.lane as f64 * 14.0 + 7.0,
-                    height as f64 / 2.0,
-                    4.0,
-                    0.0,
-                    std::f64::consts::TAU,
-                );
-                let _ = cr.fill();
-            });
+            drawing.set_draw_func(move |_, cr, _, height| draw_graph(&data, cr, f64::from(height)));
             content.append(&drawing);
-            let labels = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            labels.set_hexpand(true);
-            for (value, class) in [
-                (&row.commit.refs, "accent"),
-                (&row.commit.subject, ""),
-                (
-                    &format!(
-                        "{} · {} · {}",
-                        &row.commit.id[..7],
-                        row.commit.author,
-                        &row.commit.date[..10]
-                    ),
-                    "dim-label",
-                ),
-            ] {
-                let label = gtk::Label::new(Some(value));
-                label.set_xalign(0.0);
-                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                if !class.is_empty() {
-                    label.add_css_class(class);
-                }
-                labels.append(&label);
+            for r in &row.commit.refs {
+                let label = badge(&r.name, r.kind, r.current);
+                let (name, kind, current) = (r.name.clone(), r.kind, r.current);
+                context_menu(&label, ui, move || ref_items(&name, kind, current));
+                content.append(&label);
             }
-            content.append(&labels);
+            let subject = gtk::Label::new(Some(&row.commit.subject));
+            subject.set_xalign(0.0);
+            subject.set_hexpand(true);
+            subject.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            if row.head {
+                subject.add_css_class("heading");
+            }
+            content.append(&subject);
+            let date = gtk::Label::new(Some(row.commit.date.get(..10).unwrap_or_default()));
+            date.add_css_class("dim-label");
+            date.add_css_class("caption");
+            content.append(&date);
+            content.set_tooltip_text(Some(&format!(
+                "{}\n{} · {}\n{}",
+                row.commit.subject, row.commit.author, row.commit.date, row.commit.id
+            )));
             let button = gtk::Button::new();
             button.add_css_class("flat");
             button.set_child(Some(&content));
             button.add_css_class("git-graph-row");
+            button.set_hexpand(true);
+            let selected = self.selected.borrow().as_deref() == Some(row.commit.id.as_str());
+            if selected {
+                button.add_css_class("git-selected");
+            }
+            let id = row.commit.id.clone();
+            context_menu(&button, ui, move || commit_items(&id));
+            self.graph.append(&button);
+            let expanded = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            expanded.set_visible(selected);
+            if selected {
+                let lanes = gtk::DrawingArea::new();
+                lanes.set_content_width(gutter);
+                let data = row.clone();
+                lanes.set_draw_func(move |_, cr, _, height| {
+                    draw_continuation(&data, cr, f64::from(height))
+                });
+                expanded.append(&lanes);
+                let card = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                card.add_css_class("git-detail");
+                card.set_hexpand(true);
+                match detail.filter(|d| d.id == row.commit.id) {
+                    Some(detail) => {
+                        let message = gtk::Label::new(Some(&detail.message));
+                        message.set_wrap(true);
+                        message.set_xalign(0.0);
+                        message.set_selectable(true);
+                        card.append(&message);
+                        let meta = gtk::Label::new(Some(&format!(
+                            "{} <{}> · {} · {}",
+                            detail.author,
+                            detail.email,
+                            detail
+                                .date
+                                .get(..16)
+                                .unwrap_or(&detail.date)
+                                .replace('T', " "),
+                            &detail.id[..detail.id.len().min(10)]
+                        )));
+                        meta.add_css_class("dim-label");
+                        meta.add_css_class("caption");
+                        meta.set_xalign(0.0);
+                        meta.set_wrap(true);
+                        meta.set_selectable(true);
+                        card.append(&meta);
+                        for file in &detail.files {
+                            let (letter, class) = status(&file.status);
+                            let open = gtk::Button::new();
+                            open.set_child(Some(&file_label(&file.path, letter, class)));
+                            open.add_css_class("flat");
+                            open.add_css_class("git-file");
+                            let (id, path) = (detail.id.clone(), file.path.clone());
+                            let next = ui.clone();
+                            let panel = self.clone();
+                            open.connect_clicked(move |_| {
+                                let (id, path) = (id.clone(), path.clone());
+                                panel.review(&next, move |ui| {
+                                    action(ui, "show_commit_file", id, path, false)
+                                })
+                            });
+                            card.append(&open);
+                        }
+                        let full = gtk::Button::with_label("Full Diff");
+                        full.add_css_class("flat");
+                        full.set_halign(gtk::Align::Start);
+                        let id = detail.id.clone();
+                        let next = ui.clone();
+                        let panel = self.clone();
+                        full.connect_clicked(move |_| {
+                            let id = id.clone();
+                            panel.review(&next, move |ui| {
+                                action(ui, "show_commit", id, String::new(), false)
+                            })
+                        });
+                        card.append(&full);
+                    }
+                    None => card.append(&gtk::Spinner::builder().spinning(true).build()),
+                }
+                expanded.append(&card);
+            }
+            self.graph.append(&expanded);
             let id = row.commit.id.clone();
             let next = ui.clone();
             let panel = self.clone();
-            button.connect_clicked(move |_| {
-                panel.review(&next, |ui| {
-                    action(ui, "show_commit", id.clone(), String::new(), false)
-                })
+            button.connect_clicked(move |button| {
+                let open = panel.selected.borrow().as_deref() == Some(id.as_str());
+                if open {
+                    // Collapsing is local; Git state is unchanged.
+                    panel.selected.replace(None);
+                    button.remove_css_class("git-selected");
+                    expanded.set_visible(false);
+                } else {
+                    panel.selected.replace(Some(id.clone()));
+                    action(&next, "show_commit", id.clone(), String::new(), false);
+                }
             });
-            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            button.set_hexpand(true);
-            row_box.append(&button);
-            let menu = gtk::MenuButton::new();
-            menu.set_icon_name("view-more-symbolic");
-            let options = gtk::Box::new(gtk::Orientation::Vertical, 2);
-            for (title, op) in [
-                ("Checkout Commit", "checkout"),
-                ("Cherry-pick", "cherry_pick"),
-                ("Revert Commit", "revert"),
-            ] {
-                let choice = gtk::Button::with_label(title);
-                let id = row.commit.id.clone();
-                let next = ui.clone();
-                choice
-                    .connect_clicked(move |_| action(&next, op, id.clone(), String::new(), false));
-                options.append(&choice);
-            }
-            let popover = gtk::Popover::new();
-            popover.set_child(Some(&options));
-            menu.set_popover(Some(&popover));
-            row_box.append(&menu);
-            self.graph.append(&row_box);
         }
         if snapshot.git.history.len() >= snapshot.git.history_limit {
             let more = gtk::Button::with_label("Load More Commits");

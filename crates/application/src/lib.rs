@@ -17,8 +17,9 @@ mod event;
 mod git;
 mod handlers;
 pub use git::{
-    GitAction, GitChange, GitCommit, GitDiff, GitInspection, GitOperation, GitQuery, GitRepository,
-    GitSnapshot, GraphCommit, git_action_confirmation, git_request,
+    GitAction, GitChange, GitCommit, GitCommitDetail, GitCommitFile, GitDiff, GitInspection,
+    GitOperation, GitQuery, GitRef, GitRefKind, GitRepository, GitSnapshot, GraphCommit, PatchKind,
+    PatchLine, git_action_confirmation, git_request,
 };
 mod icons;
 mod path_filter;

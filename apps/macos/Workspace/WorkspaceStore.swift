@@ -21,6 +21,7 @@ struct GitPanelState: Decodable, Equatable {
     struct Repository: Decodable, Equatable {
         let root: String
         let branch: String
+        let head: String
         let changes: [Change]
         let ahead: UInt64
         let behind: UInt64
@@ -34,13 +35,16 @@ struct GitPanelState: Decodable, Equatable {
     struct Remote: Decodable, Equatable { let name: String; let url: String }
     struct Stash: Decodable, Equatable { let index: Int; let subject: String }
     struct Worktree: Decodable, Equatable { let path: String; let branch: String }
-    struct Commit: Decodable, Equatable { let id: String; let parents: [String]; let author: String; let date: String; let refs: String; let subject: String }
+    struct Ref: Decodable, Equatable { let name: String; let kind: String; let current: Bool }
+    struct Commit: Decodable, Equatable { let id: String; let parents: [String]; let author: String; let date: String; let refs: [Ref]; let subject: String }
     struct Edge: Decodable, Equatable { let from: Int; let to: Int; let start: Int; let end: Int; let color: Int }
-    struct Row: Decodable, Equatable { let commit: Commit; let lane: Int; let columns: Int; let edges: [Edge] }
-    struct Action: Decodable, Equatable, Identifiable { let id: String; let title: String; let first: String; let second: String; let option: String; let destructive: Bool }
+    struct Row: Decodable, Equatable { let commit: Commit; let short_id: String; let lane: Int; let color: Int; let columns: Int; let merge: Bool; let head: Bool; let edges: [Edge] }
+    struct Action: Decodable, Equatable, Identifiable { let id: String; let group: String; let title: String; let first: String; let second: String; let option: String; let destructive: Bool }
     struct Conflict: Decodable, Equatable { let path: String; let base: String; let current: String; let incoming: String; let expected: String; let accept_current: String; let accept_incoming: String; let accept_both: String }
-    struct Inspection: Decodable, Equatable { let title: String; let text: String; let truncated: Bool; let conflict: Conflict? }
-    struct PatchLine: Decodable, Equatable { let index: Int; let text: String; let changed: Bool }
+    struct CommitFile: Decodable, Equatable { let path: String; let original_path: String?; let status: String }
+    struct CommitDetail: Decodable, Equatable { let id: String; let parents: [String]; let author: String; let email: String; let date: String; let message: String; let files: [CommitFile] }
+    struct Inspection: Decodable, Equatable { let title: String; let text: String; let truncated: Bool; let conflict: Conflict?; let commit: CommitDetail?; let path: String? }
+    struct PatchLine: Decodable, Equatable { let index: Int; let text: String; let changed: Bool; let kind: String; let old: Int?; let new: Int? }
     struct Diff: Decodable, Equatable {
         let path: String
         let staged: Bool
@@ -56,6 +60,7 @@ struct GitPanelState: Decodable, Equatable {
     var diff: Diff?
     var inspection: Inspection?
     var history: [Row] = []
+    var graph_width = 0
     var history_limit = 200
     var actions: [Action] = []
     var patch_lines: [PatchLine] = []

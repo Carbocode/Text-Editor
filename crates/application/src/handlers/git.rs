@@ -66,12 +66,16 @@ impl Application {
             roots,
             selected_root: selected.clone(),
             repository,
+            graph_width: crate::git::graph_width(&history),
             history,
             history_limit: limit,
             ..GitSnapshot::default()
         };
         if preserve && selected == self.state().git.selected_root {
             snapshot.inspection = self.state().git.inspection.clone();
+            if let Some(inspection) = &snapshot.inspection {
+                snapshot.patch_lines = crate::git::inspection_lines(inspection);
+            }
             if let Some(diff) = &self.state().git.diff {
                 snapshot.diff = self.filesystem.git_diff(root, &diff.path, diff.staged).ok();
                 snapshot.patch_lines = snapshot
@@ -114,9 +118,9 @@ impl Application {
             conflict.accept_incoming = incoming;
             conflict.accept_both = both;
         }
+        snapshot.patch_lines = crate::git::inspection_lines(&inspection);
         snapshot.inspection = Some(inspection);
         snapshot.diff = None;
-        snapshot.patch_lines.clear();
         Ok(vec![AppEvent::GitUpdated {
             snapshot: Arc::new(snapshot),
         }])
@@ -152,6 +156,7 @@ impl Application {
         snapshot.repository = self.filesystem.git_repository(root)?;
         snapshot.history =
             crate::git::graph(self.filesystem.git_history(root, snapshot.history_limit)?);
+        snapshot.graph_width = crate::git::graph_width(&snapshot.history);
         snapshot.patch_lines.clear();
         Ok(vec![AppEvent::GitUpdated {
             snapshot: Arc::new(snapshot),

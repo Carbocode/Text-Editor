@@ -44,13 +44,13 @@ struct GitSmoke {
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         defer { window.orderOut(nil) }
-        func wait(_ condition: () -> Bool) {
+        func wait(line: Int = #line, _ condition: () -> Bool) {
             let deadline = Date().addingTimeInterval(5)
             while !condition() && Date() < deadline {
                 store.poll()
                 RunLoop.main.run(until: Date().addingTimeInterval(0.01))
             }
-            if !condition() { print("Git sidebar timeout: loaded=\(store.git.loaded), busy=\(store.backendBusy), actions=\(find("gitActions") != nil), tab=\(find("sidebarTab:git") != nil)") }
+            if !condition() { print("Git sidebar timeout at line \(line): loaded=\(store.git.loaded), busy=\(store.backendBusy), actions=\(find("gitActions") != nil), tab=\(find("sidebarTab:git") != nil)") }
             precondition(condition(), "Git sidebar did not become ready: \(store.errorMessage ?? "")")
         }
         func element(_ identifier: String, in parent: Any) -> (any NSAccessibilityElementProtocol)? {
@@ -139,6 +139,13 @@ struct GitSmoke {
         store.gitAction("merge", "feature"); finish()
         precondition(store.git.history.first?.commit.parents.count == 2)
         precondition(store.git.history.contains { $0.columns > 1 })
+        precondition(store.git.graph_width == 2 && store.git.history.first?.merge == true && store.git.history.first?.head == true)
+        precondition(store.git.history.first?.commit.refs.first?.current == true, "current branch badge missing")
+        let merge = store.git.history.first!.commit.id
+        store.gitAction("show_commit", merge); finish()
+        precondition(store.git.inspection?.commit?.files.map(\.path) == ["feature.txt"], "commit detail files missing")
+        store.gitAction("show_commit_file", merge, "feature.txt"); finish()
+        precondition(store.git.patch_lines.contains { $0.kind == "added" && $0.new == 1 }, "numbered commit file diff missing")
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         precondition(window.contentView?.fittingSize.width ?? 0 > 0)
         if let output = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_GIT_SCREENSHOT"],

@@ -4,8 +4,8 @@ use native_workspace_domain::DocumentId;
 use serde::Serialize;
 pub(super) mod operations;
 pub use operations::{
-    GitBranch, GitCommit, GitConflict, GitInspection, GitOperation, GitQuery, GitRemote, GitStash,
-    GitWorktree,
+    GitBranch, GitCommit, GitCommitDetail, GitCommitFile, GitConflict, GitInspection, GitOperation,
+    GitQuery, GitRef, GitRefKind, GitRemote, GitStash, GitWorktree,
 };
 use std::{
     io::{self, Read},

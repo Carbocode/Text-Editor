@@ -51,3 +51,22 @@ Remote credentials are not stored by the editor. Operation output is drained wit
 bounded retention; remote commands time out after two minutes. Inspection/diffs
 are bounded to 2 MiB per output/content, and history loads 200 commits at a time up
 to 5,000. Git metadata and UI drafts remain transient rather than entering SQLite.
+
+## Graph, references and commit review
+
+History lists branches, remote-tracking branches, tags and HEAD only; stashes,
+notes and tool namespaces such as checkpoint refs never enter the graph. The
+filesystem adapter parses decorations into typed references (detached HEAD,
+branch, remote, tag) and marks the checked-out branch. The application assigns
+each lane a color for its lifetime, keeps first-parent lines straight by merging a
+reserved lane into the commit's lane, draws no edge above a branch tip, and
+publishes the widest row so every frontend reserves one gutter. Rows also carry
+merge and HEAD flags; adapters choose palette, dot style and badge styling only.
+
+A commit query also returns author email, full message and first-parent changed
+files; a commit-file query returns one file's patch with the same summary, so an
+inline commit detail survives opening a file. Patch-like inspections and diffs are
+classified in Rust into meta, hunk, context, added and removed lines with old/new
+line numbers, tracking hunk sizes so content beginning with `--- ` is not a
+header. Line indices still address the reviewed text for partial staging. The
+action catalog carries a menu group shared by every frontend.

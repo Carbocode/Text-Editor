@@ -90,8 +90,8 @@ Session polls terminal updates even while filesystem work is active. See
 
 Git queries and typed mutations use the command/event/reducer pipeline and Session
 worker. The filesystem port owns Git CLI I/O; Rust owns repository selection,
-partial-staging patches, merge-result validation and graph geometry. Native
-adapters render the shared graph and maintain their sidebar divider, dialogs,
+partial-staging patches, merge-result validation, graph lanes/colors, typed
+references and numbered diff lines. Native adapters render the shared graph and maintain their sidebar divider, dialogs,
 drafts and selections. Mutations reconcile documents even after partial failures.
 Worktree operations require saved buffers and pause editing; metadata operations
 and remote fetch/push keep editing responsive. The visible Git sidebar refreshes

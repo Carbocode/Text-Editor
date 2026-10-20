@@ -557,18 +557,54 @@ fn git_branch_merge_graph_stash_and_history_are_real_repository_operations() {
             .iter()
             .any(|row| row.columns > 1 && row.edges.iter().any(|e| e.from != e.to))
     );
+    // Every row reserves the same gutter, and the merge joins two lane colors.
+    assert_eq!(merged.git.graph_width, 2);
+    assert!(merged.git.history[0].merge && merged.git.history[0].head);
+    let colors: std::collections::HashSet<_> = merged.git.history[0]
+        .edges
+        .iter()
+        .map(|e| e.color)
+        .collect();
+    assert_eq!(colors.len(), 2);
     let commit = merged.git.history[0].commit.id.clone();
-    app.dispatch(AppCommand::InspectGit(GitQuery::Commit(commit)))
+    app.dispatch(AppCommand::InspectGit(GitQuery::Commit(commit.clone())))
         .unwrap();
-    assert!(
-        settle(&mut app)
-            .git
-            .inspection
-            .as_ref()
-            .unwrap()
-            .text
-            .contains("Merge")
+    let inspected = settle(&mut app);
+    let inspection = inspected.git.inspection.as_ref().unwrap();
+    assert!(inspection.text.contains("Merge"));
+    let detail = inspection.commit.as_ref().unwrap();
+    assert_eq!(detail.parents.len(), 2);
+    assert_eq!(detail.email, "native@example.invalid");
+    // A merge lists its first-parent changes: the branch's file.
+    assert_eq!(detail.files.len(), 1);
+    assert_eq!(
+        (
+            detail.files[0].path.as_str(),
+            detail.files[0].status.as_str()
+        ),
+        ("feature.txt", "A")
     );
+    app.git_request("show_commit_file", commit, "feature.txt".into(), false)
+        .unwrap();
+    let file = settle(&mut app);
+    let inspection = file.git.inspection.as_ref().unwrap();
+    assert_eq!(inspection.path.as_deref(), Some("feature.txt"));
+    assert!(inspection.commit.is_some());
+    let added = file
+        .git
+        .patch_lines
+        .iter()
+        .find(|l| l.text == "+feature\n")
+        .unwrap();
+    assert_eq!((added.kind, added.new), (PatchKind::Added, Some(1)));
+    app.git_request(
+        "show_commit_file",
+        merged.git.history[0].commit.id.clone(),
+        "missing.txt".into(),
+        false,
+    )
+    .unwrap();
+    assert!(settle(&mut app).error.is_some());
     fs::write(dir.path().join("file.txt"), "stashed\n").unwrap();
     let stashed = operate(
         &mut app,
@@ -578,6 +614,15 @@ fn git_branch_merge_graph_stash_and_history_are_real_repository_operations() {
         },
     );
     assert_eq!(stashed.git.repository.as_ref().unwrap().stashes.len(), 1);
+    // Stash commits are not user history.
+    assert!(
+        stashed
+            .git
+            .history
+            .iter()
+            .all(|row| row.commit.subject != "On feature: WIP"
+                && !row.commit.subject.contains("WIP"))
+    );
     operate(
         &mut app,
         GitOperation::StashApply {
@@ -896,7 +941,15 @@ fn git_initialize_tags_ignore_clone_and_worktree_lifecycle() {
             commit: "HEAD".into(),
         },
     );
-    assert!(refresh(&mut app).git.history[0].commit.refs.contains("v1"));
+    let tagged = refresh(&mut app);
+    assert!(tagged.git.history[0].head);
+    assert!(
+        tagged.git.history[0]
+            .commit
+            .refs
+            .iter()
+            .any(|r| r.name == "v1" && r.kind == GitRefKind::Tag)
+    );
     operate(&mut app, GitOperation::DeleteTag { name: "v1".into() });
     fs::write(dir.path().join("ignored ü.txt"), "ignore\n").unwrap();
     operate(
@@ -991,4 +1044,69 @@ fn git_repository_selection_keeps_nested_repositories_and_their_histories_isolat
         .unwrap();
     assert!(settle(&mut app).error.is_some());
     assert_eq!(app.snapshot().git.selected_root.as_ref(), Some(&second));
+}
+
+fn commit(id: &str, parents: &[&str]) -> GitCommit {
+    GitCommit {
+        id: id.into(),
+        parents: parents.iter().map(|p| (*p).into()).collect(),
+        author: String::new(),
+        date: String::new(),
+        refs: Vec::new(),
+        subject: String::new(),
+    }
+}
+
+#[test]
+fn git_graph_keeps_lane_colors_and_starts_branch_tips_at_their_dot() {
+    // m merges b into a; b and a fork from root r.
+    let rows = crate::git::graph(vec![
+        commit("m", &["a", "b"]),
+        commit("b", &["r"]),
+        commit("a", &["r"]),
+        commit("r", &[]),
+    ]);
+    // The tip has no line above its dot.
+    assert!(rows[0].edges.iter().all(|e| e.start == 1));
+    let (main, side) = (rows[0].color, rows[1].color);
+    assert_ne!(main, side);
+    assert_eq!((rows[1].lane, rows[2].lane), (1, 0));
+    // The first-parent lane keeps the merge commit's color down to `a`.
+    assert_eq!(rows[2].color, main);
+    // The side lane curves into the first-parent line, which stays straight.
+    let joins: Vec<_> = rows[2]
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to, e.start, e.end, e.color))
+        .collect();
+    assert_eq!(
+        joins,
+        vec![(0, 0, 0, 1, main), (1, 0, 0, 2, side), (0, 0, 1, 2, main)]
+    );
+    let into_root: Vec<_> = rows[3].edges.iter().map(|e| (e.from, e.color)).collect();
+    assert_eq!(into_root, vec![(0, main)]);
+    assert_eq!(crate::git::graph_width(&rows), 2);
+}
+
+#[test]
+fn git_patch_lines_number_hunks_and_keep_header_like_content_inside_hunks() {
+    let text =
+        "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -3,2 +3,2 @@\n context\n--- removed\n+++ added\n";
+    let lines = crate::git::patch::lines(text);
+    let kinds: Vec<_> = lines.iter().map(|l| l.kind).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            PatchKind::Meta,
+            PatchKind::Meta,
+            PatchKind::Meta,
+            PatchKind::Hunk,
+            PatchKind::Context,
+            PatchKind::Removed,
+            PatchKind::Added,
+        ]
+    );
+    assert_eq!((lines[4].old, lines[4].new), (Some(3), Some(3)));
+    assert_eq!((lines[5].old, lines[6].new), (Some(4), Some(4)));
+    assert!(lines[5].changed && !lines[1].changed);
 }

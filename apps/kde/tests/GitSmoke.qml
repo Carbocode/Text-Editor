@@ -67,6 +67,8 @@ ApplicationWindow {
                 else {
                     check(state.history[0].commit.subject==="Native commit","Native commit did not update graph")
                     check(state.repository.changes.length===0,"Commit left staged changes")
+                    check(state.history[0].head && state.history[0].commit.refs.some(r=>r.current&&r.kind==="branch"),"Current branch badge missing")
+                    check(state.graph_width===1,"Linear history should use one lane")
                     console.log("KDE Git status and staged/working-tree diff smoke passed")
                     Qt.quit()
                 }

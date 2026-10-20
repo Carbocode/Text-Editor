@@ -107,7 +107,8 @@ stale baselines, repository isolation and failure/concurrency cases. `cargo xtas
 verify macos` includes `GitSmoke`, which opens Git through the actual workspace
 sidebar, checks automatic repository loading, visible toolbar controls with a long
 branch name, tab switching and the initial equal split, then creates real branch
-divergence and a merge. Set `NATIVE_WORKSPACE_GIT_SCREENSHOT` to an absolute PNG
+divergence and a merge, checking graph width, the current-branch badge, the merge
+commit's changed files and a numbered commit-file diff. Set `NATIVE_WORKSPACE_GIT_SCREENSHOT` to an absolute PNG
 path to capture the workspace with its Git sidebar.
 
 GNOME's workspace smoke opens a real Git review dialog and checks the initial split
@@ -116,7 +117,8 @@ with only `README.md` and `src/main.rs` in the workspace, to preserve tree row c
 
 KDE provides `--smoke-git=/path/to/disposable-repository`: commit `note.txt` with
 `original`, stage `staged`, then write `working tree` to disk (each with a newline).
-The driver checks both diffs, the split, staging, commit and graph refresh. Run
+The driver checks both diffs, the split, staging, commit, graph refresh and the
+current-branch reference. Run
 `QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software` on a headless host.
 
 ## Session restoration verification

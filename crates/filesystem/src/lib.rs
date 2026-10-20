@@ -2,8 +2,9 @@
 
 mod git;
 pub use git::{
-    GitBranch, GitChange, GitCommit, GitConflict, GitDiff, GitInspection, GitOperation, GitQuery,
-    GitRemote, GitRepository, GitStash, GitWorktree,
+    GitBranch, GitChange, GitCommit, GitCommitDetail, GitCommitFile, GitConflict, GitDiff,
+    GitInspection, GitOperation, GitQuery, GitRef, GitRefKind, GitRemote, GitRepository, GitStash,
+    GitWorktree,
 };
 
 use native_workspace_domain::{DocumentId, Workspace};

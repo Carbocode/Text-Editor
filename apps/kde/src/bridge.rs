@@ -150,6 +150,10 @@ pub mod qobject {
         #[qinvokable]
         fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString;
         #[qinvokable]
+        fn path_name(self: Pin<&mut Self>, path: &QString) -> QString;
+        #[qinvokable]
+        fn path_parent(self: Pin<&mut Self>, path: &QString) -> QString;
+        #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
         fn open_files(self: Pin<&mut Self>, urls: &QStringList);
@@ -841,6 +845,12 @@ impl qobject::AppController {
             "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
             file_icon_name(&value.to_string())
         ))
+    }
+    pub fn path_name(self: Pin<&mut Self>, value: &QString) -> QString {
+        QString::from(native_workspace_domain::path::name(&value.to_string()))
+    }
+    pub fn path_parent(self: Pin<&mut Self>, value: &QString) -> QString {
+        QString::from(native_workspace_domain::path::parent(&value.to_string()))
     }
     pub fn folder_icon(self: Pin<&mut Self>, value: &QString, expanded: bool) -> QString {
         QString::from(format!(

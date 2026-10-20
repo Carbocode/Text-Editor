@@ -21,7 +21,11 @@ The Git sidebar uses a native vertical split initially at half height, with Sour
 Control above and the shared branch/commit graph below. The sidebar header stays
 outside the split; opening Git loads the repository after any pending workspace
 operation finishes. Branch names truncate to retain the refresh and actions
-buttons at the minimum sidebar width. Staging, commit, branch,
+buttons at the minimum sidebar width. The graph uses one row per commit with
+reference badges and an inline commit summary listing changed files; changes show
+file name, folder and a colored status letter, grouped into merge, staged and
+unstaged sections. Diffs render numbered, colored lines; clicking a hunk header
+selects its changed lines. Staging, commit, branch,
 remote, stash and history actions run through Session. Diff reviews support
 before/after content and selected-line staging; the merge editor reviews current,
 incoming and editable result content. See

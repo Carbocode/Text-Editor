@@ -131,7 +131,15 @@ pub enum GitOperation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GitQuery {
     Commit(String),
-    Compare { from: String, to: String },
+    /// One file's first-parent patch inside a commit; keeps the commit summary.
+    CommitFile {
+        commit: String,
+        path: String,
+    },
+    Compare {
+        from: String,
+        to: String,
+    },
     FileHistory(String),
     Blame(String),
     Conflict(String),
@@ -139,6 +147,10 @@ pub enum GitQuery {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GitInspection {
     pub conflict: Option<GitConflict>,
+    /// Structured summary for commit queries; the patch remains in `text`.
+    pub commit: Option<GitCommitDetail>,
+    /// The single file shown by a commit-file query.
+    pub path: Option<String>,
     pub title: String,
     pub text: String,
     pub truncated: bool,
@@ -155,13 +167,79 @@ pub struct GitConflict {
     pub accept_both: String,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitCommitDetail {
+    pub id: String,
+    pub parents: Vec<String>,
+    pub author: String,
+    pub email: String,
+    pub date: String,
+    pub message: String,
+    pub files: Vec<GitCommitFile>,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitCommitFile {
+    pub path: String,
+    pub original_path: Option<String>,
+    /// Git name-status letter: A, M, D, R, C, T.
+    pub status: String,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitRefKind {
+    Head,
+    Branch,
+    Remote,
+    Tag,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitRef {
+    pub name: String,
+    pub kind: GitRefKind,
+    /// The local branch checked out by HEAD.
+    pub current: bool,
+}
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GitCommit {
     pub id: String,
     pub parents: Vec<String>,
     pub author: String,
     pub date: String,
-    pub refs: String,
+    pub refs: Vec<GitRef>,
     pub subject: String,
+}
+
+/// Parse `%D` from `--decorate=full`; other namespaces (stash, notes, tools) are hidden.
+fn decorations(text: &str) -> Vec<GitRef> {
+    let mut refs = Vec::new();
+    for item in text.split(", ").filter(|item| !item.is_empty()) {
+        let (current, item) = match item.strip_prefix("HEAD -> ") {
+            Some(branch) => (true, branch),
+            None => (false, item),
+        };
+        let item = item.strip_prefix("tag: ").unwrap_or(item);
+        let (kind, name) = if item == "HEAD" {
+            (GitRefKind::Head, item)
+        } else if let Some(name) = item.strip_prefix("refs/heads/") {
+            (GitRefKind::Branch, name)
+        } else if let Some(name) = item.strip_prefix("refs/remotes/") {
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            (GitRefKind::Remote, name)
+        } else if let Some(name) = item.strip_prefix("refs/tags/") {
+            (GitRefKind::Tag, name)
+        } else {
+            continue;
+        };
+        refs.push(GitRef {
+            name: name.into(),
+            kind,
+            current,
+        });
+    }
+    // Detached HEAD first, then the checked-out branch, local, remote and tags.
+    refs.sort_by_key(|r| (r.kind != GitRefKind::Head, !r.current, r.kind as u8));
+    refs
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct GitBranch {
@@ -292,9 +370,13 @@ pub(crate) fn history(root: &Path, limit: usize) -> Result<Vec<GitCommit>, Files
         root,
         &[
             "log",
-            "--all",
+            // Tool refs such as stashes or checkpoints are not user history.
+            "--branches",
+            "--remotes",
+            "--tags",
+            "HEAD",
             "--topo-order",
-            "--date-order",
+            "--decorate=full",
             "--max-count",
             &limit,
             "--format=%H%x00%P%x00%an%x00%aI%x00%D%x00%s%x00",
@@ -310,7 +392,7 @@ pub(crate) fn history(root: &Path, limit: usize) -> Result<Vec<GitCommit>, Files
             parents: f[1].split_whitespace().map(str::to_owned).collect(),
             author: f[2].into(),
             date: f[3].into(),
-            refs: f[4].into(),
+            refs: decorations(f[4]),
             subject: f[5].into(),
         })
         .collect())
@@ -884,7 +966,6 @@ pub(crate) fn inspect(
     let repo =
         repository(workspace)?.ok_or_else(|| failure(workspace, "Open a Git repository first."))?;
     let root = &repo.root;
-    let options = ["--no-ext-diff", "--no-textconv", "--no-color"];
     let (title, args): (String, Vec<String>) = match query {
         GitQuery::Conflict(path) => {
             let id = safe_path(root, path)?;
@@ -896,6 +977,8 @@ pub(crate) fn inspect(
             let incoming = text(root, &["show", &format!(":3:{path}")]).unwrap_or_default();
             let expected = RealFilesystem.read_document(root, &id)?;
             return Ok(GitInspection {
+                commit: None,
+                path: None,
                 title: format!("Resolve: {path}"),
                 text: expected.clone(),
                 truncated: false,
@@ -913,16 +996,61 @@ pub(crate) fn inspect(
         }
         GitQuery::Commit(value) => {
             let oid = reference(root, value)?;
-            (
-                format!("Commit {oid}"),
-                vec![
-                    "show".into(),
-                    "--format=fuller".into(),
-                    "--stat".into(),
-                    "--patch".into(),
-                    oid,
+            let detail = commit_detail(root, &oid)?;
+            let (text, truncated) = show(
+                root,
+                &[
+                    "show",
+                    "--format=fuller",
+                    "--stat",
+                    "--patch",
+                    "--diff-merges=first-parent",
+                    &oid,
                 ],
-            )
+            )?;
+            return Ok(GitInspection {
+                conflict: None,
+                title: format!(
+                    "{} {}",
+                    &oid[..oid.len().min(7)],
+                    first_line(&detail.message)
+                ),
+                commit: Some(detail),
+                path: None,
+                text,
+                truncated,
+            });
+        }
+        GitQuery::CommitFile { commit, path } => {
+            let oid = reference(root, commit)?;
+            safe_path(root, path)?;
+            let detail = commit_detail(root, &oid)?;
+            let file = detail
+                .files
+                .iter()
+                .find(|f| f.path == *path)
+                .ok_or_else(|| failure(root, "This file is not part of the commit."))?;
+            let mut args = vec![
+                "show",
+                "--format=",
+                "--patch",
+                "--diff-merges=first-parent",
+                &oid,
+                "--",
+                path,
+            ];
+            if let Some(original) = &file.original_path {
+                args.push(original);
+            }
+            let (text, truncated) = show(root, &args)?;
+            return Ok(GitInspection {
+                conflict: None,
+                title: format!("{path} @ {}", &oid[..oid.len().min(7)]),
+                commit: Some(detail),
+                path: Some(path.clone()),
+                text,
+                truncated,
+            });
         }
         GitQuery::Compare { from, to } => {
             let a = reference(root, from)?;
@@ -948,15 +1076,31 @@ pub(crate) fn inspect(
             safe_path(root, path)?;
             return Ok(GitInspection {
                 conflict: None,
+                commit: None,
+                path: Some(path.clone()),
                 title: format!("Blame: {path}"),
                 text: text(root, &["blame", "--date=short", "--", path])?,
                 truncated: false,
             });
         }
     };
-    let mut arguments = vec![args[0].as_str()];
-    arguments.extend(options);
-    arguments.extend(args[1..].iter().map(String::as_str));
+    let arguments: Vec<_> = args.iter().map(String::as_str).collect();
+    let (text, truncated) = show(root, &arguments)?;
+    Ok(GitInspection {
+        conflict: None,
+        commit: None,
+        path: None,
+        title,
+        text,
+        truncated,
+    })
+}
+
+/// Bounded inspection output with external diff and text conversion disabled.
+fn show(root: &Path, args: &[&str]) -> Result<(String, bool), FilesystemError> {
+    let mut arguments = vec![args[0]];
+    arguments.extend(["--no-ext-diff", "--no-textconv", "--no-color"]);
+    arguments.extend(&args[1..]);
     let (out, truncated) = super::output(root, &arguments)?;
     if !truncated && !out.status.success() {
         return Err(failure(
@@ -964,10 +1108,71 @@ pub(crate) fn inspect(
             "Git history inspection failed. Refresh and try again.",
         ));
     }
-    Ok(GitInspection {
-        conflict: None,
-        title,
-        text: String::from_utf8_lossy(&out.stdout).into_owned(),
-        truncated,
+    Ok((String::from_utf8_lossy(&out.stdout).into_owned(), truncated))
+}
+
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or_default()
+}
+
+fn commit_detail(root: &Path, oid: &str) -> Result<GitCommitDetail, FilesystemError> {
+    let header = text(
+        root,
+        &[
+            "show",
+            "--no-patch",
+            "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%B",
+            oid,
+        ],
+    )?;
+    let fields: Vec<_> = header.splitn(6, '\0').collect();
+    let [id, parents, author, email, date, message] = fields.as_slice() else {
+        return Err(failure(root, "Invalid Git commit response."));
+    };
+    let listing = checked(
+        root,
+        &[
+            "show",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=",
+            "--name-status",
+            "--find-renames",
+            "--diff-merges=first-parent",
+            "-z",
+            oid,
+        ],
+    )?;
+    let mut files = Vec::new();
+    let mut records = listing
+        .split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(String::from_utf8_lossy);
+    while let Some(status) = records.next() {
+        let status = status.trim_start_matches('\n');
+        let letter: String = status.chars().take(1).collect();
+        let first = records.next().map(|p| p.into_owned()).unwrap_or_default();
+        let (path, original_path) = if matches!(letter.as_str(), "R" | "C") {
+            (
+                records.next().map(|p| p.into_owned()).unwrap_or_default(),
+                Some(first),
+            )
+        } else {
+            (first, None)
+        };
+        files.push(GitCommitFile {
+            path,
+            original_path,
+            status: letter,
+        });
+    }
+    Ok(GitCommitDetail {
+        id: (*id).into(),
+        parents: parents.split_whitespace().map(str::to_owned).collect(),
+        author: (*author).into(),
+        email: (*email).into(),
+        date: (*date).into(),
+        message: message.trim_end().into(),
+        files,
     })
 }
