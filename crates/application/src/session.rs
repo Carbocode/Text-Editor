@@ -32,6 +32,8 @@ use std::{
 const SLOW_RELOCATION: Duration = Duration::from_millis(300);
 
 pub struct Session {
+    last_git_poll: Instant,
+    git_visible: bool,
     terminals: crate::terminal::Terminals,
     /// `None` while the worker owns the application.
     core: Option<Application>,
@@ -88,6 +90,8 @@ impl Session {
 
     pub(crate) fn with_application(core: Application) -> Self {
         Self {
+            last_git_poll: Instant::now(),
+            git_visible: false,
             terminals: crate::terminal::Terminals::new(core.live_terminals.clone()),
             published: core.snapshot(),
             core_revision: core.revision(),
@@ -104,6 +108,58 @@ impl Session {
         }
     }
 
+    pub fn set_git_visible(&mut self, visible: bool) {
+        self.git_visible = visible;
+    }
+    pub fn git_request(
+        &mut self,
+        action: &str,
+        value: String,
+        extra: String,
+        flag: bool,
+    ) -> Result<(), AppError> {
+        match crate::git_request(action, value, extra, flag) {
+            Ok(command) => self.dispatch(command),
+            Err(error) => self.fail(error),
+        }
+    }
+    pub fn git_resolve(&mut self, result: String) -> Result<(), AppError> {
+        let conflict = self
+            .published
+            .git
+            .inspection
+            .as_ref()
+            .and_then(|i| i.conflict.as_ref());
+        let Some(conflict) = conflict else {
+            return self.fail(AppError::Git("Open an unresolved conflict first.".into()));
+        };
+        self.dispatch(AppCommand::Git(crate::GitOperation::Resolve {
+            path: conflict.path.clone(),
+            expected: conflict.expected.clone(),
+            result,
+        }))
+    }
+    pub fn git_stage_lines(&mut self, indices: Vec<usize>) -> Result<(), AppError> {
+        let result = (|| {
+            let diff = self
+                .published
+                .git
+                .diff
+                .as_ref()
+                .ok_or_else(|| AppError::Git("Open a text diff first.".into()))?;
+            let patch = crate::git::patch::selected(diff, &indices)?;
+            Ok(AppCommand::Git(crate::GitOperation::ApplyPatch {
+                path: diff.path.clone(),
+                expected: diff.text.clone(),
+                patch,
+                staged: diff.staged,
+            }))
+        })();
+        match result {
+            Ok(command) => self.dispatch(command),
+            Err(error) => self.fail(error),
+        }
+    }
     pub fn terminal_snapshot(&self) -> Arc<crate::TerminalSnapshot> {
         self.terminals.snapshot()
     }
@@ -156,9 +212,10 @@ impl Session {
             };
             return self.while_busy(command.clone(), command.while_busy(schedule));
         }
+        let git_poll = matches!(command, AppCommand::PollGit);
         let user_command = !matches!(
             command,
-            AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults
+            AppCommand::PollGit | AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults
         );
         match command.schedule() {
             Schedule::Inline => {
@@ -191,7 +248,7 @@ impl Session {
                 }
             }
             schedule @ (Schedule::Exclusive | Schedule::Background) => {
-                self.start(vec![command], schedule, None, trace);
+                self.start_job(vec![command], schedule, None, trace, git_poll);
                 Ok(())
             }
         }
@@ -253,6 +310,14 @@ impl Session {
             ] {
                 let _ = self.dispatch(command);
             }
+        }
+        if self.worker.is_none()
+            && self.git_visible
+            && self.published.git.loaded
+            && self.last_git_poll.elapsed() >= Duration::from_secs(5)
+        {
+            self.last_git_poll = Instant::now();
+            let _ = self.dispatch(AppCommand::PollGit);
         }
         if let Some(result) = self.path_filter.poll() {
             self.publish_filter(result);

@@ -32,3 +32,25 @@ listview.compact-files row > box {
 }
 
 .workspace-document-tabs .workspace-preview label { font-style: italic; }
+
+/* Commit edges meet exactly at row boundaries, including native button padding. */
+button.git-graph-row { padding: 0; margin: 0; border-width: 0; min-height: 0; }
+
+/* Source Control: dense rows, status letters, reference badges and commit details. */
+button.git-graph-row.git-selected { background: alpha(@accent_bg_color, 0.2); }
+button.git-file { padding: 1px 4px; min-height: 22px; }
+.git-section { min-height: 24px; margin-top: 4px; }
+.git-count { font-size: 0.8em; padding: 0 6px; border-radius: 8px; background: alpha(currentColor, 0.12); }
+.git-status { font-family: monospace; font-weight: bold; min-width: 12px; }
+.git-added { color: @success_color; }
+.git-modified { color: @warning_color; }
+.git-deleted { color: @error_color; }
+.git-renamed { color: @accent_color; }
+.git-ref { font-size: 0.75em; font-weight: 600; padding: 0 5px; border-radius: 4px; }
+.git-ref-branch { color: @accent_color; background: alpha(@accent_color, 0.14); }
+.git-ref-current { color: @accent_fg_color; background: @accent_bg_color; font-weight: 800; }
+.git-ref-remote { color: @accent_color; border: 1px solid alpha(@accent_color, 0.6); }
+.git-ref-tag { color: @warning_color; background: alpha(@warning_color, 0.16); }
+.git-ref-more { background: alpha(currentColor, 0.1); }
+.git-ref-head { color: @error_color; background: alpha(@error_color, 0.14); }
+.git-detail { padding: 6px 8px; margin: 2px 8px 4px 0; border-radius: 6px; background: alpha(currentColor, 0.05); }

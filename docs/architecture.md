@@ -86,6 +86,17 @@ immutable visible grids; they never parse terminal output or own shell processes
 Session polls terminal updates even while filesystem work is active. See
 [ADR 0008](adr/0008-integrated-terminals.md).
 
+## Git Source Control
+
+Git queries and typed mutations use the command/event/reducer pipeline and Session
+worker. The filesystem port owns Git CLI I/O; Rust owns repository selection,
+partial-staging patches, merge-result validation, graph lanes/colors, typed
+references and numbered diff lines. Native adapters render the shared graph and maintain their sidebar divider, dialogs,
+drafts and selections. Mutations reconcile documents even after partial failures.
+Worktree operations require saved buffers and pause editing; metadata operations
+and remote fetch/push keep editing responsive. The visible Git sidebar refreshes
+every five seconds without hiding errors. See [ADR 0010](adr/0010-git-source-control.md).
+
 ## Tabs and errors
 
 Open tabs have visual order and at most one replaceable clean preview. Explicit opening, editing, saving, keeping open or reordering promotes the preview. Renames retain editor generation; switching documents advances it. Closing and deletion choose the visual neighbor. `SaveAndCloseDocument` saves before closing and stops on failure. `SaveAllDocuments` follows tab order and retains completed saves if another conflicts.

@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppEvent {
+    GitUpdated {
+        snapshot: Arc<crate::GitSnapshot>,
+    },
     RecentWorkspacesLoaded {
         recent_workspaces: Vec<RecentWorkspace>,
     },
@@ -90,6 +93,7 @@ impl AppEvent {
     /// Diagnostic name and scalar value; never paths or contents.
     pub(crate) fn diagnostic_fact(&self) -> (&'static str, u64) {
         match self {
+            Self::GitUpdated { .. } => ("git.updated", 0),
             Self::RecentWorkspacesLoaded { recent_workspaces } => {
                 ("workspace.recents_loaded", recent_workspaces.len() as u64)
             }
@@ -127,7 +131,8 @@ impl AppEvent {
         match self {
             Self::DocumentLoaded { content, .. } => Some(content.len() as u64),
             Self::DocumentClosed { .. } => Some(0),
-            Self::RecentWorkspacesLoaded { .. }
+            Self::GitUpdated { .. }
+            | Self::RecentWorkspacesLoaded { .. }
             | Self::WorkspaceOpened { .. }
             | Self::WorkspaceRefreshed { .. }
             | Self::EntryDeleted { .. }

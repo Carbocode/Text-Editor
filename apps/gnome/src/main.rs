@@ -1,5 +1,6 @@
 mod document_tab_scroll;
 mod editor_chrome;
+mod git_panel;
 mod material_icons;
 #[cfg(debug_assertions)]
 mod session_restore_smoke;

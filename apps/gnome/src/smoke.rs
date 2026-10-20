@@ -268,9 +268,89 @@ pub(super) fn run(widgets: Widgets<'_>) {
             ui.switch_sidebar(SidebarTab::Git);
             assert_eq!(
                 ui.sidebar_pages.visible_child_name().as_deref(),
-                Some("empty")
+                Some("git")
             );
             ui.switch_sidebar(SidebarTab::Files);
+        }
+        settle(ui);
+        let has_git_changes = ui
+            .snapshot
+            .borrow()
+            .git
+            .repository
+            .as_ref()
+            .is_some_and(|repo| !repo.changes.is_empty());
+        if has_git_changes {
+            ui.switch_sidebar(SidebarTab::Git);
+            settle(ui);
+            fn descendants(root: &gtk::Widget) -> Vec<gtk::Widget> {
+                let mut result = vec![root.clone()];
+                let mut child = root.first_child();
+                while let Some(widget) = child {
+                    result.extend(descendants(&widget));
+                    child = widget.next_sibling();
+                }
+                result
+            }
+            let split = descendants(ui.git.root.upcast_ref())
+                .into_iter()
+                .find(|widget| widget.widget_name() == "gitSplit")
+                .unwrap()
+                .downcast::<gtk::Paned>()
+                .unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while (split.height() == 0 || split.position() == 0)
+                && std::time::Instant::now() < until
+            {
+                glib::MainContext::default().iteration(false);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            if split.height() > 0 {
+                assert!(
+                    (split.position() as f64 / split.height() as f64 - 0.5).abs() < 0.15,
+                    "Git split is not initially half height"
+                );
+            }
+            // Rows ellipsize; content never raises the sidebar's minimum width.
+            let (minimum, _, _, _) = ui.git.root.measure(gtk::Orientation::Horizontal, -1);
+            let widest = descendants(ui.git.root.upcast_ref())
+                .into_iter()
+                .filter(|w| w.is_mapped() && w.measure(gtk::Orientation::Horizontal, -1).0 > 240)
+                .last()
+                .map(|w| {
+                    let text = w.downcast_ref::<gtk::Label>().map(|l| l.text());
+                    format!("{} {:?} {text:?}", w.type_().name(), w.css_classes())
+                });
+            assert!(
+                minimum <= 240,
+                "Git panel needs {minimum}px horizontally: {widest:?}"
+            );
+            let button = descendants(ui.git.root.upcast_ref())
+                .into_iter()
+                .filter_map(|widget| widget.downcast::<gtk::Button>().ok())
+                .find(|button| button.widget_name() == "gitReview")
+                .expect("Git review button");
+            button.emit_clicked();
+            settle(ui);
+            assert!(ui.snapshot.borrow().error.is_none());
+            let dialog = gtk::Window::list_toplevels()
+                .into_iter()
+                .find(|widget| widget.widget_name() == "gitDiffDialog")
+                .unwrap()
+                .downcast::<gtk::Window>()
+                .unwrap();
+            let text = descendants(dialog.upcast_ref())
+                .into_iter()
+                .find(|widget| widget.widget_name() == "gitDiffText")
+                .unwrap()
+                .downcast::<gtk::TextView>()
+                .unwrap();
+            let buffer = text.buffer();
+            let content = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
+            assert!(!content.is_empty() && content != "Loading diff…");
+            dialog.close();
+            ui.switch_sidebar(SidebarTab::Files);
+            println!("GTK Git split/graph/review dialog smoke test passed");
         }
         assert_eq!(
             model_changes.get(),

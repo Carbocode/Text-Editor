@@ -31,6 +31,7 @@ struct SidebarTabBar: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(tabs[index].0)
+                .accessibilityIdentifier("sidebarTab:\(SidebarSection.allCases[index])")
                 .accessibilityAddTraits(selection.rawValue == index ? .isSelected : [])
                 .help(tabs[index].0)
             }

@@ -109,3 +109,11 @@ swiftc -parse-as-library -I apps/macos/generated \
   target/debug/libnative_workspace_ffi_swift.a \
   -o apps/macos/.build/TerminalSmoke
 apps/macos/.build/TerminalSmoke
+
+swiftc -parse-as-library -I apps/macos/generated \
+  -Xcc -fmodule-map-file=apps/macos/generated/native_workspace_ffi_swiftFFI.modulemap \
+  apps/macos/generated/native_workspace_ffi_swift.swift \
+  "$@" apps/macos/WorkspaceTests/GitSmoke.swift \
+  target/debug/libnative_workspace_ffi_swift.a \
+  -o apps/macos/.build/GitSmoke
+apps/macos/.build/GitSmoke

@@ -135,7 +135,7 @@ impl Application {
         let restoring = matches!(command, AppCommand::RestoreSession);
         let polling = matches!(
             command,
-            AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults
+            AppCommand::PollGit | AppCommand::PollWorkspaceChanges | AppCommand::PollSearchResults
         );
         let previous_session = if restoring || polling {
             None
@@ -146,6 +146,7 @@ impl Application {
             AppCommand::RestoreSession => self.restore_session(),
             AppCommand::OpenPaths(paths) => self.execute_open_paths(paths),
             AppCommand::ApplyReplacement => self.apply_replacement(),
+            AppCommand::Git(operation) => self.execute_git_operation(&operation),
             command => match command.steps(|| self.state.dirty_tabs()) {
                 Some(steps) => self.execute_steps(steps),
                 None => self.execute_one(command),

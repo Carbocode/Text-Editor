@@ -5,6 +5,7 @@ mod core;
 mod delete;
 mod document_tabs;
 mod external_files;
+mod git;
 mod replacement;
 mod restore;
 mod search;

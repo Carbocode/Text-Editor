@@ -24,6 +24,7 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(bool, devtools_available)]
         #[qproperty(u64, revision)]
+        #[qproperty(QString, git_json)]
         #[qproperty(QString, terminal_json)]
         #[qproperty(bool, terminals_running)]
         #[qproperty(QString, workspace_name)]
@@ -104,6 +105,28 @@ pub mod qobject {
         #[qinvokable]
         fn refresh_search(self: Pin<&mut Self>);
         #[qinvokable]
+        fn refresh_git(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn set_git_visible(self: Pin<&mut Self>, visible: bool);
+        #[qinvokable]
+        fn git_request(
+            self: Pin<&mut Self>,
+            action: &QString,
+            value: &QString,
+            extra: &QString,
+            flag: bool,
+        );
+        #[qinvokable]
+        fn git_resolve(self: Pin<&mut Self>, result: &QString);
+        #[qinvokable]
+        fn git_stage_lines(self: Pin<&mut Self>, lines: &QString);
+        #[qinvokable]
+        fn git_load_more(self: Pin<&mut Self>);
+        #[qinvokable]
+        fn git_confirmation(self: Pin<&mut Self>) -> QVariant;
+        #[qinvokable]
+        fn show_git_diff(self: Pin<&mut Self>, path: &QString, staged: bool);
+        #[qinvokable]
         fn replacement_confirmation(self: Pin<&mut Self>, occurrences: u64, files: u64)
         -> QVariant;
         #[qinvokable]
@@ -126,6 +149,10 @@ pub mod qobject {
         fn file_icon(self: Pin<&mut Self>, path: &QString) -> QString;
         #[qinvokable]
         fn folder_icon(self: Pin<&mut Self>, path: &QString, expanded: bool) -> QString;
+        #[qinvokable]
+        fn path_name(self: Pin<&mut Self>, path: &QString) -> QString;
+        #[qinvokable]
+        fn path_parent(self: Pin<&mut Self>, path: &QString) -> QString;
         #[qinvokable]
         fn open_workspace(self: Pin<&mut Self>, path: &QString);
         #[qinvokable]
@@ -215,6 +242,8 @@ pub mod qobject {
 #[derive(Default)]
 pub struct AppControllerRust {
     revision: u64,
+    git_json: QString,
+    git_snapshot: Arc<native_workspace_application::GitSnapshot>,
     terminal_json: QString,
     terminals_running: bool,
     terminal_revision: u64,
@@ -406,6 +435,12 @@ impl qobject::AppController {
         }
     }
     fn update_snapshot(mut self: Pin<&mut Self>, snapshot: AppSnapshot) {
+        if !Arc::ptr_eq(&self.rust().git_snapshot, &snapshot.git) {
+            self.as_mut()
+                .set_git_json(QString::from(snapshot.git.json()));
+            self.as_mut().rust_mut().git_snapshot = snapshot.git.clone();
+        }
+
         self.as_mut().set_snapshot_updating(true);
         let observer = self.rust().application.diagnostic_observer();
         let started = observer.enabled().then(std::time::Instant::now);
@@ -705,6 +740,63 @@ impl qobject::AppController {
             ("cancel", text(prompt.cancel)),
         ])
     }
+    pub fn set_git_visible(mut self: Pin<&mut Self>, visible: bool) {
+        self.as_mut()
+            .rust_mut()
+            .application
+            .set_git_visible(visible);
+    }
+    pub fn git_request(
+        mut self: Pin<&mut Self>,
+        action: &QString,
+        value: &QString,
+        extra: &QString,
+        flag: bool,
+    ) {
+        let _ = self.as_mut().rust_mut().application.git_request(
+            &action.to_string(),
+            value.to_string(),
+            extra.to_string(),
+            flag,
+        );
+        self.publish();
+    }
+    pub fn git_resolve(mut self: Pin<&mut Self>, result: &QString) {
+        let _ = self
+            .as_mut()
+            .rust_mut()
+            .application
+            .git_resolve(result.to_string());
+        self.publish();
+    }
+    pub fn git_stage_lines(mut self: Pin<&mut Self>, lines: &QString) {
+        if let Ok(lines) = serde_json::from_str::<Vec<usize>>(&lines.to_string()) {
+            let _ = self.as_mut().rust_mut().application.git_stage_lines(lines);
+        }
+        self.publish();
+    }
+    pub fn git_load_more(self: Pin<&mut Self>) {
+        let limit = self.rust().application.snapshot().git.history_limit + 200;
+        self.dispatch(AppCommand::LoadGitHistory(limit));
+    }
+    pub fn git_confirmation(self: Pin<&mut Self>) -> QVariant {
+        let prompt = native_workspace_application::git_action_confirmation();
+        object([
+            ("title", text(&prompt.title)),
+            ("body", text(prompt.body)),
+            ("confirm", text(prompt.confirm)),
+            ("cancel", text(prompt.cancel)),
+        ])
+    }
+    pub fn refresh_git(self: Pin<&mut Self>) {
+        self.dispatch(AppCommand::RefreshGit);
+    }
+    pub fn show_git_diff(self: Pin<&mut Self>, path: &QString, staged: bool) {
+        self.dispatch(AppCommand::ShowGitDiff {
+            path: path.to_string(),
+            staged,
+        });
+    }
     pub fn refresh_search(self: Pin<&mut Self>) {
         self.dispatch(AppCommand::RefreshSearch);
     }
@@ -753,6 +845,12 @@ impl qobject::AppController {
             "qrc:/qt/qml/org/nativeworkspace/Diagnostic/material/{}.png",
             file_icon_name(&value.to_string())
         ))
+    }
+    pub fn path_name(self: Pin<&mut Self>, value: &QString) -> QString {
+        QString::from(native_workspace_domain::path::name(&value.to_string()))
+    }
+    pub fn path_parent(self: Pin<&mut Self>, value: &QString) -> QString {
+        QString::from(native_workspace_domain::path::parent(&value.to_string()))
     }
     pub fn folder_icon(self: Pin<&mut Self>, value: &QString, expanded: bool) -> QString {
         QString::from(format!(

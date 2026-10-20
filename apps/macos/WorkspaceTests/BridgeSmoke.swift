@@ -42,7 +42,7 @@ struct BridgeSmoke {
         precondition(firstEdit.activeDocument?.dirty == true)
         // An edit does not serialize workspace paths or unchanged matches.
         let nextEdit = try app.changeDocument(id: "README.md", content: "after 💡 after!")
-        precondition(nextEdit.documents == nil && nextEdit.directories == nil && nextEdit.searchResults == nil)
+        precondition(nextEdit.documents == nil && nextEdit.directories == nil && nextEdit.searchResults == nil && nextEdit.gitJson == nil)
         _ = try app.saveDocument(id: "README.md")
         let saved = try String(contentsOf: file, encoding: .utf8)
         precondition(saved == "after 💡 after!")
