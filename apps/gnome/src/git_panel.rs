@@ -50,9 +50,10 @@ pub(super) struct GitPanel {
     selected: Rc<RefCell<Option<String>>>,
 }
 
-const LANE: f64 = 12.0;
+const LANE: f64 = 10.0;
 const ROW: i32 = 24;
-const MAX_LANES: usize = 14;
+/// Only the first lanes are drawn so the gutter cannot push row text out of the sidebar.
+const MAX_LANES: usize = 8;
 const COLORS: [(f64, f64, f64); 8] = [
     (0.24, 0.56, 0.98),
     (0.96, 0.55, 0.20),
@@ -93,7 +94,7 @@ fn file_label(file: &str, letter: &str, class: &str) -> gtk::Box {
     icon.set_pixel_size(14);
     row.append(&icon);
     let name = gtk::Label::new(Some(path::name(file)));
-    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
     row.append(&name);
     let folder = gtk::Label::new(Some(path::parent(file)));
     folder.add_css_class("dim-label");
@@ -167,23 +168,16 @@ fn draw_continuation(row: &GraphCommit, cr: &gtk::cairo::Context, height: f64) {
     }
 }
 
+/// Reference names ellipsize in the middle instead of widening the sidebar.
 fn badge(name: &str, kind: GitRefKind, current: bool) -> gtk::Label {
-    let short = if name.chars().count() > 24 {
-        let chars: Vec<_> = name.chars().collect();
-        format!(
-            "{}…{}",
-            chars[..11].iter().collect::<String>(),
-            chars[chars.len() - 11..].iter().collect::<String>()
-        )
-    } else {
-        name.into()
-    };
     let label = gtk::Label::new(Some(&match (kind, current) {
-        (GitRefKind::Tag, _) => format!("🏷 {short}"),
-        (GitRefKind::Remote, _) => format!("☁ {short}"),
-        (_, true) => format!("✓ {short}"),
-        _ => short,
+        (GitRefKind::Tag, _) => format!("🏷 {name}"),
+        (GitRefKind::Remote, _) => format!("☁ {name}"),
+        (_, true) => format!("✓ {name}"),
+        _ => name.into(),
     }));
+    label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    label.set_max_width_chars(16);
     label.add_css_class("git-ref");
     label.add_css_class(match kind {
         GitRefKind::Head => "git-ref-head",
@@ -193,6 +187,13 @@ fn badge(name: &str, kind: GitRefKind, current: bool) -> gtk::Label {
         GitRefKind::Tag => "git-ref-tag",
     });
     label.set_tooltip_text(Some(name));
+    label
+}
+
+fn ref_badge(ui: &Ui, r: &native_workspace_application::GitRef) -> gtk::Label {
+    let label = badge(&r.name, r.kind, r.current);
+    let (name, kind, current) = (r.name.clone(), r.kind, r.current);
+    context_menu(&label, ui, move || ref_items(&name, kind, current));
     label
 }
 
@@ -357,6 +358,22 @@ fn fill_review(buffer: &gtk::TextBuffer, text: &str, snapshot: &AppSnapshot) {
     }
 }
 
+/// Sidebar lists scroll vertically only; their rows ellipsize to the width.
+fn sidebar_scroll(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
+    let scroll = scroll(child);
+    scroll.set_hscrollbar_policy(gtk::PolicyType::Never);
+    scroll
+}
+
+/// Long combo entries (branches, repository paths) ellipsize at their end.
+fn ellipsize_combo(combo: &gtk::ComboBoxText) {
+    for cell in combo.cells() {
+        if let Ok(text) = cell.downcast::<gtk::CellRendererText>() {
+            text.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+        }
+    }
+}
+
 fn scroll(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
     gtk::ScrolledWindow::builder()
         .vexpand(true)
@@ -491,10 +508,12 @@ impl GitPanel {
         top.set_size_request(-1, 160);
         let repository = gtk::ComboBoxText::new();
         repository.set_visible(false);
+        ellipsize_combo(&repository);
         top.append(&repository);
         let line = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let branch = gtk::ComboBoxText::new();
         branch.set_hexpand(true);
+        ellipsize_combo(&branch);
         let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
         refresh.set_tooltip_text(Some("Refresh Git changes"));
         let actions = gtk::MenuButton::new();
@@ -506,6 +525,7 @@ impl GitPanel {
         top.append(&line);
         let summary = gtk::Label::new(None);
         summary.set_xalign(0.0);
+        summary.set_ellipsize(gtk::pango::EllipsizeMode::End);
         summary.add_css_class("dim-label");
         top.append(&summary);
         let controls = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -514,22 +534,25 @@ impl GitPanel {
         message.set_wrap_mode(gtk::WrapMode::WordChar);
         message.set_size_request(-1, 56);
         controls.append(&scroll(&message));
+        // Stacked so the commit controls fit the narrowest sidebar.
+        let commit = gtk::Button::with_label("Commit");
+        commit.add_css_class("suggested-action");
+        commit.set_hexpand(true);
+        controls.append(&commit);
         let choices = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         let amend = gtk::CheckButton::with_label("Amend");
         let signoff = gtk::CheckButton::with_label("Sign off");
-        let commit = gtk::Button::with_label("Commit");
-        commit.add_css_class("suggested-action");
         choices.append(&amend);
         choices.append(&signoff);
-        choices.append(&commit);
         controls.append(&choices);
         top.append(&controls);
         let operation = gtk::Box::new(gtk::Orientation::Horizontal, 4);
         top.append(&operation);
         let rows = gtk::Box::new(gtk::Orientation::Vertical, 4);
-        top.append(&scroll(&rows));
+        top.append(&sidebar_scroll(&rows));
         let error = gtk::Label::new(None);
         error.set_wrap(true);
+        error.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         error.add_css_class("error");
         top.append(&error);
         paned.set_start_child(Some(&top));
@@ -541,7 +564,7 @@ impl GitPanel {
         heading.add_css_class("heading");
         bottom.append(&heading);
         let graph = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        bottom.append(&scroll(&graph));
+        bottom.append(&sidebar_scroll(&graph));
         paned.set_end_child(Some(&bottom));
         Self {
             root,
@@ -910,8 +933,11 @@ impl GitPanel {
             self.summary
                 .set_label(&format!("↑ {}  ↓ {}", repo.ahead, repo.behind));
             if let Some(kind) = &repo.operation {
-                self.operation
-                    .append(&gtk::Label::new(Some(&format!("{kind} in progress"))));
+                let label = gtk::Label::new(Some(&format!("{kind} in progress")));
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                label.set_hexpand(true);
+                label.set_xalign(0.0);
+                self.operation.append(&label);
                 let continue_button = gtk::Button::with_label("Continue");
                 let next = ui.clone();
                 continue_button.connect_clicked(move |_| {
@@ -1112,11 +1138,17 @@ impl GitPanel {
             let data = row.clone();
             drawing.set_draw_func(move |_, cr, _, height| draw_graph(&data, cr, f64::from(height)));
             content.append(&drawing);
-            for r in &row.commit.refs {
-                let label = badge(&r.name, r.kind, r.current);
-                let (name, kind, current) = (r.name.clone(), r.kind, r.current);
-                context_menu(&label, ui, move || ref_items(&name, kind, current));
-                content.append(&label);
+            // One badge in the row; the commit detail lists every reference.
+            if let Some(r) = row.commit.refs.first() {
+                content.append(&ref_badge(ui, r));
+            }
+            if row.commit.refs.len() > 1 {
+                let more = gtk::Label::new(Some(&format!("+{}", row.commit.refs.len() - 1)));
+                more.add_css_class("git-ref");
+                more.add_css_class("git-ref-more");
+                let names: Vec<_> = row.commit.refs.iter().map(|r| r.name.as_str()).collect();
+                more.set_tooltip_text(Some(&names.join("\n")));
+                content.append(&more);
             }
             let subject = gtk::Label::new(Some(&row.commit.subject));
             subject.set_xalign(0.0);
@@ -1161,8 +1193,20 @@ impl GitPanel {
                 card.set_hexpand(true);
                 match detail.filter(|d| d.id == row.commit.id) {
                     Some(detail) => {
+                        if !row.commit.refs.is_empty() {
+                            let refs = gtk::FlowBox::new();
+                            refs.set_selection_mode(gtk::SelectionMode::None);
+                            refs.set_column_spacing(4);
+                            refs.set_row_spacing(2);
+                            refs.set_max_children_per_line(8);
+                            for r in &row.commit.refs {
+                                refs.append(&ref_badge(ui, r));
+                            }
+                            card.append(&refs);
+                        }
                         let message = gtk::Label::new(Some(&detail.message));
                         message.set_wrap(true);
+                        message.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                         message.set_xalign(0.0);
                         message.set_selectable(true);
                         card.append(&message);
@@ -1181,6 +1225,7 @@ impl GitPanel {
                         meta.add_css_class("caption");
                         meta.set_xalign(0.0);
                         meta.set_wrap(true);
+                        meta.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                         meta.set_selectable(true);
                         card.append(&meta);
                         for file in &detail.files {

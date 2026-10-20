@@ -311,6 +311,20 @@ pub(super) fn run(widgets: Widgets<'_>) {
                     "Git split is not initially half height"
                 );
             }
+            // Rows ellipsize; content never raises the sidebar's minimum width.
+            let (minimum, _, _, _) = ui.git.root.measure(gtk::Orientation::Horizontal, -1);
+            let widest = descendants(ui.git.root.upcast_ref())
+                .into_iter()
+                .filter(|w| w.is_mapped() && w.measure(gtk::Orientation::Horizontal, -1).0 > 240)
+                .last()
+                .map(|w| {
+                    let text = w.downcast_ref::<gtk::Label>().map(|l| l.text());
+                    format!("{} {:?} {text:?}", w.type_().name(), w.css_classes())
+                });
+            assert!(
+                minimum <= 240,
+                "Git panel needs {minimum}px horizontally: {widest:?}"
+            );
             let button = descendants(ui.git.root.upcast_ref())
                 .into_iter()
                 .filter_map(|widget| widget.downcast::<gtk::Button>().ok())

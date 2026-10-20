@@ -25,7 +25,10 @@ buttons at the minimum sidebar width. The graph uses one row per commit with
 reference badges and an inline commit summary listing changed files; changes show
 file name, folder and a colored status letter, grouped into merge, staged and
 unstaged sections. Diffs render numbered, colored lines; clicking a hunk header
-selects its changed lines. Staging, commit, branch,
+selects its changed lines. Content stays within the sidebar width: names, references and
+subjects truncate (references in the middle), a row shows one badge plus a “+N”
+count with every reference in the commit detail, and only the first eight graph
+lanes are drawn. Staging, commit, branch,
 remote, stash and history actions run through Session. Diff reviews support
 before/after content and selected-line staging; the merge editor reviews current,
 incoming and editable result content. See

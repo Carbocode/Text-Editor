@@ -146,6 +146,38 @@ struct GitSmoke {
         precondition(store.git.inspection?.commit?.files.map(\.path) == ["feature.txt"], "commit detail files missing")
         store.gitAction("show_commit_file", merge, "feature.txt"); finish()
         precondition(store.git.patch_lines.contains { $0.kind == "added" && $0.new == 1 }, "numbered commit file diff missing")
+        // Long references and subjects truncate inside the narrowest sidebar.
+        store.gitAction("commit", String(repeating: "A very long commit subject ", count: 8), "", true); finish()
+        store.gitAction("tag", "release-candidate-with-a-very-long-tag-name-0001", "HEAD"); finish()
+        store.gitAction("tag", "second-tag", "HEAD"); finish()
+        sidebarSplit.setPosition(260, ofDividerAt: 0)
+        let head = store.git.history.first!.short_id
+        wait { find("gitCommit:\(head)") != nil && find("gitPanel")!.accessibilityFrame().width <= 261 }
+        window.contentView?.layoutSubtreeIfNeeded()
+        let bounds = find("gitPanel")!.accessibilityFrame().insetBy(dx: -1, dy: -1)
+        func frames(_ parent: Any) -> [NSRect] {
+            var result: [NSRect] = []
+            if let accessible = parent as? any NSAccessibilityElementProtocol { result.append(accessible.accessibilityFrame()) }
+            if let object = parent as? NSObject, object.responds(to: NSSelectorFromString("accessibilityChildren")),
+               let children = object.value(forKey: "accessibilityChildren") as? [Any] {
+                result += children.flatMap(frames)
+            }
+            return result
+        }
+        var checked = 0
+        for row in store.git.history {
+            guard let element = find("gitCommit:\(row.short_id)") else { continue }
+            // Every badge, subject and date inside the row, not only its frame.
+            for frame in frames(element) where frame.width > 0 {
+                checked += 1
+                precondition(frame.minX >= bounds.minX && frame.maxX <= bounds.maxX,
+                    "Commit row \(row.short_id) content overflows the sidebar: \(frame), panel: \(bounds)")
+            }
+        }
+        precondition(checked > store.git.history.count, "Commit row contents are not inspectable")
+        if let badge = find("gitRef:" + store.git.history.first!.commit.refs.first!.name) {
+            precondition(badge.accessibilityFrame().maxX <= bounds.maxX, "Reference badge overflows the sidebar")
+        }
         RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         precondition(window.contentView?.fittingSize.width ?? 0 > 0)
         if let output = ProcessInfo.processInfo.environment["NATIVE_WORKSPACE_GIT_SCREENSHOT"],

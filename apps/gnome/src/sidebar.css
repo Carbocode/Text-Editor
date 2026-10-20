@@ -51,5 +51,6 @@ button.git-file { padding: 1px 4px; min-height: 22px; }
 .git-ref-current { color: @accent_fg_color; background: @accent_bg_color; font-weight: 800; }
 .git-ref-remote { color: @accent_color; border: 1px solid alpha(@accent_color, 0.6); }
 .git-ref-tag { color: @warning_color; background: alpha(@warning_color, 0.16); }
+.git-ref-more { background: alpha(currentColor, 0.1); }
 .git-ref-head { color: @error_color; background: alpha(@error_color, 0.14); }
 .git-detail { padding: 6px 8px; margin: 2px 8px 4px 0; border-radius: 6px; background: alpha(currentColor, 0.05); }

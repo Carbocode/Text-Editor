@@ -9,8 +9,9 @@ SplitView {
     readonly property var gitState: controller.git_json.length ? JSON.parse(controller.git_json) : ({loaded:false,actions:[],history:[],graph_width:0,patch_lines:[]})
     readonly property var repo: gitState.repository ?? null
     readonly property var colors: ["#3d8ffa", "#f58c33", "#9e6bf0", "#40b878", "#ed5c8f", "#2eb3c2", "#d9b329", "#8c99ad"]
-    readonly property int laneWidth: 12
-    readonly property int maxLanes: 14
+    readonly property int laneWidth: 10
+    // Only the first lanes are drawn so the gutter cannot push row text out of the sidebar.
+    readonly property int maxLanes: 8
     readonly property int gutter: Math.max(1, Math.min(gitState.graph_width ?? 1, maxLanes)) * laneWidth + 4
     readonly property bool busy: controller.move_pending
     property var selectedLines: []
@@ -22,6 +23,23 @@ SplitView {
     property string directAction: ""
     property string directValue: ""
     orientation: Qt.Vertical
+    /// Reference names elide in the middle when the badge is narrower than its text.
+    component RefBadge: Rectangle {
+        property var ref:null
+        property int lane:0
+        readonly property color tint:ref?.kind==="tag"?Kirigami.Theme.neutralTextColor:ref?.kind==="head"?Kirigami.Theme.negativeTextColor:panel.colors[lane%panel.colors.length]
+        implicitWidth:refLabel.implicitWidth+10;implicitHeight:16;radius:4
+        color:ref?.current?tint:Qt.alpha(tint,0.16);border.width:ref?.kind==="remote"?1:0;border.color:Qt.alpha(tint,0.6)
+        Label {
+            id:refLabel;anchors.verticalCenter:parent.verticalCenter;x:5;width:parent.width-10
+            font.pixelSize:10;font.bold:true;elide:Text.ElideMiddle
+            text:ref?((ref.kind==="tag"?"🏷 ":ref.kind==="remote"?"☁ ":ref.current?"✓ ":"")+ref.name):""
+            color:ref?.current?"white":parent.tint
+        }
+        HoverHandler { id:badgeHover }
+        ToolTip.visible:badgeHover.hovered;ToolTip.text:ref?.name ?? ""
+        TapHandler { acceptedButtons:Qt.RightButton;onTapped:{refMenu.target=parent.ref;refMenu.popup()} }
+    }
     onGitStateChanged: {
         const c=gitState.inspection?.conflict
         if(c && conflictKey!==c.path+c.expected){conflictKey=c.path+c.expected;mergeDraft.text=c.expected}
@@ -62,7 +80,6 @@ SplitView {
         for(const a of gitState.actions ?? []){ if(a.group!==group){group=a.group;rows.push({header:true,title:group})} rows.push({header:false,action:a}) }
         return rows
     }
-    function shortName(name) { return name.length>24?name.slice(0,11)+"…"+name.slice(-11):name }
     function matches(row) {
         const f=filter.text.toLowerCase()
         return !f || [row.commit.subject,row.commit.author,row.commit.id].concat(row.commit.refs.map(r=>r.name)).some(v=>v.toLowerCase().includes(f))
@@ -146,8 +163,9 @@ SplitView {
             placeholderText:"Message (Ctrl+Return to commit)";wrapMode:TextEdit.Wrap;visible:!!panel.repo
             Keys.onPressed:(event)=>{ if((event.key===Qt.Key_Return||event.key===Qt.Key_Enter)&&(event.modifiers&Qt.ControlModifier)){ if(commitButton.enabled) commitButton.clicked(); event.accepted=true } }
         }
-        RowLayout {
-            visible:!!panel.repo;spacing:4
+        // Stacked so the commit controls fit the narrowest sidebar.
+        ColumnLayout {
+            visible:!!panel.repo;spacing:2;Layout.fillWidth:true
             readonly property int staged:(panel.repo?.changes ?? []).filter(c=>c.staged).length
             Button {
                 id:commitButton;Layout.fillWidth:true;highlighted:true
@@ -156,12 +174,14 @@ SplitView {
                 ToolTip.visible:hovered&&!enabled&&parent.staged===0;ToolTip.text:"Stage changes to commit"
                 onClicked:{panel.committing=true;panel.act("commit",message.text,signoff.checked?"signoff":"",amend.checked)}
             }
-            CheckBox { id:amend;text:"Amend" }
-            CheckBox { id:signoff;text:"Sign-off" }
+            RowLayout {
+                CheckBox { id:amend;text:"Amend" }
+                CheckBox { id:signoff;text:"Sign-off" }
+            }
         }
         Label { Layout.fillWidth:true;visible:!panel.repo;text:"This folder is not a Git repository.";wrapMode:Text.Wrap;opacity:0.7 }
-        RowLayout {
-            visible:!panel.repo
+        Flow {
+            visible:!panel.repo;Layout.fillWidth:true;spacing:4
             Button { text:"Initialize Repository…";highlighted:true;onClicked:panel.openAction(panel.spec("init")) }
             Button { text:"Clone…";onClicked:panel.openAction(panel.spec("clone")) }
         }
@@ -189,7 +209,7 @@ SplitView {
                     }
                     Label { visible:changeRow.modelData.header;text:changeRow.modelData.count ?? "";font.pixelSize:10;opacity:0.65;Layout.rightMargin:6 }
                     Image { visible:!changeRow.modelData.header;Layout.leftMargin:14;source:changeRow.modelData.change?panel.controller.file_icon(changeRow.modelData.change.path):"";Layout.preferredWidth:14;Layout.preferredHeight:14 }
-                    Label { visible:!changeRow.modelData.header;text:changeRow.modelData.change?panel.controller.path_name(changeRow.modelData.change.path):"";font.strikeout:changeRow.info[0]==="D";elide:Text.ElideRight;Layout.maximumWidth:changeRow.width*0.6 }
+                    Label { visible:!changeRow.modelData.header;text:changeRow.modelData.change?panel.controller.path_name(changeRow.modelData.change.path):"";font.strikeout:changeRow.info[0]==="D";elide:Text.ElideMiddle;Layout.maximumWidth:changeRow.width*0.6 }
                     Label { visible:!changeRow.modelData.header;Layout.fillWidth:true;text:changeRow.modelData.change?panel.controller.path_parent(changeRow.modelData.change.path):"";elide:Text.ElideLeft;opacity:0.55;font.pixelSize:11 }
                     ToolButton {
                         visible:!changeRow.modelData.header&&changeRow.hovered&&!changeRow.modelData.staged&&!(changeRow.modelData.change?.conflicted ?? false)
@@ -216,7 +236,7 @@ SplitView {
             }
             ScrollBar.vertical:ScrollBar {}
         }
-        Label { Layout.fillWidth:true;visible:panel.controller.error_message.length>0;text:panel.controller.error_message;wrapMode:Text.Wrap;maximumLineCount:4;color:Kirigami.Theme.negativeTextColor }
+        Label { Layout.fillWidth:true;visible:panel.controller.error_message.length>0;text:panel.controller.error_message;wrapMode:Text.WrapAtWordBoundaryOrAnywhere;maximumLineCount:6;elide:Text.ElideRight;color:Kirigami.Theme.negativeTextColor }
     }
 
     // MARK: graph pane
@@ -247,7 +267,7 @@ SplitView {
                     ToolTip.visible:hovered;ToolTip.delay:700
                     ToolTip.text:commitRow.modelData.commit.subject+"\n"+commitRow.modelData.commit.author+" · "+commitRow.modelData.commit.date+"\n"+commitRow.modelData.commit.id
                     contentItem:RowLayout {
-                        spacing:5
+                        objectName:"gitCommitRow";spacing:5
                         Canvas {
                             id:graphCanvas
                             Layout.preferredWidth:panel.gutter;Layout.fillHeight:true
@@ -269,22 +289,20 @@ SplitView {
                             Connections { target:commitRow;function onModelDataChanged(){graphCanvas.requestPaint()} }
                             Connections { target:panel;function onGutterChanged(){graphCanvas.requestPaint()} }
                         }
-                        Repeater {
-                            model:commitRow.modelData.commit.refs
-                            Rectangle {
-                                required property var modelData
-                                readonly property color tint:modelData.kind==="tag"?Kirigami.Theme.neutralTextColor:modelData.kind==="head"?Kirigami.Theme.negativeTextColor:panel.colors[commitRow.modelData.color%panel.colors.length]
-                                implicitWidth:refLabel.implicitWidth+10;implicitHeight:16;radius:4
-                                color:modelData.current?tint:Qt.alpha(tint,0.16);border.width:modelData.kind==="remote"?1:0;border.color:Qt.alpha(tint,0.6)
-                                Label {
-                                    id:refLabel;anchors.centerIn:parent;font.pixelSize:10;font.bold:true
-                                    text:(parent.modelData.kind==="tag"?"🏷 ":parent.modelData.kind==="remote"?"☁ ":parent.modelData.current?"✓ ":"")+panel.shortName(parent.modelData.name)
-                                    color:parent.modelData.current?"white":parent.tint
-                                }
-                                TapHandler { acceptedButtons:Qt.RightButton;onTapped:{refMenu.target=parent.modelData;refMenu.popup()} }
-                            }
+                        // One badge in the row; the commit detail lists every reference.
+                        RefBadge {
+                            visible:commitRow.modelData.commit.refs.length>0
+                            ref:commitRow.modelData.commit.refs[0] ?? null;lane:commitRow.modelData.color
+                            Layout.maximumWidth:Math.min(110,commitRow.width*0.35);Layout.preferredWidth:implicitWidth
                         }
-                        Label { Layout.fillWidth:true;text:commitRow.modelData.commit.subject;elide:Text.ElideRight;font.bold:commitRow.modelData.head }
+                        Label {
+                            visible:commitRow.modelData.commit.refs.length>1;text:"+"+(commitRow.modelData.commit.refs.length-1)
+                            font.pixelSize:10;font.bold:true;opacity:0.7;leftPadding:4;rightPadding:4
+                            background:Rectangle { radius:4;color:Qt.alpha(Kirigami.Theme.textColor,0.08) }
+                            ToolTip.visible:moreHover.hovered;ToolTip.text:commitRow.modelData.commit.refs.map(r=>r.name).join("\n")
+                            HoverHandler { id:moreHover }
+                        }
+                        Label { Layout.fillWidth:true;Layout.minimumWidth:24;text:commitRow.modelData.commit.subject;elide:Text.ElideRight;font.bold:commitRow.modelData.head }
                         Label { text:commitRow.modelData.commit.date.slice(0,10);font.pixelSize:10;opacity:0.6;Layout.rightMargin:6 }
                     }
                 }
@@ -312,9 +330,13 @@ SplitView {
                         ColumnLayout {
                             id:detailColumn;anchors.fill:parent;anchors.margins:6;spacing:2
                             BusyIndicator { visible:!commitRow.detail;running:visible;Layout.preferredHeight:20 }
-                            Label { visible:!!commitRow.detail;Layout.fillWidth:true;text:commitRow.detail?.message ?? "";wrapMode:Text.Wrap }
+                            Flow {
+                                Layout.fillWidth:true;spacing:4;visible:!!commitRow.detail&&commitRow.modelData.commit.refs.length>0
+                                Repeater { model:commitRow.modelData.commit.refs;RefBadge { required property var modelData;ref:modelData;lane:commitRow.modelData.color;width:Math.min(implicitWidth,parent.width) } }
+                            }
+                            Label { visible:!!commitRow.detail;Layout.fillWidth:true;text:commitRow.detail?.message ?? "";wrapMode:Text.WrapAtWordBoundaryOrAnywhere }
                             Label {
-                                visible:!!commitRow.detail;Layout.fillWidth:true;wrapMode:Text.Wrap;opacity:0.6;font.pixelSize:10
+                                visible:!!commitRow.detail;Layout.fillWidth:true;wrapMode:Text.WrapAtWordBoundaryOrAnywhere;opacity:0.6;font.pixelSize:10
                                 text:commitRow.detail?(commitRow.detail.author+" <"+commitRow.detail.email+"> · "+commitRow.detail.date.slice(0,16).replace("T"," ")+" · "+commitRow.detail.id.slice(0,10)):""
                             }
                             Repeater {

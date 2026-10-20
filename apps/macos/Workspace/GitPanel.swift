@@ -13,8 +13,11 @@ private func laneColor(_ index: Int) -> Color { gitColors[index % gitColors.coun
 
 private enum GitMetrics {
     static let row: CGFloat = 24
-    static let lane: CGFloat = 12
-    static let maxLanes = 14
+    static let lane: CGFloat = 10
+    /// Wider histories keep their geometry but only the first lanes are drawn,
+    /// so the gutter never pushes row text out of a narrow sidebar.
+    static let maxLanes = 8
+    static let badge: CGFloat = 110
     static func gutter(_ lanes: Int) -> CGFloat { CGFloat(max(1, min(lanes, maxLanes))) * lane + 4 }
 }
 
@@ -34,14 +37,19 @@ private func fileStatus(_ code: String) -> (String, Color) {
 }
 
 private let isoDate: ISO8601DateFormatter = ISO8601DateFormatter()
-private let relativeDate: RelativeDateTimeFormatter = {
-    let formatter = RelativeDateTimeFormatter()
-    formatter.unitsStyle = .abbreviated
-    return formatter
-}()
 private func gitDate(_ value: String) -> Date? { isoDate.date(from: value) }
+/// Compact age for dense rows ("now", "5m", "3h", "2d", "4w"), then the date.
 private func shortDate(_ value: String) -> String {
-    gitDate(value).map { relativeDate.localizedString(for: min($0, Date()), relativeTo: Date()) } ?? String(value.prefix(10))
+    guard let date = gitDate(value) else { return String(value.prefix(10)) }
+    let seconds = max(0, Date().timeIntervalSince(date))
+    switch seconds {
+    case ..<60: return "now"
+    case ..<3600: return "\(Int(seconds / 60))m"
+    case ..<86_400: return "\(Int(seconds / 3600))h"
+    case ..<604_800: return "\(Int(seconds / 86_400))d"
+    case ..<2_419_200: return "\(Int(seconds / 604_800))w"
+    default: return date.formatted(.dateTime.day().month(.abbreviated).year(.twoDigits))
+    }
 }
 private func copy(_ text: String) {
     NSPasteboard.general.clearContents()
@@ -71,8 +79,8 @@ struct GitPanel: View {
     var body: some View {
         GeometryReader { geometry in
             VSplitView {
-                changes.frame(minHeight: 160, idealHeight: geometry.size.height / 2)
-                history.frame(minHeight: 160, idealHeight: geometry.size.height / 2)
+                changes.frame(minWidth: 0, maxWidth: geometry.size.width, minHeight: 160, idealHeight: geometry.size.height / 2)
+                history.frame(minWidth: 0, maxWidth: geometry.size.width, minHeight: 160, idealHeight: geometry.size.height / 2)
             }
         }
         .accessibilityElement(children: .contain)
@@ -108,7 +116,7 @@ struct GitPanel: View {
                 Picker("Repository", selection: Binding(get: { store.git.selected_root ?? "" }, set: { store.gitAction("select_repository", $0) })) {
                     ForEach(store.git.roots, id: \.self) { Text(workspacePathName(value: $0)).tag($0).help($0) }
                 }
-                .labelsHidden().controlSize(.small)
+                .labelsHidden().controlSize(.small).frame(minWidth: 0, maxWidth: .infinity)
             }
             toolbar
             if let repo {
@@ -120,7 +128,8 @@ struct GitPanel: View {
             }
             if let error = store.errorMessage {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.red).lineLimit(4).textSelection(.enabled)
+                    .font(.caption).foregroundStyle(.red).lineLimit(6).truncationMode(.middle).textSelection(.enabled)
+                    .help(error)
                     .padding(6).frame(maxWidth: .infinity, alignment: .leading)
                     .background(.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
             }
@@ -243,7 +252,7 @@ struct GitPanel: View {
     private func operationBanner(_ operation: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.arrow.triangle.2.circlepath").foregroundStyle(.orange)
-            Text("\(operation.capitalized) in progress").font(.caption.bold())
+            Text("\(operation.capitalized) in progress").font(.caption.bold()).lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 0)
             Button("Continue") { store.gitAction("continue") }
             Button("Abort") { confirm { store.gitAction("abort") } }
@@ -427,7 +436,8 @@ struct GitPanel: View {
         HStack(alignment: .top, spacing: 0) {
             GitLaneContinuation(row: row).frame(width: gutter)
             if let detail = store.git.inspection?.commit, detail.id == row.commit.id {
-                GitCommitDetailView(detail: detail,
+                GitCommitDetailView(detail: detail, refs: row.commit.refs, color: laneColor(row.color),
+                    refMenu: { ref in AnyView(refMenu(ref)) },
                     openFile: { file in store.gitAction("show_commit_file", detail.id, file.path); reviewing = true },
                     fullDiff: { inspect("show_commit", detail.id) })
             } else {
@@ -586,6 +596,7 @@ private struct GitChangeRow: View {
                 Image(nsImage: image).resizable().frame(width: 14, height: 14)
             }
             Text(workspacePathName(value: change.path))
+                .truncationMode(.middle)
                 .strikethrough(letter == "D")
                 .foregroundStyle(change.conflicted ? .red : .primary)
                 .lineLimit(1).layoutPriority(1)
@@ -691,21 +702,57 @@ private struct GitRefBadge: View {
         }
         HStack(spacing: 2) {
             Image(systemName: icon).imageScale(.small)
-            Text(label).lineLimit(1)
+            Text(ref.name).lineLimit(1).truncationMode(.middle)
         }
         .font(.system(size: 10, weight: ref.current ? .bold : .medium))
         .padding(.horizontal, 5).frame(height: 16)
         .foregroundStyle(ref.current ? Color.white : tint)
         .background(ref.current ? tint : tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 4))
         .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(tint.opacity(ref.kind == "remote" ? 0.6 : 0), lineWidth: 1))
-        .fixedSize()
         .help(ref.name)
+        .accessibilityIdentifier("gitRef:\(ref.name)")
     }
+}
 
-    /// Badges keep their size; long names are shortened in the middle.
-    private var label: String {
-        guard ref.name.count > 24 else { return ref.name }
-        return ref.name.prefix(11) + "…" + ref.name.suffix(11)
+/// Proposes at most `limit` points: short content keeps its natural size, long
+/// text truncates instead of widening its row.
+private struct WidthLimit: Layout {
+    let limit: CGFloat
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = min(proposal.width ?? limit, limit)
+        return subviews.first?.sizeThatFits(ProposedViewSize(width: width, height: proposal.height)) ?? .zero
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(at: bounds.origin, proposal: ProposedViewSize(bounds.size))
+    }
+}
+
+/// Wraps children onto new lines within the offered width.
+private struct GitFlow: Layout {
+    var spacing: CGFloat = 4
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let frames = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        return CGSize(width: frames.map(\.maxX).max() ?? 0, height: frames.map(\.maxY).max() ?? 0)
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        for (frame, subview) in zip(arrange(width: bounds.width, subviews: subviews), subviews) {
+            subview.place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                          proposal: ProposedViewSize(frame.size))
+        }
+    }
+    private func arrange(width: CGFloat, subviews: Subviews) -> [CGRect] {
+        var frames: [CGRect] = []
+        var x: CGFloat = 0, y: CGFloat = 0, line: CGFloat = 0
+        for subview in subviews {
+            // A single item wider than the line is narrowed and truncates.
+            var size = subview.sizeThatFits(ProposedViewSize(width: width, height: nil))
+            size.width = min(size.width, width)
+            if x > 0 && x + size.width > width { x = 0; y += line + spacing; line = 0 }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            line = max(line, size.height)
+        }
+        return frames
     }
 }
 
@@ -721,57 +768,80 @@ private struct GitCommitRow: View {
         let commit = row.commit
         HStack(spacing: 5) {
             GitGraphCanvas(row: row).frame(width: gutter, height: GitMetrics.row)
-            ForEach(commit.refs, id: \.name) { ref in
-                GitRefBadge(ref: ref, color: laneColor(row.color)).contextMenu { refMenu(ref) }
+            // One badge in the row; every reference is listed in the commit detail.
+            if let ref = commit.refs.first {
+                WidthLimit(limit: GitMetrics.badge) {
+                    GitRefBadge(ref: ref, color: laneColor(row.color))
+                }
+                .contextMenu { refMenu(ref) }
+            }
+            if commit.refs.count > 1 {
+                Text("+\(commit.refs.count - 1)")
+                    .font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+                    .padding(.horizontal, 4).frame(height: 16)
+                    .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                    .fixedSize()
+                    .help(commit.refs.map(\.name).joined(separator: "\n"))
             }
             Text(commit.subject)
                 .font(.callout.weight(row.head ? .semibold : .regular))
                 .lineLimit(1).truncationMode(.tail)
-                .layoutPriority(1)
+                .frame(minWidth: 24, alignment: .leading)
             Spacer(minLength: 4)
             Text(shortDate(commit.date))
                 .font(.caption.monospacedDigit()).foregroundStyle(.secondary).lineLimit(1)
                 .fixedSize()
         }
         .padding(.trailing, 10)
-        .frame(height: GitMetrics.row)
+        .frame(maxWidth: .infinity, minHeight: GitMetrics.row, maxHeight: GitMetrics.row, alignment: .leading)
         .background(selected ? Color.accentColor.opacity(0.18) : hovering ? Color.primary.opacity(0.05) : .clear)
         .opacity(dimmed ? 0.3 : 1)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .help("\(commit.subject)\n\(commit.author) · \(gitDate(commit.date)?.formatted(date: .abbreviated, time: .shortened) ?? commit.date)\n\(commit.id)")
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(commit.subject), \(commit.author), \(row.short_id)")
+        .accessibilityIdentifier("gitCommit:\(row.short_id)")
     }
 }
 
 private struct GitCommitDetailView: View {
     let detail: GitPanelState.CommitDetail
+    let refs: [GitPanelState.Ref]
+    let color: Color
+    let refMenu: (GitPanelState.Ref) -> AnyView
     let openFile: (GitPanelState.CommitFile) -> Void
     let fullDiff: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
+            if !refs.isEmpty {
+                GitFlow {
+                    ForEach(refs, id: \.name) { ref in
+                        GitRefBadge(ref: ref, color: color).contextMenu { refMenu(ref) }
+                    }
+                }
+            }
             Text(detail.message).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
                 Text(initials).font(.system(size: 9, weight: .bold)).foregroundStyle(.white)
                     .frame(width: 18, height: 18).background(Circle().fill(.tint))
                 VStack(alignment: .leading, spacing: 0) {
-                    Text(detail.author).font(.caption.bold()).lineLimit(1)
+                    Text(detail.author).font(.caption.bold()).lineLimit(1).truncationMode(.tail)
                     Text(gitDate(detail.date)?.formatted(date: .abbreviated, time: .shortened) ?? detail.date)
-                        .font(.caption2).foregroundStyle(.secondary)
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
                 .help(detail.email)
                 Spacer(minLength: 4)
                 Button { copy(detail.id) } label: {
                     Label(String(detail.id.prefix(8)), systemImage: "doc.on.doc").font(.caption.monospaced())
-                }.buttonStyle(.borderless).help("Copy Commit Hash")
+                }.buttonStyle(.borderless).fixedSize().help("Copy Commit Hash")
             }
             if !detail.files.isEmpty {
                 Divider()
                 HStack {
                     Text("\(detail.files.count) file\(detail.files.count == 1 ? "" : "s") changed")
-                        .font(.caption2.bold()).foregroundStyle(.secondary)
+                        .font(.caption2.bold()).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     Button("Full Diff", action: fullDiff).buttonStyle(.link).font(.caption2)
                 }
@@ -781,6 +851,7 @@ private struct GitCommitDetailView: View {
             }
         }
         .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
         .padding(.vertical, 3)
     }
@@ -799,7 +870,7 @@ private struct GitCommitFileRow: View {
         let directory = workspacePathParent(value: file.path)
         HStack(spacing: 5) {
             if let image = WorkspaceIcons.image(for: file.path) { Image(nsImage: image).resizable().frame(width: 13, height: 13) }
-            Text(workspacePathName(value: file.path)).lineLimit(1).strikethrough(letter == "D").layoutPriority(1)
+            Text(workspacePathName(value: file.path)).lineLimit(1).truncationMode(.middle).strikethrough(letter == "D").layoutPriority(1)
             if !directory.isEmpty { Text(directory).foregroundStyle(.secondary).lineLimit(1).truncationMode(.head) }
             Spacer(minLength: 2)
             Text(letter).font(.caption.monospaced().bold()).foregroundStyle(color)

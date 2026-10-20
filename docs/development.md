@@ -108,17 +108,22 @@ verify macos` includes `GitSmoke`, which opens Git through the actual workspace
 sidebar, checks automatic repository loading, visible toolbar controls with a long
 branch name, tab switching and the initial equal split, then creates real branch
 divergence and a merge, checking graph width, the current-branch badge, the merge
-commit's changed files and a numbered commit-file diff. Set `NATIVE_WORKSPACE_GIT_SCREENSHOT` to an absolute PNG
+commit's changed files and a numbered commit-file diff. With long tags, branch
+and subject at a 260-point sidebar, every element inside each commit row must stay
+within the panel. Set `NATIVE_WORKSPACE_GIT_SCREENSHOT` to an absolute PNG
 path to capture the workspace with its Git sidebar.
 
 GNOME's workspace smoke opens a real Git review dialog and checks the initial split
 when its fixture is inside a Git repository. Keep `.git` in the fixture's parent,
-with only `README.md` and `src/main.rs` in the workspace, to preserve tree row counts.
+with only `README.md` and `src/main.rs` in the workspace, to preserve tree row counts. The
+Git panel's minimum width must stay within 240 px whatever the branch, tag or
+subject lengths.
 
 KDE provides `--smoke-git=/path/to/disposable-repository`: commit `note.txt` with
 `original`, stage `staged`, then write `working tree` to disk (each with a newline).
-The driver checks both diffs, the split, staging, commit, graph refresh and the
-current-branch reference. Run
+The driver runs at a 260 px width and checks both diffs, the split, staging,
+commit, graph refresh, references and that long tags and subjects elide inside
+each commit row. Run
 `QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software` on a headless host.
 
 ## Session restoration verification
