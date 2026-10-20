@@ -177,6 +177,7 @@ impl DocumentTable {
 /// Authoritative current state. Sessions clone it to project pending work.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AppState {
+    pub(crate) git: Arc<crate::GitSnapshot>,
     pub(crate) revision: u64,
     pub(crate) workspace: Option<Workspace>,
     pub(crate) recent_workspaces: Vec<RecentWorkspace>,
@@ -212,6 +213,7 @@ impl AppState {
                 })
             });
         AppSnapshot {
+            git: self.git.clone(),
             diagnostic_operation: 0,
             revision: self.revision,
             workspace: self.workspace.clone(),
@@ -261,6 +263,7 @@ impl AppState {
     pub(crate) fn apply(&mut self, event: &AppEvent) {
         let shown = self.active_document.clone();
         match event {
+            AppEvent::GitUpdated { snapshot } => self.git = snapshot.clone(),
             AppEvent::RecentWorkspacesLoaded { recent_workspaces } => {
                 self.recent_workspaces = recent_workspaces.clone()
             }
@@ -270,6 +273,7 @@ impl AppState {
                 directories,
                 recent_workspaces,
             } => {
+                self.git = Arc::default();
                 self.workspace = Some(workspace.clone());
                 self.recent_workspaces = recent_workspaces.clone();
                 self.documents

@@ -1,5 +1,11 @@
 //! The concrete filesystem boundary for local workspaces.
 
+mod git;
+pub use git::{
+    GitBranch, GitChange, GitCommit, GitConflict, GitDiff, GitInspection, GitOperation, GitQuery,
+    GitRemote, GitRepository, GitStash, GitWorktree,
+};
+
 use native_workspace_domain::{DocumentId, Workspace};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::{
@@ -95,6 +101,40 @@ pub enum OpenTarget {
 /// Every filesystem access of the application. Implementations decide
 /// everything about the disk; callers never touch `std::fs` directly.
 pub trait WorkspaceFilesystem: Send + Sync {
+    fn git_operation(&self, root: &Path, _operation: &GitOperation) -> Result<(), FilesystemError> {
+        Err(FilesystemError::Io {
+            path: root.into(),
+            source: io::Error::other("Git operations are unavailable"),
+        })
+    }
+    fn git_history(&self, _root: &Path, _limit: usize) -> Result<Vec<GitCommit>, FilesystemError> {
+        Ok(Vec::new())
+    }
+    fn git_inspect(
+        &self,
+        root: &Path,
+        _query: &GitQuery,
+    ) -> Result<GitInspection, FilesystemError> {
+        Err(FilesystemError::Io {
+            path: root.into(),
+            source: io::Error::other("Git inspection is unavailable"),
+        })
+    }
+    /// Git repository state. Adapters without Git support report no repository.
+    fn git_repository(&self, _root: &Path) -> Result<Option<GitRepository>, FilesystemError> {
+        Ok(None)
+    }
+    fn git_diff(
+        &self,
+        root: &Path,
+        _path: &str,
+        _staged: bool,
+    ) -> Result<GitDiff, FilesystemError> {
+        Err(FilesystemError::Io {
+            path: root.to_path_buf(),
+            source: io::Error::new(io::ErrorKind::Unsupported, "Git inspection is unavailable"),
+        })
+    }
     /// Canonicalizes `path` and lists regular files and folders below it,
     /// skipping symlinks.
     fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError>;
@@ -242,6 +282,24 @@ impl RealFilesystem {
 }
 
 impl WorkspaceFilesystem for RealFilesystem {
+    fn git_operation(&self, root: &Path, operation: &GitOperation) -> Result<(), FilesystemError> {
+        git::operations::execute(root, operation)
+    }
+    fn git_history(&self, root: &Path, limit: usize) -> Result<Vec<GitCommit>, FilesystemError> {
+        git::operations::history(root, limit)
+    }
+    fn git_inspect(&self, root: &Path, query: &GitQuery) -> Result<GitInspection, FilesystemError> {
+        git::operations::inspect(root, query)
+    }
+
+    fn git_repository(&self, root: &Path) -> Result<Option<GitRepository>, FilesystemError> {
+        git::repository(root)
+    }
+
+    fn git_diff(&self, root: &Path, path: &str, staged: bool) -> Result<GitDiff, FilesystemError> {
+        git::diff(root, path, staged)
+    }
+
     fn open_workspace(&self, path: &Path) -> Result<WorkspaceListing, FilesystemError> {
         let root = fs::canonicalize(path).map_err(at(path))?;
         if !root.is_dir() {

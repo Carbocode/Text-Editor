@@ -248,6 +248,8 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     let sidebar_pages = gtk::Stack::new();
     sidebar_pages.set_vexpand(true);
     sidebar_pages.set_transition_type(gtk::StackTransitionType::None);
+    let git = crate::git_panel::GitPanel::new();
+    sidebar_pages.add_named(&git.root, Some("git"));
     sidebar_pages.add_named(&sidebars[0].overlay, Some("files"));
     sidebar_pages.add_named(&sidebars[1].overlay, Some("search"));
     sidebar_pages.add_named(&gtk::Box::new(gtk::Orientation::Vertical, 0), Some("empty"));
@@ -532,6 +534,7 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
     window.set_content(Some(&split));
 
     let ui = Ui {
+        git,
         window: window.clone(),
         core,
         terminal,
@@ -570,6 +573,7 @@ pub(super) fn build_window(app: &adw::Application) -> Ui {
         drop_trace: Rc::new(RefCell::new(None)),
         collapsed_directories,
     };
+    ui.git.connect(&ui);
     ui.render(snapshot);
     for (button, delta) in [(&decrease_text_size, -1.0), (&increase_text_size, 1.0)] {
         let ui = ui.clone();

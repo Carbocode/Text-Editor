@@ -342,7 +342,6 @@ struct ContentView: View {
             SidebarTabBar(selection: $sidebarTab)
             .frame(maxWidth: .infinity)
             .frame(height: BonsplitTabBarMetrics.barHeight)
-            .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
             if sidebarTab == .search {
                 SearchPanel(store: store)
             }
@@ -355,6 +354,10 @@ struct ContentView: View {
         if store.workspaceName != nil {
         NavigationSplitView {
             VStack(spacing: 0) {
+                sidebarHeader
+                if sidebarTab == .git {
+                    GitPanel(store: store).frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
                 // A SwiftUI List diffs its rows in superlinear time: replacing a
                 // few thousand rows (filtering, clearing a filter, streamed search
                 // results) froze the window for seconds. A lazy stack diffs by ID
@@ -377,7 +380,6 @@ struct ContentView: View {
                     .padding(.vertical, 6)
                 }
                 .onDrop(of: [.fileURL], delegate: externalSidebarDrop(""))
-                .safeAreaBar(edge: .top, spacing: 0) { sidebarHeader }
                 .scrollEdgeEffectStyle(.soft, for: .top)
                 .onReceive(store.$workspaceRoot) { root in
                     if currentWorkspaceRoot != root {
@@ -465,7 +467,9 @@ struct ContentView: View {
                             sidebarRootDropHeight = height
                         }
                 }
+                }
             }
+            .onChange(of: sidebarTab) { _, _ in rebuildSidebarIndex() }
             .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 480)
             .disabled(store.editingPaused || store.terminalQuitPending)
         } detail: {

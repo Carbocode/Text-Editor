@@ -24,3 +24,10 @@ Single-clicking a file or search result opens a preview tab with an italic title
 
 A desktop entry template is provided in this app's directory. See
 [installation, platform limits and system-open smoke modes](development.md#application-icon-and-open-with-verification).
+
+The Git sidebar uses a native vertical split initially at half height, with Source
+Control above and the shared branch/commit graph below. Staging, commit, branch,
+remote, stash and history actions run through Session. Diff reviews support
+before/after content and selected-line staging; the merge editor reviews current,
+incoming and editable result content. See
+[Git Source Control verification](development.md#git-source-control-verification).

@@ -11,6 +11,17 @@ use std::path::PathBuf;
 /// An intention requested by a frontend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AppCommand {
+    Git(crate::GitOperation),
+    InspectGit(crate::GitQuery),
+    LoadGitHistory(usize),
+    PollGit,
+    SelectGitRepository(PathBuf),
+    /// Inspect on-disk changes, leaving the index and buffers untouched.
+    RefreshGit,
+    ShowGitDiff {
+        path: String,
+        staged: bool,
+    },
     OpenWorkspace(PathBuf),
     /// Restore the last confirmed layout only when no workspace has been opened.
     RestoreSession,
@@ -121,6 +132,13 @@ pub enum BusyPolicy {
 impl AppCommand {
     pub(crate) fn diagnostic_name(&self) -> &'static str {
         match self {
+            Self::Git(_) => "command.git_operation",
+            Self::InspectGit(_) => "command.git_inspect",
+            Self::LoadGitHistory(_) => "command.git_history",
+            Self::PollGit => "command.git_poll",
+            Self::SelectGitRepository(_) => "command.git_repository",
+            Self::RefreshGit => "command.git_refresh",
+            Self::ShowGitDiff { .. } => "command.git_diff",
             Self::RestoreSession => "command.session_restore",
             Self::PrepareToQuit { .. } => "command.quit_prepare",
             Self::OpenWorkspace(_) => "command.workspace_open",
@@ -181,7 +199,14 @@ impl AppCommand {
                 path,
                 directory: folder(directory),
             },
-            Self::OpenPaths(_)
+            Self::Git(_)
+            | Self::InspectGit(_)
+            | Self::LoadGitHistory(_)
+            | Self::PollGit
+            | Self::SelectGitRepository(_)
+            | Self::RefreshGit
+            | Self::ShowGitDiff { .. }
+            | Self::OpenPaths(_)
             | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::RestoreSession
@@ -256,7 +281,14 @@ impl AppCommand {
                     target,
                 }))
             }
-            Self::OpenPaths(_)
+            Self::Git(_)
+            | Self::InspectGit(_)
+            | Self::LoadGitHistory(_)
+            | Self::PollGit
+            | Self::SelectGitRepository(_)
+            | Self::RefreshGit
+            | Self::ShowGitDiff { .. }
+            | Self::OpenPaths(_)
             | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::MoveFiles { .. }
@@ -314,7 +346,14 @@ impl AppCommand {
                 Self::SaveDocument(id.clone()),
                 Self::CloseDocument(id.clone()),
             ]),
-            Self::OpenPaths(_)
+            Self::Git(_)
+            | Self::InspectGit(_)
+            | Self::LoadGitHistory(_)
+            | Self::PollGit
+            | Self::SelectGitRepository(_)
+            | Self::RefreshGit
+            | Self::ShowGitDiff { .. }
+            | Self::OpenPaths(_)
             | Self::OpenFile(_)
             | Self::MoveFile { .. }
             | Self::RestoreSession
@@ -356,7 +395,14 @@ impl AppCommand {
             | Self::DeleteEntry(_)
             | Self::CloseDocument(_)
             | Self::DiscardAndCloseDocument(_) => true,
-            Self::OpenPaths(_)
+            Self::Git(_)
+            | Self::InspectGit(_)
+            | Self::LoadGitHistory(_)
+            | Self::PollGit
+            | Self::SelectGitRepository(_)
+            | Self::RefreshGit
+            | Self::ShowGitDiff { .. }
+            | Self::OpenPaths(_)
             | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::RestoreSession
@@ -390,13 +436,26 @@ impl AppCommand {
     pub(crate) fn schedule(&self) -> Schedule {
         match self {
             Self::RenameEntry { .. } | Self::MoveEntry { .. } => Schedule::Relocation,
+            Self::Git(operation) => {
+                if crate::git::requires_saved_buffers(operation) {
+                    Schedule::Exclusive
+                } else {
+                    Schedule::Background
+                }
+            }
             Self::RestoreSession
             | Self::OpenPaths(_)
             | Self::MoveFiles { .. }
             | Self::MoveFile { .. }
             | Self::DeleteEntry(_)
             | Self::ApplyReplacement => Schedule::Exclusive,
-            Self::OpenFiles(_)
+            Self::InspectGit(_)
+            | Self::LoadGitHistory(_)
+            | Self::PollGit
+            | Self::SelectGitRepository(_)
+            | Self::RefreshGit
+            | Self::ShowGitDiff { .. }
+            | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::RefreshWorkspace
             | Self::PrepareReplacement { .. } => Schedule::Background,
@@ -429,16 +488,18 @@ impl AppCommand {
     pub(crate) fn while_busy(&self, running: Schedule) -> BusyPolicy {
         let exclusive = running == Schedule::Exclusive;
         match self {
-            Self::RestoreSession | Self::PollWorkspaceChanges | Self::PollSearchResults => {
-                BusyPolicy::Skip
-            }
+            Self::PollGit
+            | Self::RestoreSession
+            | Self::PollWorkspaceChanges
+            | Self::PollSearchResults => BusyPolicy::Skip,
             Self::PrepareToQuit { .. } => BusyPolicy::Reject,
             Self::OpenPaths(_) => BusyPolicy::Defer,
             // Exclusive operations may remove or relocate the edited document.
             Self::ChangeDocument { .. } if exclusive => BusyPolicy::Reject,
             Self::ChangeDocument { .. } => BusyPolicy::ProjectEdit,
             // Destructive or relocating commands never queue behind another.
-            Self::MoveFiles { .. }
+            Self::Git(_)
+            | Self::MoveFiles { .. }
             | Self::MoveFile { .. }
             | Self::DeleteEntry(_)
             | Self::RenameEntry { .. }
@@ -446,7 +507,12 @@ impl AppCommand {
             | Self::PrepareReplacement { .. }
             | Self::ApplyReplacement => BusyPolicy::Reject,
             _ if exclusive => BusyPolicy::Reject,
-            Self::OpenFiles(_)
+            Self::InspectGit(_)
+            | Self::LoadGitHistory(_)
+            | Self::SelectGitRepository(_)
+            | Self::RefreshGit
+            | Self::ShowGitDiff { .. }
+            | Self::OpenFiles(_)
             | Self::OpenFile(_)
             | Self::OpenWorkspace(_)
             | Self::RefreshWorkspace

@@ -5,6 +5,7 @@
 mod documents;
 mod entries;
 mod external_files;
+mod git;
 mod restore;
 mod search;
 pub(crate) mod workspace;
@@ -15,6 +16,15 @@ use native_workspace_domain::DocumentId;
 impl Application {
     pub(crate) fn resolve(&mut self, command: AppCommand) -> Result<Vec<AppEvent>, AppError> {
         match command {
+            AppCommand::SelectGitRepository(root) => self.select_git_repository(&root),
+            AppCommand::RefreshGit => self.refresh_git(false, None),
+            AppCommand::PollGit => self.refresh_git(true, None),
+            AppCommand::LoadGitHistory(limit) => self.refresh_git(true, Some(limit)),
+            AppCommand::InspectGit(query) => self.inspect_git(&query),
+            AppCommand::Git(_) => {
+                unreachable!("Git operations commit reconciliation even after partial failure")
+            }
+            AppCommand::ShowGitDiff { path, staged } => self.show_git_diff(&path, staged),
             AppCommand::OpenFile(path) => self.open_file(&path),
             AppCommand::MoveFile { path, directory } => self.move_file(&path, &directory),
             AppCommand::OpenWorkspace(path) => self.open_workspace(&path),

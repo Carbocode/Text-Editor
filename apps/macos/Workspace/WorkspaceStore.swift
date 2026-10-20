@@ -8,6 +8,59 @@ extension Relocation {
     }
 }
 
+struct GitPanelState: Decodable, Equatable {
+    struct Change: Decodable, Equatable {
+        let path: String
+        let original_path: String?
+        let index: String
+        let worktree: String
+        let staged: Bool
+        let unstaged: Bool
+        let conflicted: Bool
+    }
+    struct Repository: Decodable, Equatable {
+        let root: String
+        let branch: String
+        let changes: [Change]
+        let ahead: UInt64
+        let behind: UInt64
+        let operation: String?
+        let branches: [Branch]
+        let remotes: [Remote]
+        let stashes: [Stash]
+        let worktrees: [Worktree]
+    }
+    struct Branch: Decodable, Equatable { let name: String; let id: String; let upstream: String; let current: Bool; let remote: Bool }
+    struct Remote: Decodable, Equatable { let name: String; let url: String }
+    struct Stash: Decodable, Equatable { let index: Int; let subject: String }
+    struct Worktree: Decodable, Equatable { let path: String; let branch: String }
+    struct Commit: Decodable, Equatable { let id: String; let parents: [String]; let author: String; let date: String; let refs: String; let subject: String }
+    struct Edge: Decodable, Equatable { let from: Int; let to: Int; let start: Int; let end: Int; let color: Int }
+    struct Row: Decodable, Equatable { let commit: Commit; let lane: Int; let columns: Int; let edges: [Edge] }
+    struct Action: Decodable, Equatable, Identifiable { let id: String; let title: String; let first: String; let second: String; let option: String; let destructive: Bool }
+    struct Conflict: Decodable, Equatable { let path: String; let base: String; let current: String; let incoming: String; let expected: String; let accept_current: String; let accept_incoming: String; let accept_both: String }
+    struct Inspection: Decodable, Equatable { let title: String; let text: String; let truncated: Bool; let conflict: Conflict? }
+    struct PatchLine: Decodable, Equatable { let index: Int; let text: String; let changed: Bool }
+    struct Diff: Decodable, Equatable {
+        let path: String
+        let staged: Bool
+        let text: String
+        let truncated: Bool
+        let before: String?
+        let after: String?
+    }
+    var roots: [String] = []
+    var selected_root: String?
+    var loaded = false
+    var repository: Repository?
+    var diff: Diff?
+    var inspection: Inspection?
+    var history: [Row] = []
+    var history_limit = 200
+    var actions: [Action] = []
+    var patch_lines: [PatchLine] = []
+}
+
 /// Terminal frames arrive at display rate; only the terminal panel observes them.
 @MainActor
 final class TerminalFeed: ObservableObject {
@@ -17,6 +70,7 @@ final class TerminalFeed: ObservableObject {
 /// AppKit presentation state. Execution, optimistic state and errors belong to Session.
 @MainActor
 final class WorkspaceStore: ObservableObject {
+    @Published private(set) var git = GitPanelState()
     let terminalFeed = TerminalFeed()
     var terminals: TerminalPanelState { terminalFeed.state }
     @Published var terminalVisible = false
@@ -132,6 +186,13 @@ final class WorkspaceStore: ObservableObject {
     func openDevtools() {
         if !core.openDevtools() { errorMessage = "Developer Tools are busy. Try again after the current operation finishes." }
     }
+    func setGitVisible(_ visible: Bool) { try? core.setGitVisible(visible: visible) }
+    func gitAction(_ action: String, _ value: String = "", _ extra: String = "", _ flag: Bool = false) { request { try core.gitRequest(action: action, value: value, extra: extra, flag: flag) } }
+    func gitResolve(_ result: String) { request { try core.gitResolve(result: result) } }
+    func gitStageLines(_ lines: Set<Int>) { request { try core.gitStageLines(lines: lines.sorted().map { UInt64($0) }) } }
+    func gitLoadMore() { request { try core.gitLoadMore() } }
+    func refreshGit() { request { try core.refreshGit() } }
+    func showGitDiff(_ path: String, staged: Bool) { request { try core.showGitDiff(path: path, staged: staged) } }
     func restoreSession() { request { try core.restoreSession() } }
     @discardableResult func prepareToQuit(save: Bool) -> Bool {
         request { try core.prepareToQuit(save: save) }
@@ -267,6 +328,8 @@ final class WorkspaceStore: ObservableObject {
         terminalsRunning = snapshot.terminalsRunning
         if !terminalsRunning, let completion = terminalQuitCompletion { terminalQuitCompletion = nil; DispatchQueue.main.async(execute: completion) }
         if let data = snapshot.terminalJson.data(using: .utf8), let value = try? JSONDecoder().decode(TerminalPanelState.self, from: data), value.revision != terminals.revision { terminalFeed.state = value }
+        if let json = snapshot.gitJson, let data = json.data(using: .utf8),
+           let value = try? JSONDecoder().decode(GitPanelState.self, from: data), value != git { git = value }
         if snapshot.terminalOnly { return }
         let started = core.devtoolsEnabled() ? DispatchTime.now().uptimeNanoseconds : nil
         defer { if let started { core.diagnosticSnapshotApplied(operation: snapshot.diagnosticOperation, revision: snapshot.revision, durationNs: DispatchTime.now().uptimeNanoseconds - started) } }

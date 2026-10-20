@@ -33,7 +33,7 @@ cargo xtask test xtask        # command composition and Qt discovery regression 
 cargo xtask fmt               # check formatting across the workspace
 ```
 
-`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the nine Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
+`build`, `check`, `lint`, `test` and `verify` accept `core`, `macos`, `gnome`, `kde`, `devtools` or `xtask`. `start` and `run` accept only editor frontends. `check macos` and `lint macos` check the Rust bridge; `build macos` compiles Swift, and `test macos` also executes the Swift smoke tests. `test gnome` and `test kde` run the selected Rust package's tests; native GUI smoke modes remain explicit as documented below. Tasks stop at the first failed step.
 
 Inspect composition without running it:
 
@@ -57,6 +57,67 @@ The initial vertical slice covers opening a directory, listing files, opening, e
 Normal frontend launches open a SQLite metadata database in the platform application-data directory. Set `NATIVE_WORKSPACE_STATE_DB=/absolute/path/metadata.sqlite3` to use an isolated database. `cargo test` uses temporary files; GUI smoke modes use in-memory metadata, except the session restart suite, which requires an isolated temporary database. Migration files live in `crates/storage/src/migrations`, with schema version tracked by SQLite `PRAGMA user_version`.
 
 The Search sidebar matches UTF-8 file contents; the Files field filters entry names. Both ignore case and surrounding whitespace by default. Search offers explicit case, whole-word and regex controls. Every content occurrence has a separate result with line, column, and a short preview; selecting it opens the file and highlights that text. Unsaved document buffers take precedence over disk content. Files above 1 MiB and unreadable files are skipped for content search, while their paths remain searchable. An empty content query clears matches; an empty name filter restores the complete file tree. Search runs in a worker and does not use SQLite.
+
+## Git Source Control verification
+
+Git must be available on PATH. Configure author identity from Git Actions or the
+installed Git configuration. Remote authentication uses existing Git credential
+and SSH helpers. Use disposable repositories for mutation smoke tests.
+
+The sidebar starts with a resizable 50/50 vertical split. Changes, staging and
+commit controls occupy the upper pane; the branch/commit graph occupies the lower
+pane. Git Actions contains repository initialization/cloning, author configuration,
+branches, remote synchronization, merge/rebase/cherry-pick/revert, undo commit,
+stashes, remotes, tags, worktrees, comparisons, file history and blame. Repository
+selection includes nested repositories. Reviews offer full before/after views or
+unified lines for partial staging. Current and incoming conflict versions can be
+reviewed with an editable result and Save and Stage Result.
+
+Verify these workflows in each native adapter:
+
+1. Modify a tracked file, stage it, then modify it again. Staged Changes and Changes
+   show distinct diffs. Stage or unstage selected lines without changing disk text.
+   An external edit rejects an old partial-staging selection.
+2. Enter a commit message; commit, amend and sign off. The graph, branch references
+   and ahead/behind counts update. Undo Last Commit keeps the reverted commit's
+   changes staged. Open a graph node to inspect it, and use its contextual actions
+   or Git Actions to compare, cherry-pick, revert or create a branch.
+3. Create divergent branches and merge them. The graph must show both parent
+   edges and shared ancestry. Drag the divider, scroll each pane independently and
+   load more history. Create a nested repository and switch repository contexts.
+4. Exercise fetch, publish, push, pull and sync against a disposable bare remote.
+   Reject non-fast-forward pushes normally. Force with lease is an explicit option.
+   Identity, authentication, signing and hook failures must show Git's error text.
+5. Create a merge conflict. Review current/incoming/result, choose a resolution,
+   edit it and save/stage. Markers and externally changed baselines are rejected.
+   Continue completes the operation; Abort restores its previous Git state. A
+   failed merge still publishes conflicts and reconciles clean open documents.
+6. Stash/apply/pop/drop, create/delete a tag, add/remove a remote, and create/remove
+   a worktree. Ignore a filename with spaces or special pattern characters.
+   Dirty buffers block worktree changes. Commit/fetch/push retain concurrent typing.
+7. Open ordinary folders, unborn branches, linked worktrees and subfolder
+   workspaces. Git Actions can initialize or clone a repository. Binary content is
+   summarized; output/content above 2 MiB is limited. History loads 200 commits at a
+   time up to 5,000; discovery includes up to 32 roots. Subfolder commits cannot
+   include staged paths outside that workspace.
+
+`cargo xtask verify core` uses temporary repositories and a local bare remote to
+exercise these operations, graph topology, partial staging, conflict resolution,
+stale baselines, repository isolation and failure/concurrency cases. `cargo xtask
+verify macos` includes `GitSmoke`, which opens Git through the actual workspace
+sidebar, checks automatic repository loading, visible toolbar controls with a long
+branch name, tab switching and the initial equal split, then creates real branch
+divergence and a merge. Set `NATIVE_WORKSPACE_GIT_SCREENSHOT` to an absolute PNG
+path to capture the workspace with its Git sidebar.
+
+GNOME's workspace smoke opens a real Git review dialog and checks the initial split
+when its fixture is inside a Git repository. Keep `.git` in the fixture's parent,
+with only `README.md` and `src/main.rs` in the workspace, to preserve tree row counts.
+
+KDE provides `--smoke-git=/path/to/disposable-repository`: commit `note.txt` with
+`original`, stage `staged`, then write `working tree` to disk (each with a newline).
+The driver checks both diffs, the split, staging, commit and graph refresh. Run
+`QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software` on a headless host.
 
 ## Session restoration verification
 

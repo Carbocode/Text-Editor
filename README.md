@@ -56,12 +56,23 @@ PTY/process ownership through Session. Live terminal closure and application exi
 require confirmation. Close running terminals before changing workspace. Restarting
 the app does not restore processes. See [terminal verification](docs/development.md#integrated-terminal-verification).
 
+Phase 13 provides Git Source Control across all three native frontends. The sidebar
+is split vertically: changes and commit controls above, a graphical branch/commit
+history below. Both panes start at half height and the divider is resizable.
+Stage/unstage files or selected diff lines, review side-by-side changes, commit,
+amend, sign off, switch/manage branches, fetch/pull/push/sync, use stashes, tags and
+worktrees, and inspect commits, comparisons, file history and blame. A merge editor
+reviews current/incoming versions and a result before saving and staging. The
+repository selector handles nested repositories, and the visible sidebar refreshes
+in the background. Git uses the installed executable and its configured identity,
+credentials, signing and hooks. See [Git verification](docs/development.md#git-source-control-verification)
+and [ADR 0010](docs/adr/0010-git-source-control.md).
+
 ## Planned phases
 
 The following work is planned:
 
 
-13. **Basic Git integration:** show changed files and diffs before committing.
 14. **Language Server Protocol support:** add completion, diagnostics, and navigation to definitions through language servers.
 
 Use `cargo xtask verify core` for shared Rust checks and `cargo xtask doctor` to inspect local tools. For `macos`, `gnome` or `kde`, `cargo xtask build <frontend>` compiles, `cargo xtask start <frontend>` opens the existing build, and `cargo xtask run <frontend>` composes both without tests. Run tests explicitly with `cargo xtask test <target>`. The previous `build-*` and `run-*` commands remain aliases. See the [command reference](docs/development.md#terminal-commands) or `cargo xtask help`; add `--dry-run` to inspect a task. The KDE frontend uses Kirigami and Breeze on every host, including macOS; install Kirigami, qqc2-breeze-style and Breeze Icons for its Qt installation.

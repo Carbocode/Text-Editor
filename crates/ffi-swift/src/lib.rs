@@ -109,6 +109,11 @@ pub fn workspace_replacement_confirmation(occurrences: u64, files: u64) -> Confi
 }
 
 #[uniffi::export]
+pub fn workspace_git_confirmation() -> Confirmation {
+    native_workspace_application::git_action_confirmation().into()
+}
+
+#[uniffi::export]
 pub fn workspace_terminal_confirmation() -> Confirmation {
     native_workspace_application::terminal_close_confirmation().into()
 }
@@ -228,6 +233,7 @@ impl From<SearchOptions> for native_workspace_application::SearchOptions {
 /// `snapshot` always includes every list. Commands and `poll` deliver deltas.
 #[derive(Clone, uniffi::Record)]
 pub struct WorkspaceUpdate {
+    pub git_json: Option<String>,
     pub terminal_only: bool,
     pub terminal_json: String,
     pub terminals_running: bool,
@@ -261,6 +267,9 @@ pub struct WorkspaceUpdate {
 
 fn update(snapshot: &AppSnapshot, previous: Option<&AppSnapshot>) -> WorkspaceUpdate {
     WorkspaceUpdate {
+        git_json: previous
+            .is_none_or(|p| !Arc::ptr_eq(&p.git, &snapshot.git))
+            .then(|| snapshot.git.json()),
         terminal_only: false,
         terminal_json: String::new(),
         terminals_running: false,
@@ -506,6 +515,47 @@ impl WorkspaceApplication {
         let mut bridge = self.lock()?;
         bridge.session.enable_persistence_default()?;
         Ok(bridge.deliver(false))
+    }
+    pub fn set_git_visible(&self, visible: bool) -> Result<(), WorkspaceError> {
+        self.lock()?.session.set_git_visible(visible);
+        Ok(())
+    }
+    pub fn git_request(
+        &self,
+        action: String,
+        value: String,
+        extra: String,
+        flag: bool,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge.session.git_request(&action, value, extra, flag)?;
+        Ok(bridge.deliver(false))
+    }
+    pub fn git_resolve(&self, result: String) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge.session.git_resolve(result)?;
+        Ok(bridge.deliver(false))
+    }
+    pub fn git_stage_lines(&self, lines: Vec<u64>) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let mut bridge = self.lock()?;
+        bridge
+            .session
+            .git_stage_lines(lines.into_iter().map(|line| line as usize).collect())?;
+        Ok(bridge.deliver(false))
+    }
+    pub fn git_load_more(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        let limit = self.lock()?.session.snapshot().git.history_limit + 200;
+        self.dispatch(AppCommand::LoadGitHistory(limit))
+    }
+    pub fn refresh_git(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::RefreshGit)
+    }
+    pub fn show_git_diff(
+        &self,
+        path: String,
+        staged: bool,
+    ) -> Result<WorkspaceUpdate, WorkspaceError> {
+        self.dispatch(AppCommand::ShowGitDiff { path, staged })
     }
     pub fn restore_session(&self) -> Result<WorkspaceUpdate, WorkspaceError> {
         self.dispatch(AppCommand::RestoreSession)

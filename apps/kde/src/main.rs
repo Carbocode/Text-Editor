@@ -65,46 +65,48 @@ fn main() -> std::process::ExitCode {
         );
     }
     let mut engine = QQmlApplicationEngine::new();
-    let qml =
-        if cfg!(debug_assertions) && std::env::args().any(|a| a.starts_with("--smoke-terminal=")) {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/TerminalSmoke.qml"
-        } else if cfg!(debug_assertions)
-            && std::env::args().any(|a| {
-                a == "--smoke"
-                    || a.starts_with("--smoke-workspace=")
-                    || a.starts_with("--benchmark-workspace=")
-            })
-        {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/WorkspaceSmoke.qml"
-        } else if cfg!(debug_assertions)
-            && std::env::args().any(|argument| argument.starts_with("--smoke-restore="))
-        {
-            assert!(
-                std::env::var_os("NATIVE_WORKSPACE_STATE_DB").is_some(),
-                "Restore smoke requires an isolated metadata database"
-            );
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SessionRestoreSmoke.qml"
-        } else if cfg!(debug_assertions)
-            && std::env::args().any(|argument| argument.starts_with("--smoke-system-open="))
-        {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SystemOpenSmoke.qml"
-        } else if cfg!(debug_assertions)
-            && std::env::args().any(|argument| argument.starts_with("--smoke-external="))
-        {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/ExternalDropSmoke.qml"
-        } else if std::env::args().any(|argument| argument.starts_with("--smoke-cursors=")) {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/CursorSmoke.qml"
-        } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar-layout=")) {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SidebarLayoutSmoke.qml"
-        } else if std::env::args().any(|argument| argument.starts_with("--smoke-appearance=")) {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/AppearanceSmoke.qml"
-        } else if std::env::args().any(|argument| argument.starts_with("--smoke-drag=")) {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/DragSmoke.qml"
-        } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar=")) {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SidebarSmoke.qml"
-        } else {
-            "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/Main.qml"
-        };
+    let qml = if cfg!(debug_assertions) && std::env::args().any(|a| a.starts_with("--smoke-git=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/GitSmoke.qml"
+    } else if cfg!(debug_assertions) && std::env::args().any(|a| a.starts_with("--smoke-terminal="))
+    {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/TerminalSmoke.qml"
+    } else if cfg!(debug_assertions)
+        && std::env::args().any(|a| {
+            a == "--smoke"
+                || a.starts_with("--smoke-workspace=")
+                || a.starts_with("--benchmark-workspace=")
+        })
+    {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/WorkspaceSmoke.qml"
+    } else if cfg!(debug_assertions)
+        && std::env::args().any(|argument| argument.starts_with("--smoke-restore="))
+    {
+        assert!(
+            std::env::var_os("NATIVE_WORKSPACE_STATE_DB").is_some(),
+            "Restore smoke requires an isolated metadata database"
+        );
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SessionRestoreSmoke.qml"
+    } else if cfg!(debug_assertions)
+        && std::env::args().any(|argument| argument.starts_with("--smoke-system-open="))
+    {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SystemOpenSmoke.qml"
+    } else if cfg!(debug_assertions)
+        && std::env::args().any(|argument| argument.starts_with("--smoke-external="))
+    {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/ExternalDropSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-cursors=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/CursorSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar-layout=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SidebarLayoutSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-appearance=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/AppearanceSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-drag=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/DragSmoke.qml"
+    } else if std::env::args().any(|argument| argument.starts_with("--smoke-sidebar=")) {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/tests/SidebarSmoke.qml"
+    } else {
+        "qrc:/qt/qml/org/nativeworkspace/Diagnostic/qml/Main.qml"
+    };
     let load_failed = Arc::new(AtomicBool::new(false));
     if let Some(mut engine) = engine.as_mut() {
         let failed = load_failed.clone();

@@ -16,3 +16,13 @@ Application-icon drops and Open With go through `WorkspaceAppDelegate`, includin
 requests delivered before SwiftUI creates a window. The native delegate retains
 only pending window presentation; shared `OpenPaths` owns validation, scheduling
 and errors. See [system-open verification](development.md#application-icon-and-open-with-verification).
+
+The Git sidebar uses a native vertical split initially at half height, with Source
+Control above and the shared branch/commit graph below. The sidebar header stays
+outside the split; opening Git loads the repository after any pending workspace
+operation finishes. Branch names truncate to retain the refresh and actions
+buttons at the minimum sidebar width. Staging, commit, branch,
+remote, stash and history actions run through Session. Diff reviews support
+before/after content and selected-line staging; the merge editor reviews current,
+incoming and editable result content. See
+[Git Source Control verification](development.md#git-source-control-verification).

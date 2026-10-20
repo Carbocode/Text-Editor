@@ -3681,6 +3681,7 @@ dependencies = [
  "libc",
  "native-workspace-domain",
  "notify",
+ "serde",
  "tempfile",
  "thiserror 2.0.21",
 ]

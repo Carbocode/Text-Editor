@@ -41,6 +41,7 @@ impl SidebarTab {
 
 #[derive(Clone)]
 pub(super) struct Ui {
+    pub(super) git: crate::git_panel::GitPanel,
     pub(super) window: adw::ApplicationWindow,
     pub(super) core: Rc<RefCell<Session>>,
     pub(super) terminal: crate::terminal::TerminalPanel,
@@ -463,6 +464,7 @@ impl Ui {
         if self.snapshot.borrow().file_filter != snapshot.file_filter {
             self.sidebars[0].dirty.set(true);
         }
+        self.git.render(self, &snapshot);
         self.updating.set(true);
         self.home_error
             .set_label(snapshot.error.as_deref().unwrap_or_default());
@@ -679,12 +681,23 @@ impl Ui {
 
     pub(super) fn switch_sidebar(&self, tab: SidebarTab) {
         self.sidebar_tab.set(tab);
+        self.core
+            .borrow_mut()
+            .set_git_visible(tab == SidebarTab::Git);
         self.file_search_row.set_visible(tab == SidebarTab::Files);
         self.text_search_row.set_visible(tab == SidebarTab::Search);
         self.search_spinner
             .set_visible(tab == SidebarTab::Search && self.snapshot.borrow().search_in_progress);
         self.search_truncated
             .set_visible(tab == SidebarTab::Search && self.snapshot.borrow().search_truncated);
+        if tab == SidebarTab::Git {
+            self.sidebar_pages.set_visible_child_name("git");
+            let busy = self.snapshot.borrow().activity.busy;
+            if !busy {
+                self.dispatch(AppCommand::RefreshGit);
+            }
+            return;
+        }
         if !tab.has_tree() {
             self.sidebar_pages.set_visible_child_name("empty");
             return;

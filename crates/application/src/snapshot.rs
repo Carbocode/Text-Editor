@@ -67,6 +67,7 @@ pub struct Activity {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppSnapshot {
+    pub git: Arc<crate::GitSnapshot>,
     /// Opaque diagnostics correlation; never used to resolve commands.
     pub diagnostic_operation: u64,
     /// Increments once per committed command or projection.

@@ -42,6 +42,8 @@ Item {
     property string fileNameQuery: ""
     readonly property string fileFilter: controller ? controller.file_filter_query : ""
     onSidebarTabChanged: {
+        if (controller) controller.set_git_visible(sidebarTab === WorkspacePane.Git)
+        if (sidebarTab === WorkspacePane.Git && controller && !controller.move_pending) controller.refresh_git()
         scheduleSidebarUpdate()
         if (sidebarTab === WorkspacePane.Files) Qt.callLater(root.restoreFileTreeSelection)
     }
@@ -1344,7 +1346,7 @@ Item {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
                                 anchors.bottom: parent.bottom
-                                visible: root.sidebarTab >= WorkspacePane.Git
+                                visible: root.sidebarTab > WorkspacePane.Git
                                 Kirigami.PlaceholderMessage {
                                     anchors.centerIn: parent
                                     width: parent.width - Kirigami.Units.largeSpacing * 2
@@ -1352,6 +1354,16 @@ Item {
                                     icon.name: root.sidebarSections[root.sidebarTab]?.icon ?? ""
                                     explanation: root.sidebarSections[root.sidebarTab]?.explanation ?? ""
                                 }
+                            }
+                            GitPanel {
+                                objectName: "gitPanel"
+                                anchors.top: sidebarHeader.bottom
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                anchors.margins: Kirigami.Units.smallSpacing
+                                visible: root.sidebarTab === WorkspacePane.Git
+                                controller: root.controller
                             }
                             TreeView {
                                 id: fileTree
