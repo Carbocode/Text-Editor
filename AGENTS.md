@@ -8,5 +8,6 @@ Use the repository skill [editor-change](.agents/skills/editor-change/SKILL.md) 
 - Reuse `domain::path`, `AppSnapshot` sidebar methods, shared icons and confirmation text. A new command must make all exhaustive policy matches compile. Do not add wildcard command fallbacks.
 - DRY and KISS: remove duplicate rules, use the smallest abstraction justified by current callers, and keep dependencies pointing inward. Do not introduce a generic framework for a single feature.
 - Verify with `cargo xtask architecture` and `cargo xtask verify core`; run the adapter checks and relevant native smoke tests when that boundary changes. Build/run commands intentionally do not run tests.
+- Use `cargo xtask build <target>` or `cargo xtask run <frontend>` for builds. These pipelines check build-cache size and automatically clean at the end above 8 GiB (`NATIVE_WORKSPACE_BUILD_CACHE_LIMIT_MB` overrides the threshold), preserving final binaries and libraries. Raw `cargo build` bypasses this maintenance.
 
 Use standard Cargo formatting and warnings-denied Clippy. New behavior tests belong beside the owning module or in `application/src/tests`; toolkit regression drivers live in each app's test area. Preserve the actual failure/concurrency cases when migrating tests to a new API.

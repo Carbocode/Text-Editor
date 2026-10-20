@@ -42,9 +42,52 @@ cargo xtask run macos --dry-run
 cargo xtask verify core --dry-run
 ```
 
-The dry run lists task steps; the macOS build and smoke steps are shell scripts. `apps/macos/build.sh` compiles and packages, `apps/macos/start.sh` launches, and `apps/macos/test.sh` compiles and executes smoke tests against an already built bridge. `apps/macos/run.sh` composes build and start. The normal frontend builds still include Developer Tools, but never execute tests.
+The dry run lists task steps; the macOS packaging and smoke steps are shell scripts. `apps/macos/build.sh` enters the xtask build pipeline, which calls `apps/macos/package-build.sh` to compile and package, `apps/macos/start.sh` launches, and `apps/macos/test.sh` compiles and executes smoke tests against an already built bridge. `apps/macos/run.sh` composes build and start. The normal frontend builds still include Developer Tools, but never execute tests.
 
 Existing action-target commands (`build-macos`, `run-macos`, `build-gnome`, `run-gnome`, `build-kde`, `run-kde`, `check-core`) remain aliases of the corresponding two-word commands. New tasks also support that spelling, for example `test-macos` and `verify-core`.
+
+## Build disk usage
+
+```sh
+cargo xtask cache              # disk usage, including Cargo target-dir overrides
+cargo xtask clean --dry-run    # preview removal of workspace Rust artifacts
+cargo xtask clean              # remove workspace artifacts, keep compiled dependencies
+cargo clean                   # reset the entire Rust build cache, including dependencies
+```
+
+Development and test builds disable incremental compilation and keep only line
+tables for workspace backtraces; dependencies omit debug information. This reduces
+disk usage at the cost of slower recompilation after edits and no local-variable
+inspection in a debugger. For a debugging session, set `CARGO_PROFILE_DEV_DEBUG=2`
+(or `CARGO_PROFILE_TEST_DEBUG=2` for tests). Dependency overrides still apply.
+
+Every `cargo xtask build` checks Cargo's target directory before and after the
+build. If either measurement exceeds **8 GiB**, it automatically resets the Rust
+cache at the end, after native packaging and before `run` starts the app. The same
+rule covers build aliases, builds within macOS test/verify, and the macOS shell
+build/run entry points. Failed builds also perform the final check and cleanup.
+Set `NATIVE_WORKSPACE_BUILD_CACHE_LIMIT_MB=4096` for a 4 GiB threshold; the value
+must be a positive integer in MiB. `--dry-run` lists the rule without cleaning.
+
+Automatic cleanup uses `cargo clean`, preserving profile-root binaries and
+libraries (including Swift bridge libraries and executable permissions) and the
+packaged macOS app. Dependencies, fingerprints, intermediate native objects and
+incremental caches are discarded, so the next build recompiles them. The threshold
+triggers cleanup; it is not a hard disk quota during compilation, and retained
+outputs may themselves exceed it. Standalone `cargo build`, check/lint/test tasks
+without a build step, and other worktrees are outside this rule.
+
+Build pipelines sharing a target directory serialize through a maintenance lock
+outside that directory. Do not run raw Cargo builds or manual cleanup concurrently
+with these pipelines. Each worktree has its own `target` by default; remove obsolete
+worktrees' build caches too.
+
+Run cleanup with builds and native packaging scripts stopped. `cargo xtask clean`
+preserves third-party dependencies but removes workspace binaries (including the
+xtask runner, rebuilt on its next invocation). `cargo clean` also preserves the
+Cargo download registry. Neither command removes the packaged macOS app in
+`apps/macos/.build`; remove that generated directory separately if needed, then
+use `cargo xtask build macos` to recreate it. `start` alone never triggers cleanup.
 
 ## Explicit GUI smoke modes
 
