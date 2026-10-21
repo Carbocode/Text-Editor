@@ -3,7 +3,7 @@ use std::process::ExitCode;
 pub const HELP: &str = "usage: cargo xtask <command> [target] [--dry-run]
 
 Commands:
-  build  <core|macos|gnome|kde|devtools|xtask>  Compile only
+  build  <core|macos|gnome|kde|devtools|xtask>  Compile + automatic cache maintenance
   start  <macos|gnome|kde>                    Open an existing build
   run    <macos|gnome|kde>                    Build, then start (no tests)
   check  <core|macos|gnome|kde|devtools|xtask>  Cargo type checking
@@ -13,12 +13,14 @@ Commands:
   verify <core|macos|gnome|kde|devtools|xtask>  fmt + check + lint + test
 
 Other commands:
+  cache         Report build directory disk usage
+  clean         Remove workspace Rust artifacts, preserving dependencies
   architecture  Check workspace dependency boundaries
   doctor [--strict macos|gnome|kde]
   devtools [--demo] | devtools-service | devtools-ui
 
 The action-target spelling remains available (e.g. run-macos, check-core).
---dry-run prints the task steps without building, launching or testing.
+--dry-run prints task steps or previews clean without deleting artifacts.
 GNOME/KDE GUI smoke modes remain separate; see docs/development.md.";
 
 const DEVTOOLS_BINARIES: &[&str] = &["native-workspace-devtools", "native-workspace-devtools-ui"];
@@ -26,6 +28,8 @@ const DEVTOOLS_BINARIES: &[&str] = &["native-workspace-devtools", "native-worksp
 #[derive(Debug, PartialEq)]
 enum Step {
     Architecture,
+    CacheBefore,
+    CacheAfter,
     Cargo { args: Vec<&'static str>, kde: bool },
     Shell(&'static str),
     Start { package: &'static str, kde: bool },
@@ -80,7 +84,7 @@ fn plan(action: &str, target: &str) -> Option<Vec<Step>> {
             kde: false,
         }]),
         "build" => match target {
-            "macos" => Some(vec![Step::Shell("apps/macos/build.sh")]),
+            "macos" => Some(vec![Step::Shell("apps/macos/package-build.sh")]),
             "gnome" | "kde" => Some(vec![
                 // Keep Qt compiler overrides out of DuckDB's build.
                 cargo("build", DEVTOOLS_BINARIES, false),
@@ -88,7 +92,12 @@ fn plan(action: &str, target: &str) -> Option<Vec<Step>> {
             ]),
             "devtools" => Some(vec![cargo("build", DEVTOOLS_BINARIES, false)]),
             _ => Some(vec![cargo("build", packages, false)]),
-        },
+        }
+        .map(|mut steps| {
+            steps.insert(0, Step::CacheBefore);
+            steps.push(Step::CacheAfter);
+            steps
+        }),
         "start" => match target {
             "macos" => Some(vec![Step::Shell("apps/macos/start.sh")]),
             "gnome" | "kde" => Some(vec![Step::Start {
@@ -128,6 +137,10 @@ impl Step {
     fn description(&self) -> String {
         match self {
             Self::Architecture => "cargo xtask architecture".to_owned(),
+            Self::CacheBefore => "check build cache size and lock build maintenance".to_owned(),
+            Self::CacheAfter => {
+                "clean build cache if threshold exceeded (preserve outputs)".to_owned()
+            }
             Self::Cargo { args, kde } => format!(
                 "cargo {}{}",
                 args.join(" "),
@@ -157,6 +170,9 @@ impl Step {
     fn execute(&self) -> ExitCode {
         match self {
             Self::Architecture => crate::architecture::check(),
+            Self::CacheBefore | Self::CacheAfter => {
+                unreachable!("cache steps require build context")
+            }
             Self::Cargo { args, kde: true } => crate::run_kde(args),
             Self::Cargo { args, kde: false } => crate::run("cargo", args),
             Self::Shell(script) => crate::run("sh", &[script]),
@@ -167,10 +183,38 @@ impl Step {
 
 pub fn execute(action: &str, target: &str, dry_run: bool) -> Option<ExitCode> {
     let steps = plan(action, target)?;
+    let mut cache = None;
     for step in steps {
         println!("{}", step.description());
-        if !dry_run && step.execute() != ExitCode::SUCCESS {
-            return Some(ExitCode::FAILURE);
+        if dry_run {
+            continue;
+        }
+        match step {
+            Step::CacheBefore => match crate::cache::BuildCache::begin() {
+                Ok(context) => cache = Some(context),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return Some(ExitCode::FAILURE);
+                }
+            },
+            Step::CacheAfter => {
+                if let Some(context) = cache.take()
+                    && let Err(error) = context.finish()
+                {
+                    eprintln!("{error}");
+                    return Some(ExitCode::FAILURE);
+                }
+            }
+            _ => {
+                if step.execute() != ExitCode::SUCCESS {
+                    if let Some(context) = cache.take()
+                        && let Err(error) = context.finish()
+                    {
+                        eprintln!("{error}");
+                    }
+                    return Some(ExitCode::FAILURE);
+                }
+            }
         }
     }
     Some(ExitCode::SUCCESS)
@@ -207,7 +251,7 @@ mod tests {
                         assert!(!content.contains("test.sh"));
                         assert!(!content.contains("cargo test"));
                     }
-                    Step::Start { .. } => {}
+                    Step::Start { .. } | Step::CacheBefore | Step::CacheAfter => {}
                     Step::Architecture => panic!("launch must not verify architecture"),
                 }
             }
@@ -225,8 +269,10 @@ mod tests {
             assert_eq!(plan("verify", target).unwrap(), expected);
         }
         let mac_tests = plan("test", "macos").unwrap();
-        assert_eq!(mac_tests[1], Step::Shell("apps/macos/build.sh"));
-        assert_eq!(mac_tests[2], Step::Shell("apps/macos/test.sh"));
+        assert_eq!(mac_tests[1], Step::CacheBefore);
+        assert_eq!(mac_tests[2], Step::Shell("apps/macos/package-build.sh"));
+        assert_eq!(mac_tests[3], Step::CacheAfter);
+        assert_eq!(mac_tests[4], Step::Shell("apps/macos/test.sh"));
     }
 
     #[test]

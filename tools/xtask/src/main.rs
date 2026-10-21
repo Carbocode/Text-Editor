@@ -4,6 +4,7 @@ use std::{
 };
 
 mod architecture;
+mod cache;
 #[cfg(any(target_os = "macos", test))]
 mod qt;
 mod tasks;
@@ -228,8 +229,21 @@ fn main() -> ExitCode {
     {
         return result;
     }
+    match args.as_slice() {
+        [cmd] if cmd == "cache" => return cache::status(),
+        [cmd] if cmd == "clean" => {
+            return if dry_run {
+                run("cargo", &["clean", "--workspace", "--dry-run"])
+            } else {
+                run("cargo", &["clean", "--workspace"])
+            };
+        }
+        _ => {}
+    }
     if dry_run {
-        eprintln!("--dry-run requires a build, start, run, check, lint, test, fmt or verify task.");
+        eprintln!(
+            "--dry-run requires a build, start, run, check, lint, test, fmt, verify or clean task."
+        );
         return ExitCode::FAILURE;
     }
     match args.as_slice() {

@@ -1,4 +1,5 @@
 /target/
+.*.native-workspace-build.lock
 /apps/macos/.build/
 /apps/macos/generated/
 .DS_Store

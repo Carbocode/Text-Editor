@@ -8,7 +8,16 @@ edition = "2024"
 license = "MIT"
 version = "0.1.0"
 
-# Bundled DuckDB C++ debug symbols dwarf the developer binaries. Keep its code
-# unoptimized for dev checks while avoiding multi-gigabyte duplicate native caches.
+# Keep backtrace locations without full type/variable debug information. The test
+# profile inherits dev, so builds, checks and tests use the same space policy.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+# Dependencies rarely need source debugging, and dominate the build directory.
+[profile.dev.package."*"]
+debug = false
+
+# Also suppress bundled DuckDB's native C++ debug symbols.
 [profile.dev.package.libduckdb-sys]
 debug = false
